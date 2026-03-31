@@ -200,7 +200,7 @@ verify_artifacts() {
     tar -tzf "$CLI_ARCHIVE" | grep -q "^mlx-swift_Cmlx.bundle/$" || fail "CLI archive missing mlx-swift_Cmlx.bundle"
 
     pkgutil --payload-files "$PKG_FILE" | grep -q "^\./usr/local/bin/${CLI_NAME}$" || fail "pkg missing ${CLI_NAME} payload"
-    pkgutil --payload-files "$PKG_FILE" | grep -q "^\./usr/local/bin/mlx-swift_Cmlx.bundle/default.metallib$" || fail "pkg missing MLX shader payload"
+    pkgutil --payload-files "$PKG_FILE" | grep -qE "^\./usr/local/bin/mlx-swift_Cmlx\.bundle/.*default\.metallib$" || fail "pkg missing MLX shader payload"
 
     "${CLI_STAGING_DIR}/${CLI_NAME}" --version >/dev/null
     ok "Artifact verification passed"
