@@ -5,8 +5,20 @@ import Foundation
 
 /// Utility to wrap shell commands in a macOS Seatbelt sandbox using `sandbox-exec`.
 public struct SandboxEngine: Sendable {
-    
-    public init() {}
+
+    /// Controls whether outbound network connections are permitted inside the sandbox.
+    public enum NetworkPolicy: Sendable {
+        /// Allow all outbound network connections (default; preserves legacy behaviour).
+        case allow
+        /// Deny all network connections inside the sandbox.
+        case deny
+    }
+
+    private let networkPolicy: NetworkPolicy
+
+    public init(networkPolicy: NetworkPolicy = .allow) {
+        self.networkPolicy = networkPolicy
+    }
     
     /// Wraps a command string with `sandbox-exec` and a dynamically generated permissive profile.
     /// 
@@ -30,7 +42,15 @@ public struct SandboxEngine: Sendable {
     
     /// Generates a Seatbelt profile string.
     private func generateProfile(workspaceRoot: String) -> String {
-        """
+        let networkRule: String
+        switch networkPolicy {
+        case .allow:
+            networkRule = "(allow network*)"
+        case .deny:
+            networkRule = ";; Network connections denied by policy\n        (deny network*)"
+        }
+
+        return """
         (version 1)
         (allow default)
         
@@ -51,7 +71,7 @@ public struct SandboxEngine: Sendable {
         
         ;; Allow process execution and networking (permissive-open style)
         (allow process*)
-        (allow network*)
+        \(networkRule)
         """
     }
 }

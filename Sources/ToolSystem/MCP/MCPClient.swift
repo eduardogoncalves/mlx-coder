@@ -238,7 +238,19 @@ public struct MCPClient: Sendable {
         process.executableURL = URL(filePath: "/usr/bin/env")
         process.arguments = [config.command] + config.arguments
 
-        var env = ProcessInfo.processInfo.environment
+        // Start from a minimal, whitelisted environment to avoid inheriting dangerous variables
+        // (e.g. LD_LIBRARY_PATH, DYLD_INSERT_LIBRARIES) from the parent process, matching the
+        // same isolation approach used in BashTool.
+        let safeEnvKeys = ["HOME", "USER", "LANG", "LC_ALL", "TERM"]
+        var env: [String: String] = [:]
+        for key in safeEnvKeys {
+            if let value = ProcessInfo.processInfo.environment[key] {
+                env[key] = value
+            }
+        }
+        // Always use a known-safe PATH regardless of the parent environment.
+        env["PATH"] = "/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+        // Apply user-configured environment variables on top of the safe baseline.
         for (key, value) in config.environment {
             env[key] = value
         }
@@ -382,6 +394,9 @@ public struct MCPClient: Sendable {
 
         guard let url = URL(string: raw) else {
             throw Error.invalidEndpoint(raw)
+        }
+        guard let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https" else {
+            throw Error.invalidEndpoint("Only http and https endpoints are supported; got '\(url.scheme ?? "(none)")'")
         }
         return .http(url)
     }
