@@ -37,7 +37,7 @@ mlx-coder is designed for local LLM workflows on macOS with a native, in-process
 
 ## Vulnerability Disclosures
 
-This project has implemented fixes for the following vulnerability categories:
+This project has implemented fixes for the following vulnerability categories.
 
 ### Critical Vulnerabilities (Fixed)
 
@@ -53,21 +53,39 @@ This project has implemented fixes for the following vulnerability categories:
    - **Fix**: Use `resolvingSymlinksInPath()` to fully resolve all symbolic links
    - **Status**: ✅ Fixed
 
-### High Vulnerabilities (Fixed)
-
-3. **Unsafe Environment Variable Inheritance (CWE-15)**
-   - **Issue**: Child processes inherited full parent environment
-   - **Risk**: Library injection via `LD_LIBRARY_PATH`, shell escaping via `IFS`/`PS4`
-   - **Fix**: Whitelist safe environment variables only
+3. **Server-Side Request Forgery / SSRF (CWE-918)**
+   - **Issue**: `WebFetchTool` accepted arbitrary URLs without validating the target host, allowing requests to loopback addresses, private network ranges, and cloud-provider metadata endpoints (e.g. `169.254.169.254`)
+   - **Risk**: Exfiltration of instance metadata, access to internal services, port scanning of private networks
+   - **Fix**: `URLFetchValidator` enforces HTTP/HTTPS-only schemes and rejects loopback (`127.x`, `::1`, `localhost`), link-local/metadata (`169.254.x.x`), and all RFC 1918 private ranges (`10.x`, `172.16-31.x`, `192.168.x`)
    - **Status**: ✅ Fixed
 
-4. **Symlink Following in File Operations (CWE-59)**
+### High Vulnerabilities (Fixed)
+
+4. **Unsafe Environment Variable Inheritance (CWE-15)**
+   - **Issue**: Child processes inherited full parent environment
+   - **Risk**: Library injection via `LD_LIBRARY_PATH`, shell escaping via `IFS`/`PS4`
+   - **Fix**: Whitelist safe environment variables only (applied to both `BashTool` shell commands and MCP stdio processes)
+   - **Status**: ✅ Fixed
+
+5. **MCP Endpoint Scheme Injection (CWE-918)**
+   - **Issue**: `MCPClient` accepted any URL scheme for HTTP transport endpoints, including `file://` and custom schemes
+   - **Risk**: Local file exfiltration or exploitation of custom protocol handlers
+   - **Fix**: `resolveTransport` validates that only `http://` and `https://` schemes are accepted; all other schemes throw `invalidEndpoint`
+   - **Status**: ✅ Fixed
+
+6. **Workspace Config Security Downgrade (CWE-284)**
+   - **Issue**: A workspace-local `.mlx-coder-config.json` could override the user's global `defaultApprovalMode` to `yolo` (no-prompt) or disable `defaultSandbox`, silently reducing security without user awareness
+   - **Risk**: Malicious or misconfigured workspace configs could disable security guardrails, enabling arbitrary command execution without user approval
+   - **Fix**: `RuntimeConfigLoader.loadMerged` now applies a security-floor policy: approval mode always uses the *more restrictive* value between user and workspace configs; sandbox is kept enabled if the user's global config enables it
+   - **Status**: ✅ Fixed
+
+7. **Symlink Following in File Operations (CWE-59)**
    - **Issue**: Directory listing and writes followed symlinks without validation
    - **Risk**: Revealing system structure, overwriting out-of-workspace files
    - **Fix**: Validate symlinks at each step, skip items that fail validation
    - **Status**: ✅ Fixed
 
-5. **Weak JSON Deserialization (CWE-20)**
+8. **Weak JSON Deserialization (CWE-20)**
    - **Issue**: JSON parser accepted malformed inputs via token-appending fallbacks
    - **Risk**: Injection of unexpected payloads, logic bypass
    - **Fix**: Enforce strict JSON-only parsing, remove fallback modes
@@ -75,31 +93,31 @@ This project has implemented fixes for the following vulnerability categories:
 
 ### Medium Vulnerabilities (Fixed)
 
-6. **Information Disclosure in Error Messages (CWE-209)**
+9. **Information Disclosure in Error Messages (CWE-209)**
    - **Issue**: Error messages exposed full filesystem paths and implementation details
    - **Risk**: Information gathering for targeted attacks
    - **Fix**: Generic error messages, internal logging only
    - **Status**: ✅ Fixed
 
-7. **Unsafe Type Casting (CWE-179)**
-   - **Issue**: Forced cast `as!` in code search deduplication
-   - **Risk**: Potential crashes from type inconsistency
-   - **Fix**: Safe cast with fallback to original results
-   - **Status**: ✅ Fixed
+10. **Unsafe Type Casting (CWE-179)**
+    - **Issue**: Forced cast `as!` in code search deduplication
+    - **Risk**: Potential crashes from type inconsistency
+    - **Fix**: Safe cast with fallback to original results
+    - **Status**: ✅ Fixed
 
-8. **Glob Pattern Bypass (CWE-433)**
-   - **Issue**: Simple regex substitution for glob matching
-   - **Risk**: Bypass allow/deny rules with regex metacharacters
-   - **Fix**: Use fnmatch(3) for proper POSIX glob semantics
-   - **Status**: ✅ Fixed
+11. **Glob Pattern Bypass (CWE-433)**
+    - **Issue**: Simple regex substitution for glob matching
+    - **Risk**: Bypass allow/deny rules with regex metacharacters
+    - **Fix**: Use fnmatch(3) for proper POSIX glob semantics
+    - **Status**: ✅ Fixed
 
-9. **Regex Template Injection (CWE-94)**
-   - **Issue**: Regex template substitution could leak capture groups
-   - **Risk**: Information disclosure or unexpected behavior
-   - **Fix**: Use direct string replacement instead of templates
-   - **Status**: ✅ Fixed
+12. **Regex Template Injection (CWE-94)**
+    - **Issue**: Regex template substitution could leak capture groups
+    - **Risk**: Information disclosure or unexpected behavior
+    - **Fix**: Use direct string replacement instead of templates
+    - **Status**: ✅ Fixed
 
-10. **Missing Model Integrity Verification (CWE-353)**
+13. **Missing Model Integrity Verification (CWE-353)**
     - **Issue**: No validation that model files haven't been tampered with
     - **Risk**: Running backdoored model weights
     - **Fix**: Document requirement for model hash verification
@@ -118,7 +136,7 @@ This project has implemented fixes for the following vulnerability categories:
 
 ### Sandbox Functionality
 - Seatbelt sandboxing works on macOS 10.5+
-- Sandbox configuration is permissive for AI tooling flexibility
+- Default sandbox profile allows network access for AI tooling flexibility; set `networkPolicy: .deny` on `SandboxEngine` to block outbound connections for offline workloads
 - More restrictive profiles can be implemented if needed
 
 ## Responsible Disclosure
@@ -153,8 +171,9 @@ Tests cover:
 - [ ] Model file integrity verification (SHA256 hashes)
 - [ ] Support for user-configurable sandbox profiles
 - [ ] Rate limiting on tool execution
-- [ ] Audit logging for sensitive operations
 - [ ] Formal security audit by third party
+- [ ] CPU/memory resource limits for sandboxed shell commands via `setrlimit(2)` or launchd job policies
+- [ ] SSRF protection for `WebSearchTool` (apply same `URLFetchValidator` logic)
 
 ## References
 

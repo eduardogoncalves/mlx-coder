@@ -91,6 +91,128 @@ final class RuntimeConfigTests: XCTestCase {
         XCTAssertEqual(merged.defaultAuditLogPath, "user-audit.jsonl")
     }
 
+    // MARK: - Security: workspace must not weaken security settings
+
+    func testWorkspaceCannotDowngradeApprovalModeToYolo() throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("runtime-config-security-upgrade-tests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let userPath = tempDir.appendingPathComponent("user.json").path
+        let workspacePath = tempDir.appendingPathComponent("workspace.json").path
+
+        // User is in default (safe) mode; workspace tries to switch to yolo (no prompts).
+        let userJSON = """
+        { "defaultApprovalMode": "default" }
+        """
+        let workspaceJSON = """
+        { "defaultApprovalMode": "yolo" }
+        """
+
+        try userJSON.write(toFile: userPath, atomically: true, encoding: .utf8)
+        try workspaceJSON.write(toFile: workspacePath, atomically: true, encoding: .utf8)
+
+        let merged = RuntimeConfigLoader.loadMerged(
+            workspaceRoot: tempDir.path,
+            userConfigPath: userPath,
+            workspaceConfigPath: workspacePath
+        )
+
+        // Workspace's "yolo" must be ignored; user's "default" (more restrictive) must win.
+        XCTAssertEqual(merged.defaultApprovalMode, "default",
+            "Workspace config must not downgrade approval mode from 'default' to 'yolo'")
+    }
+
+    func testWorkspaceCannotDowngradeApprovalModeFromAutoEditToYolo() throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("runtime-config-security-autoedit-tests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let userPath = tempDir.appendingPathComponent("user.json").path
+        let workspacePath = tempDir.appendingPathComponent("workspace.json").path
+
+        let userJSON = """
+        { "defaultApprovalMode": "auto-edit" }
+        """
+        let workspaceJSON = """
+        { "defaultApprovalMode": "yolo" }
+        """
+
+        try userJSON.write(toFile: userPath, atomically: true, encoding: .utf8)
+        try workspaceJSON.write(toFile: workspacePath, atomically: true, encoding: .utf8)
+
+        let merged = RuntimeConfigLoader.loadMerged(
+            workspaceRoot: tempDir.path,
+            userConfigPath: userPath,
+            workspaceConfigPath: workspacePath
+        )
+
+        XCTAssertEqual(merged.defaultApprovalMode, "auto-edit",
+            "Workspace config must not downgrade approval mode from 'auto-edit' to 'yolo'")
+    }
+
+    func testWorkspaceCannotDisableSandboxWhenUserHasEnabledIt() throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("runtime-config-sandbox-tests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let userPath = tempDir.appendingPathComponent("user.json").path
+        let workspacePath = tempDir.appendingPathComponent("workspace.json").path
+
+        // User has explicitly enabled sandboxing globally.
+        let userJSON = """
+        { "defaultSandbox": true }
+        """
+        let workspaceJSON = """
+        { "defaultSandbox": false }
+        """
+
+        try userJSON.write(toFile: userPath, atomically: true, encoding: .utf8)
+        try workspaceJSON.write(toFile: workspacePath, atomically: true, encoding: .utf8)
+
+        let merged = RuntimeConfigLoader.loadMerged(
+            workspaceRoot: tempDir.path,
+            userConfigPath: userPath,
+            workspaceConfigPath: workspacePath
+        )
+
+        XCTAssertEqual(merged.defaultSandbox, true,
+            "Workspace config must not disable sandboxing that the user has explicitly enabled")
+    }
+
+    func testWorkspaceCanEnableSandboxWhenUserHasDisabledIt() throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("runtime-config-sandbox-enable-tests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let userPath = tempDir.appendingPathComponent("user.json").path
+        let workspacePath = tempDir.appendingPathComponent("workspace.json").path
+
+        let userJSON = """
+        { "defaultSandbox": false }
+        """
+        let workspaceJSON = """
+        { "defaultSandbox": true }
+        """
+
+        try userJSON.write(toFile: userPath, atomically: true, encoding: .utf8)
+        try workspaceJSON.write(toFile: workspacePath, atomically: true, encoding: .utf8)
+
+        let merged = RuntimeConfigLoader.loadMerged(
+            workspaceRoot: tempDir.path,
+            userConfigPath: userPath,
+            workspaceConfigPath: workspacePath
+        )
+
+        // Workspace enabling sandbox (more restrictive) is allowed.
+        XCTAssertEqual(merged.defaultSandbox, true,
+            "Workspace config should be able to enable sandboxing even when user has it disabled")
+    }
+
     func testRuntimeConfigDecodesCommandBasedMCPServerWithoutEndpoint() throws {
         let tempDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("runtime-config-command-tests-\(UUID().uuidString)", isDirectory: true)

@@ -108,12 +108,47 @@ enum RuntimeConfigLoader {
         return RuntimeConfig(
             mcpServers: mergedServers,
             mcpSettings: mergedMCPSettings,
-            defaultApprovalMode: workspaceConfig.defaultApprovalMode ?? userConfig.defaultApprovalMode,
-            defaultSandbox: workspaceConfig.defaultSandbox ?? userConfig.defaultSandbox,
+            defaultApprovalMode: mergeApprovalMode(
+                user: userConfig.defaultApprovalMode,
+                workspace: workspaceConfig.defaultApprovalMode
+            ),
+            defaultSandbox: mergeSandbox(
+                user: userConfig.defaultSandbox,
+                workspace: workspaceConfig.defaultSandbox
+            ),
             defaultDryRun: workspaceConfig.defaultDryRun ?? userConfig.defaultDryRun,
             defaultPolicyFile: workspaceConfig.defaultPolicyFile ?? userConfig.defaultPolicyFile,
             defaultAuditLogPath: workspaceConfig.defaultAuditLogPath ?? userConfig.defaultAuditLogPath
         )
+    }
+
+    /// Merges approval-mode settings, always favouring the **more restrictive** value.
+    ///
+    /// Restrictiveness order (high → low): `default` > `auto-edit` > `yolo`.
+    /// This prevents a malicious or misconfigured workspace config from silently
+    /// escalating privileges by switching the agent to `yolo` mode.
+    private static func mergeApprovalMode(user: String?, workspace: String?) -> String? {
+        guard let userMode = user, let workspaceMode = workspace else {
+            return workspace ?? user
+        }
+        let order: [String: Int] = ["yolo": 0, "auto-edit": 1, "default": 2]
+        let userLevel = order[userMode, default: 2]
+        let workspaceLevel = order[workspaceMode, default: 2]
+        // Return the mode with the higher (more restrictive) level.
+        return workspaceLevel > userLevel ? workspaceMode : userMode
+    }
+
+    /// Merges sandbox flags, always preferring `true` (sandbox enabled) over `false`.
+    ///
+    /// A workspace config must not be able to disable sandboxing that the user
+    /// has explicitly enabled in their global config.
+    private static func mergeSandbox(user: Bool?, workspace: Bool?) -> Bool? {
+        switch (user, workspace) {
+        case (.some(true), _):  return true   // user enabled → keep enabled regardless of workspace
+        case (_, .some(true)):  return true   // workspace enables → allow (it's more restrictive)
+        case (.some(false), _): return workspace ?? false  // user disabled → workspace can still enable
+        default:                return workspace ?? user
+        }
     }
 
     private static func load(path: String) -> RuntimeConfig {

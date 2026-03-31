@@ -112,4 +112,47 @@ final class MCPClientTests: XCTestCase {
             XCTAssertTrue(error is URLError)
         }
     }
-}
+
+    func testConnectRejectsNonHTTPSchemeEndpoint() async {
+        let config = MCPClient.ServerConfig(
+            name: "file-scheme",
+            command: "",
+            endpointURL: "file:///etc/passwd"
+        )
+
+        do {
+            _ = try await MCPClient.connect(to: config)
+            XCTFail("Expected MCPClient.connect to reject file:// endpoint")
+        } catch let error as MCPClient.Error {
+            switch error {
+            case .invalidEndpoint:
+                XCTAssertTrue(true)
+            default:
+                XCTFail("Expected invalidEndpoint error, got \(error)")
+            }
+        } catch {
+            XCTFail("Unexpected error type: \(error)")
+        }
+    }
+
+    func testConnectRejectsFTPSchemeEndpoint() async {
+        let config = MCPClient.ServerConfig(
+            name: "ftp-scheme",
+            command: "",
+            endpointURL: "ftp://example.com/server"
+        )
+
+        do {
+            _ = try await MCPClient.connect(to: config)
+            XCTFail("Expected MCPClient.connect to reject ftp:// endpoint")
+        } catch let error as MCPClient.Error {
+            switch error {
+            case .invalidEndpoint:
+                XCTAssertTrue(true)
+            default:
+                XCTFail("Expected invalidEndpoint error, got \(error)")
+            }
+        } catch {
+            XCTFail("Unexpected error type: \(error)")
+        }
+    }}
