@@ -1,7 +1,7 @@
 // Tests/ToolSystemTests/ToolCallParserTests.swift
 
 import XCTest
-@testable import NativeAgent
+@testable import MLXCoder
 
 final class ToolCallParserTests: XCTestCase {
 

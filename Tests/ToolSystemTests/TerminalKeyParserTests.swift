@@ -1,5 +1,5 @@
 import XCTest
-@testable import NativeAgent
+@testable import MLXCoder
 
 final class TerminalKeyParserTests: XCTestCase {
     func testClassifyEscapeSequenceBare() {

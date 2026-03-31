@@ -43,7 +43,7 @@ xcodebuild -scheme MLXCoder -configuration Release -destination 'platform=macOS'
 The compiled binary will be located at:
 
 ```
-.build/xcode/Build/Products/Release/NativeAgent
+.build/xcode/Build/Products/Release/MLXCoder
 ```
 
 > **Note:** The first build may take several minutes while Xcode fetches and compiles the dependencies (MLX, MLXLLM, ArgumentParser, Yams).

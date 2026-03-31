@@ -1,5 +1,5 @@
 import XCTest
-@testable import NativeAgent
+@testable import MLXCoder
 
 final class ConversationHistoryTests: XCTestCase {
     func testMarkdownTranscriptIncludesRolesAndContent() {
@@ -10,7 +10,7 @@ final class ConversationHistoryTests: XCTestCase {
 
         let markdown = history.asMarkdownTranscript()
 
-        XCTAssertTrue(markdown.contains("# NativeAgent Session Transcript"))
+        XCTAssertTrue(markdown.contains("# mlx-coder Session Transcript"))
         XCTAssertTrue(markdown.contains("## 1. System"))
         XCTAssertTrue(markdown.contains("## 2. User"))
         XCTAssertTrue(markdown.contains("## 3. Assistant"))

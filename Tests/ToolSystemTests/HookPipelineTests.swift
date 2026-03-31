@@ -1,5 +1,5 @@
 import XCTest
-@testable import NativeAgent
+@testable import MLXCoder
 
 private actor HookEventCollector {
     private(set) var events: [String] = []

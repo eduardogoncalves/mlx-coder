@@ -1,4 +1,4 @@
-// Sources/MLXCoder/NativeAgentCLI.swift
+// Sources/MLXCoder/MLXCoderCLI.swift
 // Entry point for the mlx-coder terminal agent
 
 import ArgumentParser

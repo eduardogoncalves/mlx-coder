@@ -1,5 +1,5 @@
 import XCTest
-@testable import NativeAgent
+@testable import MLXCoder
 
 final class LSPDiagnosticsManualTests: XCTestCase {
     // Temporary manual harness workspace. Override with
