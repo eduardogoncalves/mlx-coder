@@ -66,7 +66,7 @@ public final class ModelLoader: Sendable {
         #endif
 
         // Start spinner
-        let spinnerMessage = usesHubID ? "Downloading/loading model from Hugging Face..." : "Loading model from disk..."
+        let spinnerMessage = usesHubID ? "Checking Hugging Face model..." : "Loading model from disk..."
         let spinner = Spinner(message: spinnerMessage)
         await spinner.start()
 
@@ -81,9 +81,16 @@ public final class ModelLoader: Sendable {
         } else {
             configuration = ModelConfiguration(directory: modelURL)
         }
+
+        let progressTracker = DownloadProgressTracker()
         let container = try await LLMModelFactory.shared.loadContainer(
             hub: .init(downloadBase: modelsBaseURL),
-            configuration: configuration
+            configuration: configuration,
+            progressHandler: { progress in
+                guard usesHubID else { return }
+                let message = progressTracker.formattedStatus(for: progress)
+                Task { await spinner.updateMessage(message) }
+            }
         )
 
         return container
@@ -109,6 +116,76 @@ public final class ModelLoader: Sendable {
         MLX.eval(MLX.matmul(a, b))
     }
     #endif
+}
+
+// MARK: - Download Progress
+
+/// Tracks download progress for Hub model downloads and formats status messages
+/// with bytes downloaded, total size, percentage, and current speed.
+private final class DownloadProgressTracker: @unchecked Sendable {
+    private let lock = NSLock()
+    private var startTime: Date?
+
+    /// Minimum elapsed time before a speed estimate is shown, to avoid
+    /// misleadingly high values from a tiny early-burst sample.
+    private static let minimumElapsedTimeForSpeedCalculation: TimeInterval = 0.5
+
+    /// Returns a human-readable status string based on the current `Progress` snapshot.
+    ///
+    /// This method is called from a fire-and-forget `Task` that updates the `Spinner`
+    /// actor. Because `Spinner.updateMessage` simply overwrites the stored message, any
+    /// out-of-order delivery is harmless — the spinner always displays whatever was set
+    /// most recently when it next redraws (every ~80 ms).
+    func formattedStatus(for progress: Progress) -> String {
+        lock.lock()
+        defer { lock.unlock() }
+
+        let now = Date()
+        if startTime == nil {
+            startTime = now
+        }
+
+        let completed = progress.completedUnitCount
+        let total = progress.totalUnitCount
+
+        // Total unknown – just show a generic message
+        guard total > 0 else {
+            return "Downloading model from Hugging Face..."
+        }
+
+        // Download fully complete – hand off to the weight-loading phase
+        let pct = Int(Double(completed) / Double(total) * 100)
+        if pct >= 100 {
+            return "Loading model weights..."
+        }
+
+        let completedStr = Self.formatBytes(completed)
+        let totalStr = Self.formatBytes(total)
+
+        var speedPart = ""
+        if let start = startTime {
+            let elapsed = now.timeIntervalSince(start)
+            if elapsed > Self.minimumElapsedTimeForSpeedCalculation && completed > 0 {
+                let bytesPerSec = Double(completed) / elapsed
+                speedPart = " at \(Self.formatBytes(Int64(bytesPerSec)))/s"
+            }
+        }
+
+        return "Downloading: \(completedStr) / \(totalStr) (\(pct)%)\(speedPart)"
+    }
+
+    private static func formatBytes(_ bytes: Int64) -> String {
+        let value = Double(bytes)
+        if value >= 1_073_741_824 {
+            return String(format: "%.1f GB", value / 1_073_741_824)
+        } else if value >= 1_048_576 {
+            return String(format: "%.1f MB", value / 1_048_576)
+        } else if value >= 1_024 {
+            return String(format: "%.1f KB", value / 1_024)
+        } else {
+            return "\(bytes) B"
+        }
+    }
 }
 
 // MARK: - Errors
