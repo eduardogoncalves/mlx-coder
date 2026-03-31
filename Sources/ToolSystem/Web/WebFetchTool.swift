@@ -57,7 +57,7 @@ extension WebFetchTool: ProgressReportingTool {
 
         var request = URLRequest(url: url)
         request.timeoutInterval = TimeInterval(timeout)
-        request.setValue("NativeAgent/0.1", forHTTPHeaderField: "User-Agent")
+        request.setValue("mlx-coder/0.1", forHTTPHeaderField: "User-Agent")
 
         do {
             reportProgress("sending request")

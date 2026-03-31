@@ -92,7 +92,7 @@ run() {
 # ── Validate inputs ────────────────────────────────────────────────────────
 if [[ -z "$VERSION" ]]; then
   if $BUILD_ONLY; then
-    BASE_VERSION=$(grep 'version: "' "${REPO_ROOT}/Sources/MLXCoder/NativeAgentCLI.swift" | grep -o 'version: "[^"]*"' | cut -d'"' -f2 | head -n 1 | sed -E 's/^([0-9]+\.[0-9]+\.[0-9]+).*/\1/')
+    BASE_VERSION=$(grep 'version: "' "${REPO_ROOT}/Sources/MLXCoder/MLXCoderCLI.swift" | grep -o 'version: "[^"]*"' | cut -d'"' -f2 | head -n 1 | sed -E 's/^([0-9]+\.[0-9]+\.[0-9]+).*/\1/')
     VERSION="${BASE_VERSION}.$(date +%Y%m%d%H%M)"
     log_info "No version specified for --build-only. Using generated version: ${VERSION}"
     TAG="v${VERSION}"
@@ -224,13 +224,13 @@ log_step "Step 3/5 – Build release binary (with Metal shader pre-warming)"
 
 if $BUILD_ONLY && [[ -n "${BASE_VERSION:-}" ]]; then
   if ! $DRY_RUN; then
-    log_info "Injecting version ${VERSION} into NativeAgentCLI.swift"
-    cp "${REPO_ROOT}/Sources/MLXCoder/NativeAgentCLI.swift" "/tmp/NativeAgentCLI.swift.bak"
+    log_info "Injecting version ${VERSION} into MLXCoderCLI.swift"
+    cp "${REPO_ROOT}/Sources/MLXCoder/MLXCoderCLI.swift" "/tmp/MLXCoderCLI.swift.bak"
     # Restore file on exit so we avoid committing dirty date versions
-    trap 'mv "/tmp/NativeAgentCLI.swift.bak" "${REPO_ROOT}/Sources/MLXCoder/NativeAgentCLI.swift"' EXIT
-    sed -i '' "s/version: \".*\"/version: \"${VERSION}\"/g" "${REPO_ROOT}/Sources/MLXCoder/NativeAgentCLI.swift"
+    trap 'mv "/tmp/MLXCoderCLI.swift.bak" "${REPO_ROOT}/Sources/MLXCoder/MLXCoderCLI.swift"' EXIT
+    sed -i '' "s/version: \".*\"/version: \"${VERSION}\"/g" "${REPO_ROOT}/Sources/MLXCoder/MLXCoderCLI.swift"
   else
-    log_info "[dry-run] Would inject version ${VERSION} into NativeAgentCLI.swift"
+    log_info "[dry-run] Would inject version ${VERSION} into MLXCoderCLI.swift"
   fi
 fi
 

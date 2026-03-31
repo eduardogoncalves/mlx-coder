@@ -1,7 +1,7 @@
 // Tests/ToolSystemTests/PermissionEngineTests.swift
 
 import XCTest
-@testable import NativeAgent
+@testable import MLXCoder
 
 final class PermissionEngineTests: XCTestCase {
 

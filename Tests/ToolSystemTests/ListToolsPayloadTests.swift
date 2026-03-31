@@ -1,5 +1,5 @@
 import XCTest
-@testable import NativeAgent
+@testable import MLXCoder
 
 private struct MockTool: Tool {
     let name: String

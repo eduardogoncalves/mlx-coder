@@ -1,5 +1,5 @@
 import XCTest
-@testable import NativeAgent
+@testable import MLXCoder
 
 final class ErrorDetectionModelsTests: XCTestCase {
     func testBuildErrorCreation() {

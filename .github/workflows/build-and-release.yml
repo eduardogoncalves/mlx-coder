@@ -115,10 +115,10 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
-          name: NativeAgent v${{ steps.vars.outputs.version }}
+          name: mlx-coder v${{ steps.vars.outputs.version }}
           files: release-files/*
           body: |
-            NativeAgent macOS Apple Silicon CLI artifacts.
+            mlx-coder macOS Apple Silicon CLI artifacts.
 
             Verify checksums before installation:
 

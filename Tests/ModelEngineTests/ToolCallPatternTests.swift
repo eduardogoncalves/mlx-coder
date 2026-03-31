@@ -1,7 +1,7 @@
 // Tests/ModelEngineTests/ToolCallPatternTests.swift
 
 import XCTest
-@testable import NativeAgent
+@testable import MLXCoder
 
 final class ToolCallPatternTests: XCTestCase {
 
