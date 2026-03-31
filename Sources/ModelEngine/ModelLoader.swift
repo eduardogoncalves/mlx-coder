@@ -34,7 +34,7 @@ public final class ModelLoader: Sendable {
     ) async throws -> ModelContainer {
         let expandedPath = NSString(string: path).expandingTildeInPath
         let modelURL = URL(filePath: expandedPath)
-        let modelsBaseURL = URL(filePath: NSString(string: "~/models").expandingTildeInPath)
+        let modelsBaseURL = URL(filePath: NSString(string: "~").expandingTildeInPath)
 
         let usesLocalDirectory = FileManager.default.fileExists(atPath: expandedPath)
         let usesHubID = !usesLocalDirectory && looksLikeHubModelID(path)
