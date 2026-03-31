@@ -22,10 +22,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Swift 6.2
+      - name: Set up Swift 6.1
         uses: swift-actions/setup-swift@v2
         with:
-          swift-version: "6.2"
+          swift-version: "6.1"
 
       - name: Determine version from tag
         id: vars
@@ -58,10 +58,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Swift 6.2
+      - name: Set up Swift 6.1
         uses: swift-actions/setup-swift@v2
         with:
-          swift-version: "6.2"
+          swift-version: "6.1"
 
       - name: Determine manual version
         id: vars
