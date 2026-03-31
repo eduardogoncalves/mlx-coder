@@ -8,7 +8,7 @@ let package = Package(
         .package(url: "https://github.com/ml-explore/mlx-swift", .upToNextMinor(from: "0.31.1")),
         .package(url: "https://github.com/ml-explore/mlx-swift-lm", branch: "main"),
         .package(url: "https://github.com/apple/swift-argument-parser", from: "1.3.0"),
-        .package(url: "https://github.com/jpsim/Yams", from: "5.0.0"),
+        .package(url: "https://github.com/jpsim/Yams", from: "6.2.1"),
     ],
     targets: [
         .executableTarget(
