@@ -10,11 +10,14 @@ on:
         description: "Release version (without v), used for manual runs"
         required: false
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   build-cli-tag:
     if: github.event_name == 'push'
     name: Build CLI (arm64)
-    runs-on: macos-14
+    runs-on: macos-latest
 
     steps:
       - uses: actions/checkout@v4
@@ -45,7 +48,7 @@ jobs:
   build-cli-manual:
     if: github.event_name == 'workflow_dispatch'
     name: Build CLI (manual)
-    runs-on: macos-14
+    runs-on: macos-latest
 
     steps:
       - uses: actions/checkout@v4
