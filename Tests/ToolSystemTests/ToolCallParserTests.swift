@@ -1,0 +1,79 @@
+// Tests/ToolSystemTests/ToolCallParserTests.swift
+
+import XCTest
+@testable import NativeAgent
+
+final class ToolCallParserTests: XCTestCase {
+
+    func testParseSimpleToolCall() {
+        let text = """
+        <tool_call>
+        {"name": "read_file", "arguments": {"path": "/tmp/test.txt"}}
+        </tool_call>
+        """
+        let calls = ToolCallParser.parse(text)
+        XCTAssertEqual(calls.count, 1)
+        XCTAssertEqual(calls.first?.name, "read_file")
+    }
+
+    func testParseMultipleToolCalls() {
+        let text = """
+        <tool_call>
+        {"name": "read_file", "arguments": {"path": "/tmp/a.txt"}}
+        </tool_call>
+        Some text in between.
+        <tool_call>
+        {"name": "write_file", "arguments": {"path": "/tmp/b.txt", "content": "hello"}}
+        </tool_call>
+        """
+        let calls = ToolCallParser.parse(text)
+        XCTAssertEqual(calls.count, 2)
+        XCTAssertEqual(calls[0].name, "read_file")
+        XCTAssertEqual(calls[1].name, "write_file")
+    }
+
+    func testContainsToolCall() {
+        XCTAssertTrue(ToolCallParser.containsToolCall("<tool_call>{}</tool_call>"))
+        XCTAssertFalse(ToolCallParser.containsToolCall("just normal text"))
+    }
+
+    func testStripThinking() {
+        let text = "<think>I need to think about this...</think>Here is my answer."
+        let stripped = ToolCallParser.stripThinking(text)
+        XCTAssertEqual(stripped, "Here is my answer.")
+    }
+
+    func testExtractThinking() {
+        let text = "<think>Internal reasoning here</think>Response"
+        let thinking = ToolCallParser.extractThinking(text)
+        XCTAssertEqual(thinking, "Internal reasoning here")
+    }
+    
+    func testRejectsMalformedJSONWithoutFallbackRepair() {
+        let missingBraceText = """
+        <tool_call>
+        {"name": "test_tool", "arguments": {"key": "value"}
+        </tool_call>
+        """
+        XCTAssertTrue(ToolCallParser.parse(missingBraceText).isEmpty)
+
+        let malformedStringText = """
+        <tool_call>
+        {"name": "write_file", "arguments": {"path": "test.txt", "content": "line1
+        line2"}}
+        </tool_call>
+        """
+        XCTAssertTrue(ToolCallParser.parse(malformedStringText).isEmpty)
+    }
+
+    func testParsesTruncatedToolBlockWhenJSONIsValid() {
+        let missingClosingTag = """
+        <tool_call>
+        {"name": "test_tool", "arguments": {"key": "value"}}
+        """
+        let calls = ToolCallParser.parse(missingClosingTag)
+        XCTAssertEqual(calls.count, 1)
+        XCTAssertEqual(calls[0].name, "test_tool")
+    }
+}
+

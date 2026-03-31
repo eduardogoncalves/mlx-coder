@@ -1,0 +1,1602 @@
+// Sources/AgentCore/AgentLoop.swift
+// Main inference loop: prompt → generate → parse → execute → repeat
+
+import Foundation
+import MLX
+import MLXLLM
+import MLXLMCommon
+import Darwin
+
+/// The main agent loop that orchestrates generation and tool execution.
+public actor AgentLoop {
+
+    private var modelContainer: ModelContainer
+    private let registry: ToolRegistry
+    private let permissions: PermissionEngine
+    private let renderer: StreamRenderer
+    private let auditLogger: ToolAuditLogger?
+    public private(set) var history: ConversationHistory
+    private let maxToolIterations: Int
+    private var autoApproveAllTools: Bool = false
+    private var useSandbox: Bool
+    private let modelPath: String
+    private let memoryLimit: Int?
+    private let cacheLimit: Int?
+    private let dryRun: Bool
+    private let hooks: HookPipeline
+    private let memoryPromptSection: String?
+    private let customizationPromptSection: String?
+    private let skillsMetadata: [SkillMetadata]
+    private var promptSectionTokenEstimates: [PromptSection: Int]
+    private let workspace: String
+    private let buildCheckManager: BuildCheckManager
+    private var gitOrchestrationManager: GitOrchestrationManager?
+    
+    // Tracking parameters to avoid unnecessary reloads
+    private var loadedModelPath: String?
+    private var loadedMemoryLimit: Int?
+    private var loadedCacheLimit: Int?
+    private var loadedKVBits: Int?
+    private var pendingReload: Bool = false
+    
+    public enum WorkingMode: String, Codable, Sendable {
+        case agent
+        case plan
+    }
+    
+    public enum ThinkingLevel: String, Codable, Sendable {
+        case fast
+        case low
+        case high
+    }
+    
+    public enum TaskType: String, Codable, Sendable {
+        case general
+        case coding
+        case reasoning
+    }
+
+    public enum ModelMode: String, Codable, Sendable, CaseIterable {
+        case planLow = "Plan (low)"
+        case planHigh = "Plan (high)"
+        case agentGeneralFast = "Agent (general/fast)"
+        case agentGeneralLow = "Agent (general/low)"
+        case agentCodingFast = "Agent (coding/fast)"
+        case agentCodingLow = "Agent (coding/low)"
+        case agentCodingHigh = "Agent (coding/high)"
+    }
+    
+    public private(set) var mode: WorkingMode = .plan
+    public private(set) var thinkingLevel: ThinkingLevel = .low
+    public private(set) var taskType: TaskType = .general
+    public private(set) var currentMode: ModelMode = .planLow
+    
+    private var currentGenerationConfig: GenerationEngine.Config
+    private let condensationConfig = ToolResultCondensationConfig()
+    private let contextReserveTokens: Int = 1024
+    private let contextKeepRecentMessages: Int = 12
+
+    public init(
+        modelContainer: ModelContainer,
+        registry: ToolRegistry,
+        permissions: PermissionEngine,
+        generationConfig: GenerationEngine.Config,
+        renderer: StreamRenderer,
+        systemPrompt: String,
+        modelPath: String,
+        workspace: String = ".",
+        useSandbox: Bool = false,
+        auditLogger: ToolAuditLogger? = nil,
+        dryRun: Bool = false,
+        hooks: HookPipeline = HookPipeline(),
+        memoryPromptSection: String? = nil,
+        customizationPromptSection: String? = nil,
+        skillsMetadata: [SkillMetadata] = [],
+        promptSectionTokenEstimates: [PromptSection: Int] = [:],
+        maxToolIterations: Int = 20,
+        memoryLimit: Int? = nil,
+        cacheLimit: Int? = nil
+    ) {
+        self.modelContainer = modelContainer
+        self.registry = registry
+        self.permissions = permissions
+        self.currentGenerationConfig = generationConfig
+        self.renderer = renderer
+        self.history = ConversationHistory(systemPrompt: systemPrompt)
+        self.auditLogger = auditLogger
+        self.maxToolIterations = maxToolIterations
+        self.modelPath = modelPath
+        self.workspace = workspace
+        self.buildCheckManager = BuildCheckManager()
+        self.useSandbox = useSandbox
+        self.dryRun = dryRun
+        self.hooks = hooks
+        self.memoryPromptSection = memoryPromptSection
+        self.customizationPromptSection = customizationPromptSection
+        self.skillsMetadata = skillsMetadata
+        self.promptSectionTokenEstimates = promptSectionTokenEstimates
+        self.memoryLimit = memoryLimit
+        self.cacheLimit = cacheLimit
+        
+        // Initial loaded state
+        self.loadedModelPath = modelPath
+        self.loadedMemoryLimit = memoryLimit
+        self.loadedCacheLimit = cacheLimit
+        self.loadedKVBits = generationConfig.kvBits
+        
+        // Ensure initial config matches default mode/thinking/task
+        self.currentGenerationConfig = AgentLoop.calculateGenerationConfig(
+            current: generationConfig,
+            thinkingLevel: self.thinkingLevel,
+            taskType: self.taskType,
+            mode: self.mode
+        )
+        
+        // Ensure currentMode is synced with initial mode/thinking/task settings
+        switch self.mode {
+        case .plan:
+            self.currentMode = (self.thinkingLevel == .high) ? .planHigh : .planLow
+        case .agent:
+            if self.taskType == .coding {
+                switch self.thinkingLevel {
+                case .fast:
+                    self.currentMode = .agentCodingFast
+                case .low:
+                    self.currentMode = .agentCodingLow
+                case .high:
+                    self.currentMode = .agentCodingHigh
+                }
+            } else {
+                switch self.thinkingLevel {
+                case .fast:
+                    self.currentMode = .agentGeneralFast
+                case .low, .high:
+                    self.currentMode = .agentGeneralLow
+                }
+            }
+        }
+    }
+
+    /// Process a user message through the agent loop state machine.
+    ///
+    /// This is the core orchestration loop that drives the agentic workflow:
+    /// 1. **Model Reload Check** — Apply any pending model/KV cache configuration changes
+    /// 2. **Context Management** — Monitor token count and trigger KV quantization if context is long
+    /// 3. **Generation Loop** (up to maxToolIterations iterations):
+    ///    - Generate a response from the language model
+    ///    - Parse tool calls from the response
+    ///    - If no tool calls: return final response and exit
+    ///    - Execute each tool call (with permission checks and mode restrictions)
+    ///    - Condense tool results if needed (long outputs truncated)
+    ///    - Add results back to conversation history
+    /// 4. **Cancellation** — Respect ESC key interrupts via CancelController
+    ///
+    /// **Mode Interactions**:
+    /// - `.plan` mode: Destructive operations (write_file, bash, etc.) require explicit approval before switching to `.agent`
+    /// - `.agent` mode: Tool execution requires approval but doesn't change mode
+    ///
+    /// **Tool Result Condensation**: Long tool outputs are automatically truncated and marked with
+    /// truncation markers to keep context within model limits.
+    ///
+    /// - Parameter message: The user's input message to process
+    /// - Throws: On model loading errors, generation timeouts, or permission denials
+    public func processUserMessage(_ message: String) async throws {
+        // 1. Handle any pending reloads from previous mode changes
+        if pendingReload {
+            try await reloadModel()
+            pendingReload = false
+        }
+        
+        history.addUser(message)
+        await applyDeterministicContextCompactionIfNeeded(reason: "after_user_message")
+        
+        // Initialize git orchestration for coding tasks
+        if taskType == .coding && gitOrchestrationManager == nil {
+            do {
+                self.gitOrchestrationManager = try await GitOrchestrationManager.create(projectRoot: workspace)
+                let (branchName, baseBranch, warning) = try await gitOrchestrationManager!.prepareTask(userMessage: message)
+                renderer.printStatus("📋 Git branch prepared: \(branchName) (base: \(baseBranch))")
+                if let warning, !warning.isEmpty {
+                    renderer.printStatus("⚠️  Git setup warning: \(warning)")
+                }
+            } catch {
+                renderer.printStatus("⚠️  Git initialization failed: \(error.localizedDescription)")
+                // Continue anyway - git orchestration is optional
+            }
+        }
+
+        // 2. Check for long context and trigger KV quantization if needed
+        let currentTokens = history.estimatedTokenCount
+        if currentTokens > currentGenerationConfig.longContextThreshold && (currentGenerationConfig.kvBits == nil || currentGenerationConfig.kvBits! > 4) {
+            renderer.printStatus("\u{001B}[33m[Warning]\u{001B}[0m Long context detected (\(currentTokens) tokens).")
+            renderer.printStatus("Switching to 4-bit KV cache to save VRAM...")
+            
+            // Update config to 4-bit
+            self.currentGenerationConfig = GenerationEngine.Config(
+                maxTokens: currentGenerationConfig.maxTokens,
+                temperature: currentGenerationConfig.temperature,
+                topP: currentGenerationConfig.topP,
+                topK: currentGenerationConfig.topK,
+                minP: currentGenerationConfig.minP,
+                repetitionPenalty: currentGenerationConfig.repetitionPenalty,
+                repetitionContextSize: currentGenerationConfig.repetitionContextSize,
+                presencePenalty: currentGenerationConfig.presencePenalty,
+                presenceContextSize: currentGenerationConfig.presenceContextSize,
+                frequencyPenalty: currentGenerationConfig.frequencyPenalty,
+                frequencyContextSize: currentGenerationConfig.frequencyContextSize,
+                kvBits: 4, 
+                kvGroupSize: currentGenerationConfig.kvGroupSize,
+                quantizedKVStart: currentGenerationConfig.quantizedKVStart,
+                longContextThreshold: currentGenerationConfig.longContextThreshold
+            )
+            self.pendingReload = true
+        }
+
+        // 3. Reload now if long context just triggered it
+        if pendingReload {
+            try await reloadModel()
+            pendingReload = false
+        }
+
+        var iterations = 0
+        var fileModificationToolsExecuted = false
+
+        while iterations < maxToolIterations {
+            iterations += 1
+            await applyDeterministicContextCompactionIfNeeded(reason: "before_generation")
+
+            // Generate response
+            let response = try await generateResponse()
+
+            // Parse tool calls
+            let toolCalls = ToolCallParser.parse(response)
+
+            if toolCalls.isEmpty {
+                // No tool calls — this is the final response
+                history.addAssistant(response)
+                
+                // Check builds if write/edit tools were executed in agent/coding mode
+                if fileModificationToolsExecuted && mode == .agent && taskType == .coding {
+                    await performBuildCheckIfNeeded()
+                }
+                
+                print() // newline after response
+                return
+            }
+
+            // Add the assistant's response (including tool calls) to history
+            history.addAssistant(response)
+
+            // Execute each tool call
+            for call in toolCalls {
+                renderer.printToolCall(name: call.name, arguments: call.arguments)
+                
+                // Track file modifications for build checking
+                let isFileModificationTool = (call.name == "write_file" || call.name == "edit_file" || call.name == "append_file" || call.name == "patch")
+                
+                let result: ToolResult
+
+                let targetPath = extractPolicyTargetPath(from: call.arguments)
+                let policyDecision = permissions.evaluateToolPolicy(toolName: call.name, targetPath: targetPath)
+                if case .denied(let denyReason) = policyDecision {
+                    let deniedResult = ToolResult.error(denyReason)
+                    renderer.printToolResult(deniedResult)
+
+                    await auditLogger?.logExecutionResult(
+                        toolName: call.name,
+                        arguments: call.arguments,
+                        approved: false,
+                        isError: true,
+                        resultPreview: deniedResult.content
+                    )
+
+                    let userGoal = history.latestUserMessage ?? ""
+                    let toolResponse = try await makeToolResponseForHistory(
+                        toolName: call.name,
+                        result: deniedResult,
+                        userGoal: userGoal
+                    )
+                    history.addToolResponse(toolResponse, toolCallId: call.name)
+                    continue
+                }
+                
+                // Check if tool is allowed in current mode
+                let isDestructive = isDestructiveToolCall(call)
+                
+                let approval: (approved: Bool, suggestion: String?)
+                if isDestructive {
+                    await hooks.emit(.permissionRequest(toolName: call.name, isPlanMode: mode == .plan))
+                    if mode == .plan {
+                        approval = await askForToolApproval(name: call.name, isPlanMode: true)
+                        if approval.approved {
+                            await setMode(.agent)
+                        }
+                    } else {
+                        approval = await askForToolApproval(name: call.name, isPlanMode: false)
+                    }
+                } else {
+                    approval = (true, nil)
+                }
+
+                if approval.approved {
+                    await hooks.emit(.preToolUse(toolName: call.name, argumentsPreview: serializedArgumentsPreview(call.arguments)))
+                    if isDestructive && dryRun {
+                        result = .success("Dry-run mode: skipped execution of destructive tool '\(call.name)'. Arguments: \(call.arguments)")
+                    } else if let tool = await registry.tool(named: call.name) {
+                        let showToolSpinner = (call.name == "web_search" || call.name == "web_fetch")
+                        let toolSpinner = Spinner(message: "Executing \(call.name)...")
+                        if showToolSpinner {
+                            await toolSpinner.start()
+                        }
+                        defer {
+                            if showToolSpinner {
+                                Task { await toolSpinner.stop(clearLine: true) }
+                            }
+                        }
+
+                        do {
+                            if let progressTool = tool as? ProgressReportingTool {
+                                result = try await progressTool.execute(arguments: call.arguments) { phase in
+                                    if showToolSpinner {
+                                        Task { await toolSpinner.updateMessage("\(call.name): \(phase)") }
+                                    }
+                                }
+                            } else {
+                                result = try await tool.execute(arguments: call.arguments)
+                            }
+                        } catch {
+                            result = .error("Tool execution failed: \(error.localizedDescription)")
+                        }
+                    } else {
+                        result = .error("Unknown tool: \(call.name)")
+                    }
+                } else {
+                    if let suggestion = approval.suggestion {
+                        result = .error("User denied permission and provided this feedback/suggestion: \(suggestion)")
+                    } else {
+                        result = .error("User denied permission to execute this tool.")
+                    }
+                }
+
+                await hooks.emit(.postToolUse(
+                    toolName: call.name,
+                    isError: result.isError,
+                    resultPreview: String(result.content.prefix(220))
+                ))
+
+                renderer.printToolResult(result)
+                
+                // Track if file modification tools executed successfully
+                if isFileModificationTool && !result.isError && approval.approved {
+                    fileModificationToolsExecuted = true
+                    
+                    // Integrate with git orchestration (lazy worktree creation)
+                    if let manager = gitOrchestrationManager, taskType == .coding {
+                        do {
+                            let filepath = (call.arguments["path"] as? String) ?? (call.arguments["file_path"] as? String)
+                            try await manager.onFirstFileModification(filename: filepath)
+                            await manager.trackToolExecution(toolName: call.name, modifiedFiles: filepath.map { [$0] } ?? [])
+                        } catch {
+                            // Git operations are non-fatal
+                        }
+                    }
+                }
+
+                if isDestructive {
+                    await auditLogger?.logExecutionResult(
+                        toolName: call.name,
+                        arguments: call.arguments,
+                        approved: approval.approved,
+                        isError: result.isError,
+                        resultPreview: result.content
+                    )
+                }
+
+                let userGoal = history.latestUserMessage ?? ""
+                let toolResponse = try await makeToolResponseForHistory(
+                    toolName: call.name,
+                    result: result,
+                    userGoal: userGoal
+                )
+
+                history.addToolResponse(toolResponse, toolCallId: call.name)
+            }
+        }
+
+        renderer.printError("Exceeded maximum tool iterations (\(maxToolIterations))")
+    }
+
+    private func extractPolicyTargetPath(from arguments: [String: Any]) -> String? {
+        let directKeys = ["path", "file_path", "filePath", "search_path", "directory", "dir", "workspace"]
+        for key in directKeys {
+            if let value = arguments[key] as? String, !value.isEmpty {
+                return value
+            }
+        }
+
+        if let paths = arguments["paths"] as? [String], let first = paths.first, !first.isEmpty {
+            return first
+        }
+
+        return nil
+    }
+
+    private func isDestructiveToolCall(_ call: ToolCallParser.ParsedToolCall) -> Bool {
+        let alwaysDestructiveTools: Set<String> = ["write_file", "edit_file", "append_file", "patch", "bash", "task"]
+        if alwaysDestructiveTools.contains(call.name) {
+            return true
+        }
+
+        if call.name == "lsp_rename" {
+            if let apply = call.arguments["apply"] as? Bool {
+                return apply
+            }
+            if let applyNumber = call.arguments["apply"] as? NSNumber {
+                return applyNumber.boolValue
+            }
+        }
+
+        return false
+    }
+
+    /// Clears the conversation history and frees MLX memory.
+    public func clearHistory() {
+        history.clear()
+        MLX.Memory.clearCache()
+        renderer.printStatus("Conversation history and KV cache cleared")
+    }
+
+    /// Reverts the last conversation turn (User + Assistant).
+    public func undoLastTurn() {
+        if history.revertLastTurn() {
+            renderer.printStatus("Reverted the last conversation turn")
+        } else {
+            renderer.printError("Nothing to undo")
+        }
+    }
+
+    /// Export conversation history to a markdown transcript in the workspace.
+    public func exportHistory(to path: String) throws -> String {
+        let resolved = try permissions.validatePath(path)
+        let transcript = history.asMarkdownTranscript()
+        try transcript.write(toFile: resolved, atomically: true, encoding: .utf8)
+        renderer.printStatus("Exported history to \(resolved)")
+        return resolved
+    }
+
+    /// Export conversation history as JSON for later resume.
+    public func exportHistoryJSON(to path: String) throws -> String {
+        let resolved = try permissions.validatePath(path)
+        let transcript = try history.asJSONTranscript()
+        try transcript.write(toFile: resolved, atomically: true, encoding: .utf8)
+        renderer.printStatus("Exported JSON history to \(resolved)")
+        return resolved
+    }
+
+    /// Load conversation history from a JSON transcript.
+    public func loadHistoryJSON(from path: String) throws -> String {
+        let resolved = try permissions.validatePath(path)
+        let data = try Data(contentsOf: URL(filePath: resolved))
+        try history.restoreFromJSONTranscript(data)
+        renderer.printStatus("Loaded JSON history from \(resolved)")
+        return resolved
+    }
+
+    /// Returns a human-readable context usage report.
+    public func contextUsageReport() -> String {
+        var countByRole: [Message.Role: Int] = [:]
+        var charsByRole: [Message.Role: Int] = [:]
+
+        for message in history.messages {
+            countByRole[message.role, default: 0] += 1
+            charsByRole[message.role, default: 0] += message.content.count
+        }
+
+        func tokens(for role: Message.Role) -> Int {
+            (charsByRole[role, default: 0]) / 4
+        }
+
+        let totalChars = history.messages.reduce(0) { $0 + $1.content.count }
+        let totalTokens = totalChars / 4
+
+        let systemCount = countByRole[.system, default: 0]
+        let userCount = countByRole[.user, default: 0]
+        let assistantCount = countByRole[.assistant, default: 0]
+        let toolCount = countByRole[.tool, default: 0]
+
+                let systemLayerTokens = promptSectionTokenEstimates[.core, default: 0] +
+                        promptSectionTokenEstimates[.runtime, default: 0] +
+                        promptSectionTokenEstimates[.customization, default: 0]
+                let memoryLayerTokens = promptSectionTokenEstimates[.memory, default: 0]
+                let skillsLayerTokens = promptSectionTokenEstimates[.skills, default: 0]
+                let toolsLayerTokens = promptSectionTokenEstimates[.tools, default: 0]
+                let messageTokens = tokens(for: .user) + tokens(for: .assistant) + tokens(for: .tool)
+                let contextThreshold = max(currentGenerationConfig.longContextThreshold, contextReserveTokens + 1)
+                let targetBudget = max(256, contextThreshold - contextReserveTokens)
+                let toolsWarningThreshold = max(500, targetBudget / 3)
+                let toolsWarning = toolsLayerTokens > toolsWarningThreshold
+                    ? "- Warnings:\n  - tools section is large (\(toolsLayerTokens) tokens; threshold=\(toolsWarningThreshold))."
+                    : "- Warnings: none"
+
+        return """
+        Context usage (estimated)
+        - Messages: \(history.messages.count)
+        - Estimated tokens: \(totalTokens)
+                - Budget:
+                    - threshold: \(contextThreshold)
+                    - reserve: \(contextReserveTokens)
+                    - target payload budget: \(targetBudget)
+                - By category:
+                    - system: \(systemLayerTokens) tokens
+                    - tools: \(toolsLayerTokens) tokens
+                    - memory: \(memoryLayerTokens) tokens
+                    - skills: \(skillsLayerTokens) tokens
+                    - messages: \(messageTokens) tokens
+                    - reserve: \(contextReserveTokens) tokens
+        - By role:
+          - system: \(systemCount) msg, \(tokens(for: .system)) tokens
+          - user: \(userCount) msg, \(tokens(for: .user)) tokens
+          - assistant: \(assistantCount) msg, \(tokens(for: .assistant)) tokens
+          - tool: \(toolCount) msg, \(tokens(for: .tool)) tokens
+        - Runtime:
+          - mode: \(mode.rawValue)
+          - thinking: \(thinkingLevel.rawValue)
+          - task: \(taskType.rawValue)
+          - sandbox: \(useSandbox ? "enabled" : "disabled")
+          - dry-run: \(dryRun ? "enabled" : "disabled")
+                \(toolsWarning)
+        """
+    }
+
+    /// Toggles the sandbox mode and refreshes the system prompt.
+    public func setSandbox(_ enabled: Bool) async {
+        self.useSandbox = enabled
+        
+        // Re-register tools with the new sandbox state
+        // We reuse the registration logic from MLXCoderCLI
+        await registerToolsInternal()
+        
+        // Update system prompt in history
+        let composition = await AgentLoop.buildSystemPromptComposition(
+            registry: registry,
+            maxTokens: currentGenerationConfig.maxTokens,
+            mode: mode,
+            thinkingLevel: thinkingLevel,
+            taskType: taskType,
+            memorySection: memoryPromptSection,
+            customizationSection: customizationPromptSection,
+            skillsMetadata: skillsMetadata
+        )
+        promptSectionTokenEstimates = composition.sectionTokenEstimates
+        history.updateSystemPrompt(composition.prompt)
+        
+        let status = enabled ? "\u{001B}[32mEnabled\u{001B}[0m" : "\u{001B}[31mDisabled\u{001B}[0m"
+        renderer.printStatus("macOS Seatbelt Sandbox: \(status)")
+    }
+
+    /// Sets the working mode (agent/plan) and refreshes the system prompt.
+    public func setMode(_ mode: WorkingMode, silent: Bool = false) async {
+        self.mode = mode
+        syncCurrentModeFromSettings()
+        
+        // Update task type based on mode if not explicitly set?
+        // For now, let's keep it manual or implicit as per the plan:
+        // high + agent -> coding
+        // high + plan -> general
+        // low + agent -> general
+        // low + plan -> reasoning
+        
+        updateGenerationConfig()
+        
+        // Update system prompt in history
+        let composition = await AgentLoop.buildSystemPromptComposition(
+            registry: registry,
+            maxTokens: currentGenerationConfig.maxTokens,
+            mode: mode,
+            thinkingLevel: thinkingLevel,
+            taskType: taskType,
+            memorySection: memoryPromptSection,
+            customizationSection: customizationPromptSection,
+            skillsMetadata: skillsMetadata
+        )
+        promptSectionTokenEstimates = composition.sectionTokenEstimates
+        history.updateSystemPrompt(composition.prompt)
+        
+        if !silent {
+            let modeStr = mode == .plan ? "\u{001B}[33mPLAN\u{001B}[0m" : "\u{001B}[32mAGENT\u{001B}[0m"
+            renderer.printStatus("Working Mode: \(modeStr)")
+        }
+    }
+
+    /// Sets the thinking level (low/high) and refreshes the system prompt.
+    public func setThinkingLevel(_ level: ThinkingLevel) async {
+        self.thinkingLevel = level
+        syncCurrentModeFromSettings()
+        updateGenerationConfig()
+        
+        // Update system prompt in history
+        let composition = await AgentLoop.buildSystemPromptComposition(
+            registry: registry,
+            maxTokens: currentGenerationConfig.maxTokens,
+            mode: mode,
+            thinkingLevel: level,
+            taskType: taskType,
+            memorySection: memoryPromptSection,
+            customizationSection: customizationPromptSection,
+            skillsMetadata: skillsMetadata
+        )
+        promptSectionTokenEstimates = composition.sectionTokenEstimates
+        history.updateSystemPrompt(composition.prompt)
+        
+        let levelStr = level == .high ? "\u{001B}[32mHIGH\u{001B}[0m" : "\u{001B}[33mLOW\u{001B}[0m"
+        renderer.printStatus("Thinking Level: \(levelStr)")
+    }
+
+    /// Sets the task type (general/coding/reasoning) and updates generation parameters.
+    public func setTaskType(_ type: TaskType) async {
+        self.taskType = type
+        syncCurrentModeFromSettings()
+        updateGenerationConfig()
+        
+        let typeStr = type.rawValue.uppercased()
+        renderer.printStatus("Task Type: \u{001B}[32m\(typeStr)\u{001B}[0m")
+    }
+
+    /// Cycles to the next available mode (triggered by Shift+Tab).
+    public func cycleMode() async -> String {
+        let allModes = ModelMode.allCases
+        let currentIndex = allModes.firstIndex(of: currentMode) ?? 0
+        let nextIndex = (currentIndex + 1) % allModes.count
+        let nextMode = allModes[nextIndex]
+        
+        self.currentMode = nextMode
+        
+        // Map ModelMode to underlying settings
+        switch nextMode {
+        case .planLow:
+            self.mode = .plan
+            self.thinkingLevel = .low
+            self.taskType = .general
+        case .planHigh:
+            self.mode = .plan
+            self.thinkingLevel = .high
+            self.taskType = .general
+        case .agentGeneralFast:
+            self.mode = .agent
+            self.thinkingLevel = .fast
+            self.taskType = .general
+        case .agentGeneralLow:
+            self.mode = .agent
+            self.thinkingLevel = .low
+            self.taskType = .general
+        case .agentCodingFast:
+            self.mode = .agent
+            self.thinkingLevel = .fast
+            self.taskType = .coding
+        case .agentCodingLow:
+            self.mode = .agent
+            self.thinkingLevel = .low
+            self.taskType = .coding
+        case .agentCodingHigh:
+            self.mode = .agent
+            self.thinkingLevel = .high
+            self.taskType = .coding
+        }
+        
+        updateGenerationConfig()
+        
+        // Update system prompt in history
+        let composition = await AgentLoop.buildSystemPromptComposition(
+            registry: registry,
+            maxTokens: currentGenerationConfig.maxTokens,
+            mode: self.mode,
+            thinkingLevel: self.thinkingLevel,
+            taskType: self.taskType,
+            memorySection: memoryPromptSection,
+            customizationSection: customizationPromptSection,
+            skillsMetadata: skillsMetadata
+        )
+        promptSectionTokenEstimates = composition.sectionTokenEstimates
+        history.updateSystemPrompt(composition.prompt)
+        
+        // Defer reload only if loading parameters changed
+        let needsReload = self.modelPath != self.loadedModelPath ||
+                          self.memoryLimit != self.loadedMemoryLimit ||
+                          self.cacheLimit != self.loadedCacheLimit ||
+                          self.currentGenerationConfig.kvBits != self.loadedKVBits
+                          
+        if needsReload {
+            self.pendingReload = true
+        }
+        
+        return nextMode.rawValue
+    }
+
+    /// Full model unload and reload to ensure fresh weights/cache.
+    public func reloadModel() async throws {
+        renderer.printStatus("Reloading model to ensure fresh state...")
+        
+        // Clear references
+        MLX.Memory.clearCache()
+        
+        // Load fresh container
+        let newContainer = try await ModelLoader.load(
+            from: modelPath,
+            memoryLimit: memoryLimit,
+            cacheLimit: cacheLimit
+        )
+        
+        self.modelContainer = newContainer
+        
+        // Update loaded tracking parameters
+        self.loadedModelPath = modelPath
+        self.loadedMemoryLimit = memoryLimit
+        self.loadedCacheLimit = cacheLimit
+        self.loadedKVBits = currentGenerationConfig.kvBits
+        
+        // Re-register tools that depend on modelContainer
+        await registerToolsInternal()
+        
+        renderer.printStatus("Model reloaded successfully")
+    }
+
+    private func updateGenerationConfig() {
+        self.currentGenerationConfig = AgentLoop.calculateGenerationConfig(
+            current: currentGenerationConfig,
+            thinkingLevel: thinkingLevel,
+            taskType: taskType,
+            mode: mode
+        )
+    }
+
+    private func syncCurrentModeFromSettings() {
+        switch mode {
+        case .plan:
+            currentMode = (thinkingLevel == .high) ? .planHigh : .planLow
+        case .agent:
+            if taskType == .coding {
+                switch thinkingLevel {
+                case .fast:
+                    currentMode = .agentCodingFast
+                case .low:
+                    currentMode = .agentCodingLow
+                case .high:
+                    currentMode = .agentCodingHigh
+                }
+            } else {
+                // No dedicated General (high) label exists in ModelMode; keep non-coding labels stable.
+                switch thinkingLevel {
+                case .fast:
+                    currentMode = .agentGeneralFast
+                case .low, .high:
+                    currentMode = .agentGeneralLow
+                }
+            }
+        }
+    }
+
+    private static func calculateGenerationConfig(
+        current: GenerationEngine.Config,
+        thinkingLevel: ThinkingLevel,
+        taskType: TaskType,
+        mode: WorkingMode
+    ) -> GenerationEngine.Config {
+        // Map (thinkingLevel, taskType, mode) to the prescribed parameters
+        var temp: Float = 0.6
+        var topP: Float = 1.0
+        var topK: Int = 0
+        let minP: Float = 0.0
+        var presencePenalty: Float? = nil
+        var repetitionPenalty: Float? = nil
+        
+        // Determine task type implicitly if not strictly set? 
+        // User's request mapping:
+        // 1. Thinking mode for general tasks: temperature=1.0, top_p=0.95, top_k=20, min_p=0.0, presence_penalty=1.5, repetition_penalty=1.0
+        // 2. Thinking mode for precise coding tasks (e.g. WebDev): temperature=0.6, top_p=0.95, top_k=20, min_p=0.0, presence_penalty=0.0, repetition_penalty=1.0
+        // 3. Instruct (or non-thinking) mode for general tasks: temperature=0.7, top_p=0.8, top_k=20, min_p=0.0, presence_penalty=1.5, repetition_penalty=1.0
+        // 4. Instruct (or non-thinking) mode for reasoning tasks: temperature=1.0, top_p=0.95, top_k=20, min_p=0.0, presence_penalty=1.5, repetition_penalty=1.0
+        
+        if thinkingLevel == .fast {
+            // "Fast" mode (Deterministic, no reasoning)
+            topK = 1
+            repetitionPenalty = 1.0
+            temp = 0.0
+            topP = 1.0
+            presencePenalty = 0.0
+        } else if thinkingLevel == .high {
+            // Thinking mode
+            topP = 0.95
+            topK = 20
+            repetitionPenalty = 1.0
+            
+            if mode == .agent || taskType == .coding {
+                // Precise coding tasks
+                temp = 0.6
+                presencePenalty = 0.0
+            } else {
+                // General tasks (including reasoning if in high thinking)
+                temp = 1.0
+                presencePenalty = 1.5
+            }
+        } else {
+            // Instruct mode
+            topK = 20
+            repetitionPenalty = 1.0
+            
+            if mode == .plan || taskType == .reasoning {
+                // Reasoning tasks (Instruct)
+                temp = 1.0
+                topP = 0.95
+                presencePenalty = 1.5
+            } else {
+                // General tasks (Instruct)
+                temp = 0.7
+                topP = 0.8
+                presencePenalty = 1.5
+            }
+        }
+        
+        return GenerationEngine.Config(
+            maxTokens: current.maxTokens,
+            temperature: temp,
+            topP: topP,
+            topK: topK,
+            minP: minP,
+            repetitionPenalty: repetitionPenalty,
+            repetitionContextSize: current.repetitionContextSize,
+            presencePenalty: presencePenalty,
+            presenceContextSize: current.presenceContextSize,
+            frequencyPenalty: current.frequencyPenalty,
+            frequencyContextSize: current.frequencyContextSize,
+            kvBits: current.kvBits,
+            kvGroupSize: current.kvGroupSize,
+            quantizedKVStart: current.quantizedKVStart,
+            longContextThreshold: current.longContextThreshold
+        )
+    }
+
+    private func registerToolsInternal() async {
+        // Filesystem tools
+        await registry.register(ReadFileTool(permissions: permissions))
+        await registry.register(WriteFileTool(permissions: permissions))
+        await registry.register(AppendFileTool(permissions: permissions))
+        await registry.register(EditFileTool(permissions: permissions))
+        await registry.register(PatchTool(permissions: permissions))
+        await registry.register(ListDirTool(permissions: permissions))
+        await registry.register(ReadManyTool(permissions: permissions))
+
+        // Search tools
+        await registry.register(GlobTool(permissions: permissions))
+        await registry.register(GrepTool(permissions: permissions))
+        await registry.register(CodeSearchTool(permissions: permissions))
+
+        // Shell
+        await registry.register(BashTool(permissions: permissions, useSandbox: useSandbox))
+
+        // Agent tools
+        await registry.register(TaskTool(
+            modelContainer: modelContainer,
+            permissions: permissions,
+            generationConfig: currentGenerationConfig,
+            modelPath: modelPath,
+            useSandbox: useSandbox,
+            parentRegistry: registry,
+            renderer: renderer
+        ))
+        await registry.register(TodoTool(workspaceRoot: permissions.workspaceRoot))
+        await registry.register(ProjectExpertLoRATool(modelContainer: modelContainer, workspaceRoot: permissions.workspaceRoot, modelPath: modelPath))
+
+        // Web tools
+        await registry.register(WebFetchTool(
+            modelContainer: modelContainer,
+            generationConfig: currentGenerationConfig
+        ))
+        await registry.register(WebSearchTool())
+
+        // LSP tools (.NET/C#)
+        await registry.register(LSPDiagnosticsTool(permissions: permissions))
+        await registry.register(LSPHoverTool(permissions: permissions))
+        await registry.register(LSPReferencesTool(permissions: permissions))
+        await registry.register(LSPDefinitionTool(permissions: permissions))
+        await registry.register(LSPCompletionTool(permissions: permissions))
+        await registry.register(LSPSignatureHelpTool(permissions: permissions))
+        await registry.register(LSPDocumentSymbolsTool(permissions: permissions))
+        await registry.register(LSPRenameTool(permissions: permissions))
+    }
+
+    // MARK: - Private
+
+    private func makeToolResponseForHistory(toolName: String, result: ToolResult, userGoal: String) async throws -> String {
+        let rawToolResponse = ToolResultCondensationPolicy.joinedToolOutput(result: result)
+
+        guard ToolResultCondensationPolicy.shouldCondense(toolName: toolName, result: result, config: condensationConfig) else {
+            return applyFactOnlyPreambleIfNeeded(toolName: toolName, toolResponse: rawToolResponse)
+        }
+
+        let beforeTokens = ToolResultCondensationPolicy.estimatedTokenCount(
+            for: rawToolResponse,
+            charsPerToken: condensationConfig.charsPerTokenEstimate
+        )
+
+        do {
+            let rawSummary = try await summarizeToolOutputEphemeral(
+                toolName: toolName,
+                userGoal: userGoal,
+                rawToolResponse: rawToolResponse
+            )
+
+            let summary = ToolResultCondensationPolicy.sanitizeSummary(
+                rawSummary,
+                maxChars: condensationConfig.maxSummaryChars
+            )
+
+            if renderer.verbose, !summary.isEmpty {
+                renderer.printStatus("[debug] Condensed summary for \(toolName):")
+                print(summary)
+            }
+
+            guard !summary.isEmpty else {
+                let fallback = ToolResultCondensationPolicy.boundedFallbackRawMessage(
+                    toolName: toolName,
+                    raw: rawToolResponse,
+                    maxChars: condensationConfig.fallbackRawChars
+                )
+                let afterTokens = ToolResultCondensationPolicy.estimatedTokenCount(
+                    for: fallback,
+                    charsPerToken: condensationConfig.charsPerTokenEstimate
+                )
+                await hooks.emit(.compression(toolName: toolName, beforeTokens: beforeTokens, afterTokens: afterTokens, usedFallback: true))
+                if renderer.verbose {
+                    renderer.printStatus("[debug] Tool result condensation fallback for \(toolName): before≈\(beforeTokens) tokens, after≈\(afterTokens), saved≈\(max(0, beforeTokens - afterTokens))")
+                }
+                return fallback
+            }
+
+            let condensed = ToolResultCondensationPolicy.formatCondensedToolMessage(toolName: toolName, summary: summary)
+            let afterTokens = ToolResultCondensationPolicy.estimatedTokenCount(
+                for: condensed,
+                charsPerToken: condensationConfig.charsPerTokenEstimate
+            )
+            await hooks.emit(.compression(toolName: toolName, beforeTokens: beforeTokens, afterTokens: afterTokens, usedFallback: false))
+            if renderer.verbose {
+                renderer.printStatus("[debug] Tool result condensed for \(toolName): before≈\(beforeTokens) tokens, after≈\(afterTokens), saved≈\(max(0, beforeTokens - afterTokens))")
+            }
+            return condensed
+        } catch {
+            let fallback = ToolResultCondensationPolicy.boundedFallbackRawMessage(
+                toolName: toolName,
+                raw: rawToolResponse,
+                maxChars: condensationConfig.fallbackRawChars
+            )
+            let afterTokens = ToolResultCondensationPolicy.estimatedTokenCount(
+                for: fallback,
+                charsPerToken: condensationConfig.charsPerTokenEstimate
+            )
+            await hooks.emit(.compression(toolName: toolName, beforeTokens: beforeTokens, afterTokens: afterTokens, usedFallback: true))
+            if renderer.verbose {
+                renderer.printStatus("[debug] Tool result condensation failed for \(toolName): \(error.localizedDescription). before≈\(beforeTokens) tokens, after≈\(afterTokens), saved≈\(max(0, beforeTokens - afterTokens))")
+            }
+            return fallback
+        }
+    }
+
+    private func summarizeToolOutputEphemeral(toolName: String, userGoal: String, rawToolResponse: String) async throws -> String {
+        let effectiveGoal = userGoal.trimmingCharacters(in: .whitespacesAndNewlines)
+        let extractionGoal = effectiveGoal.isEmpty
+            ? "No explicit user goal is available. Extract only the most relevant facts for likely task completion."
+            : effectiveGoal
+
+        let systemPrompt = "You are a precise extraction engine. Return only facts relevant to the current goal."
+        let userPrompt = """
+        Goal:
+        \(extractionGoal)
+
+        Tool:
+        \(toolName)
+
+        Instructions:
+        - Extract only information relevant to the goal.
+        - Keep exact numbers, names, dates, versions, and quoted phrases unchanged.
+        - Do not add outside knowledge.
+        - If information is missing or ambiguous, explicitly say so.
+        - Keep the response under \(condensationConfig.summaryTargetTokens) tokens.
+
+        Raw tool output:
+        \(rawToolResponse)
+        """
+
+        let extractionConfig = GenerationEngine.Config(
+            maxTokens: condensationConfig.summaryTargetTokens,
+            temperature: 0.1,
+            topP: currentGenerationConfig.topP,
+            topK: currentGenerationConfig.topK,
+            minP: currentGenerationConfig.minP,
+            repetitionPenalty: currentGenerationConfig.repetitionPenalty,
+            repetitionContextSize: currentGenerationConfig.repetitionContextSize,
+            presencePenalty: 0,
+            presenceContextSize: currentGenerationConfig.presenceContextSize,
+            frequencyPenalty: 0,
+            frequencyContextSize: currentGenerationConfig.frequencyContextSize,
+            kvBits: currentGenerationConfig.kvBits,
+            kvGroupSize: currentGenerationConfig.kvGroupSize,
+            quantizedKVStart: currentGenerationConfig.quantizedKVStart
+        )
+
+        let chatML = """
+        \(ToolCallPattern.imStart)system
+        \(systemPrompt)
+        \(ToolCallPattern.imEnd)
+        \(ToolCallPattern.imStart)user
+        \(userPrompt)
+        \(ToolCallPattern.imEnd)
+        \(ToolCallPattern.imStart)assistant
+        """
+
+        let extracted = try await modelContainer.perform { context in
+            if Task.isCancelled { throw CancellationError() }
+
+            let tokens = context.tokenizer.encode(text: chatML)
+            let input = LMInput(tokens: MLXArray(tokens))
+            var responseText = ""
+
+            for try await item in try MLXLMCommon.generateTokens(
+                input: input,
+                parameters: extractionConfig.generateParameters,
+                context: context
+            ) {
+                if Task.isCancelled { throw CancellationError() }
+                switch item {
+                case .token(let tokenId):
+                    responseText += context.tokenizer.decode(tokens: [tokenId], skipSpecialTokens: false)
+                case .info:
+                    break
+                }
+            }
+
+            return responseText
+        }
+
+        return ToolCallParser.stripThinking(extracted)
+            .replacingOccurrences(of: ToolCallPattern.eosToken, with: "")
+            .replacingOccurrences(of: ToolCallPattern.imEnd, with: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func applyFactOnlyPreambleIfNeeded(toolName: String, toolResponse: String) -> String {
+        let webToolNames: Set<String> = ["web_search", "web_fetch"]
+        guard webToolNames.contains(toolName) else {
+            return toolResponse
+        }
+
+        let factOnlyPreamble = """
+            [INSTRUCTION]
+            Act as a Fact-Only Extractor:
+            - Exact values only. Never round, convert, or rephrase numbers/names/versions.
+            - No conclusions, summaries, or trends unless the source states them explicitly.
+            - Do not fill gaps with prior knowledge.
+            - If the page is inaccessible or ambiguous, say so before answering.
+            - Use the source's exact terminology.
+            [INSTRUCTION]
+
+            """
+        return factOnlyPreamble + toolResponse
+    }
+
+    private func serializedArgumentsPreview(_ arguments: [String: Any]) -> String {
+        guard JSONSerialization.isValidJSONObject(arguments),
+              let data = try? JSONSerialization.data(withJSONObject: arguments, options: [.sortedKeys]),
+              let text = String(data: data, encoding: .utf8) else {
+            return String(describing: arguments)
+        }
+        return text
+    }
+
+    private func applyDeterministicContextCompactionIfNeeded(reason: String) async {
+        let threshold = max(currentGenerationConfig.longContextThreshold, contextReserveTokens + 1)
+        let target = max(256, threshold - contextReserveTokens)
+        guard history.estimatedTokenCount > target else {
+            return
+        }
+
+        let before = history.estimatedTokenCount
+        let compacted = history.compactDeterministically(
+            maxEstimatedTokens: target,
+            keepRecentMessages: contextKeepRecentMessages
+        )
+        guard compacted else {
+            return
+        }
+
+        let after = history.estimatedTokenCount
+        renderer.printStatus("[Context] Deterministic compaction triggered (\(reason)): before≈\(before), after≈\(after), target≈\(target)")
+        await hooks.emit(.compression(toolName: "context_history", beforeTokens: before, afterTokens: after, usedFallback: false))
+    }
+
+    /// Generate a response from the model using the current conversation history.
+    private func generateResponse() async throws -> String {
+        let enableThinking = thinkingLevel != .fast
+        let chatML = history.formatChatML(enableThinking: enableThinking)
+
+        // Start processing spinner before inference begins
+        let spinner = Spinner(message: "Processing...")
+        await spinner.start()
+
+        // Use the model container to prepare input and generate
+        let result = try await modelContainer.perform { [currentGenerationConfig, renderer] context in
+            if Task.isCancelled { throw CancellationError() }
+            // Tokenize the ChatML prompt
+            let tokenizer = context.tokenizer
+            let tokens = tokenizer.encode(text: chatML)
+            let inputTokens = MLXArray(tokens)
+            
+            let input = LMInput(tokens: inputTokens)
+            
+            var responseText = ""
+            var pendingChunk = ""
+            var isThinking = enableThinking
+            if isThinking {
+                renderer.startThinking()
+            }
+            var hasShownVisibleOutput = false
+
+            func stopSpinnerOnFirstVisibleOutput() {
+                guard !hasShownVisibleOutput else { return }
+                hasShownVisibleOutput = true
+                Task { await spinner.stop(clearLine: true) }
+            }
+            
+            // For correct streaming detokenization
+            var segmentTokens = [Int]()
+            var segment = ""
+            
+            for try await item in try MLXLMCommon.generateTokens(
+                input: input,
+                parameters: currentGenerationConfig.generateParameters,
+                context: context
+            ) {
+                if Task.isCancelled {
+                    Task { await spinner.stop(clearLine: true) }
+                    throw CancellationError()
+                }
+                
+                switch item {
+                case .token(let id):
+                    segmentTokens.append(id)
+                    let newSegment = tokenizer.decode(tokens: segmentTokens, skipSpecialTokens: false)
+                    
+                    // Skip yielding if incomplete multi-byte sequence
+                    if newSegment.last == "\u{fffd}" {
+                        continue
+                    }
+                    
+                    let newText = String(newSegment.suffix(newSegment.count - segment.count))
+                    
+                    if newText.hasSuffix("\n") {
+                        if let lastToken = segmentTokens.last {
+                            segmentTokens = [lastToken]
+                            segment = tokenizer.decode(tokens: segmentTokens, skipSpecialTokens: false)
+                        }
+                    } else {
+                        segment = newSegment
+                    }
+                    
+                    responseText += newText
+                    pendingChunk += newText
+                    
+                    while !pendingChunk.isEmpty {
+                        if !isThinking {
+                            if let range = pendingChunk.range(of: ToolCallPattern.thinkOpen) {
+                                let before = String(pendingChunk[..<range.lowerBound])
+                                if !before.isEmpty {
+                                    stopSpinnerOnFirstVisibleOutput()
+                                    renderer.printChunk(before)
+                                }
+                                renderer.startThinking()
+                                isThinking = true
+                                pendingChunk = String(pendingChunk[range.upperBound...])
+                                if pendingChunk.hasPrefix("\n") { pendingChunk.removeFirst() }
+                            } else {
+                                // Hold if it might be the start of `<think>`
+                                let prefixes = ["<", "<t", "<th", "<thi", "<thin", "<think"]
+                                if prefixes.contains(where: pendingChunk.hasSuffix) {
+                                    break
+                                } else {
+                                    stopSpinnerOnFirstVisibleOutput()
+                                    renderer.printChunk(pendingChunk)
+                                    pendingChunk = ""
+                                }
+                            }
+                        } else {
+                            if let range = pendingChunk.range(of: ToolCallPattern.thinkClose) {
+                                let before = String(pendingChunk[..<range.lowerBound])
+                                if !before.isEmpty {
+                                    stopSpinnerOnFirstVisibleOutput()
+                                    renderer.printThinkingChunk(before)
+                                }
+                                renderer.endThinking()
+                                isThinking = false
+                                pendingChunk = String(pendingChunk[range.upperBound...])
+                                if pendingChunk.hasPrefix("\n") { pendingChunk.removeFirst() }
+                            } else {
+                                // Hold if it might be the start of `</think>`
+                                let prefixes = ["<", "</", "</t", "</th", "</thi", "</thin", "</think"]
+                                if prefixes.contains(where: pendingChunk.hasSuffix) {
+                                    break
+                                } else {
+                                    stopSpinnerOnFirstVisibleOutput()
+                                    renderer.printThinkingChunk(pendingChunk)
+                                    pendingChunk = ""
+                                }
+                            }
+                        }
+                    }
+                case .info(let info):
+                    stopSpinnerOnFirstVisibleOutput()
+                    print()
+                    let statMessage = String(format: "Generated %d tokens (%.1f tok/s), prompt: %d tokens (%.1f tok/s)",
+                                             info.generationTokenCount, info.tokensPerSecond,
+                                             info.promptTokenCount, info.promptTokensPerSecond)
+                    renderer.printStatus(statMessage)
+                    print()
+                }
+            }
+            
+            // Flush any remaining text in pendingChunk
+            if !pendingChunk.isEmpty {
+                if isThinking {
+                    stopSpinnerOnFirstVisibleOutput()
+                    renderer.printThinkingChunk(pendingChunk)
+                } else {
+                    stopSpinnerOnFirstVisibleOutput()
+                    renderer.printChunk(pendingChunk)
+                }
+            }
+            
+            // Strip EOS tokens if they leaked into the text
+            responseText = responseText.replacingOccurrences(of: ToolCallPattern.eosToken, with: "")
+            responseText = responseText.trimmingCharacters(in: .whitespacesAndNewlines)
+            
+            return responseText
+        }
+
+        // Cleanup spinner if generation failed or returned nothing
+        Task { await spinner.stop(clearLine: true) }
+
+        return result
+    }
+
+    /// Prompt the user to approve a tool call using raw terminal mode.
+    private func askForToolApproval(name: String, isPlanMode: Bool) async -> (approved: Bool, suggestion: String?) {
+        // Global auto-approve mode for power users.
+        if permissions.approvalMode == .yolo {
+            await auditLogger?.logApprovalDecision(
+                toolName: name,
+                mode: mode.rawValue,
+                isPlanModePrompt: isPlanMode,
+                approved: true,
+                suggestion: nil
+            )
+            return (true, nil)
+        }
+
+        // Auto-approve common edit operations while still guarding shell/task.
+        if permissions.approvalMode == .autoEdit && !isPlanMode {
+            let autoEditTools: Set<String> = ["write_file", "edit_file", "append_file", "patch"]
+            if autoEditTools.contains(name) {
+                await auditLogger?.logApprovalDecision(
+                    toolName: name,
+                    mode: mode.rawValue,
+                    isPlanModePrompt: isPlanMode,
+                    approved: true,
+                    suggestion: nil
+                )
+                return (true, nil)
+            }
+        }
+
+        if autoApproveAllTools && !isPlanMode {
+            return (true, nil)
+        }
+
+        await CancelController.shared.suspendListening()
+
+        func resumeCancelListeningAndReturn(_ result: (approved: Bool, suggestion: String?)) async -> (approved: Bool, suggestion: String?) {
+            await CancelController.shared.resumeListeningIfNeeded()
+            return result
+        }
+        
+        var originalTermios = termios()
+        tcgetattr(STDIN_FILENO, &originalTermios)
+        
+        var rawTermios = originalTermios
+        rawTermios.c_lflag &= ~UInt(ICANON | ECHO | ISIG)
+        rawTermios.c_cc.16 = 1  // VMIN - wait for at least 1 byte
+        rawTermios.c_cc.17 = 0  // VTIME
+        tcsetattr(STDIN_FILENO, TCSANOW, &rawTermios)
+        
+        // Flush any stale bytes from stdin that may have been buffered
+        // during async operations like Shift+Tab mode cycling.
+        tcflush(STDIN_FILENO, TCIFLUSH)
+        
+        let options = isPlanMode ? [
+            "Switch to AGENT mode and allow",
+            "Stay in PLAN mode and deny with suggestion (esc)"
+        ] : [
+            "Yes, allow once",
+            "Yes, allow always in this session",
+            "No, suggest changes (esc)"
+        ]
+        var selectedIndex = 0
+        var menuDrawnOnce = false
+        var footerHint = "Use 1/2/3, arrows, Enter, or Esc."
+        
+        func drawMenu() {
+            if menuDrawnOnce {
+                print("\u{1B}[\(options.count + 1)A", terminator: "")
+            } else {
+                print() // empty line only once at the start
+            }
+            
+            let message = isPlanMode ? "Tool '\(name)' is blocked in PLAN mode. Switch to AGENT mode?" : "Do you want to proceed?"
+            print("\r\u{1B}[K\(message)")
+            for (i, option) in options.enumerated() {
+                if i == selectedIndex {
+                    print("\r\u{1B}[K\u{001B}[32m● \(i + 1). \(option)\u{001B}[0m")
+                } else {
+                    print("\r\u{1B}[K  \(i + 1). \(option)")
+                }
+            }
+            print("\r\u{1B}[K\(footerHint) Waiting for user confirmation... [\(selectedIndex + 1)/\(options.count)]: ", terminator: "")
+            fflush(stdout)
+            
+            menuDrawnOnce = true
+        }
+        
+        // Hide cursor
+        print("\u{1B}[?25l", terminator: "")
+        renderer.printStatus("[Key mode] Approval required. \(footerHint)")
+        drawMenu()
+        
+        var finalSelection = -1
+        var shouldDrainInputTail = false
+        
+        while true {
+            var byte: UInt8 = 0
+            let bytesRead = read(STDIN_FILENO, &byte, 1)
+            if bytesRead <= 0 { continue }
+            
+            if byte == 27 { // ESC or escape sequence
+                let seq = TerminalKeyParser.readEscapeSequence()
+                let escapeKind = TerminalKeyParser.classifyEscapeSequence(seq)
+                if escapeKind == .bare {
+                    // Bare ESC — treat as deny/cancel
+                    shouldDrainInputTail = true
+                    finalSelection = isPlanMode ? 1 : 2
+                    break
+                }
+
+                if let keypadSelection = TerminalKeyParser.numericSelection(forEscapeSequence: seq, allowThirdOption: !isPlanMode) {
+                    selectedIndex = keypadSelection
+                    drawMenu()
+                    finalSelection = keypadSelection
+                    break
+                }
+
+                if let direction = TerminalKeyParser.arrowDirection(for: seq) {
+                    if direction == .up {
+                        selectedIndex = max(0, selectedIndex - 1)
+                        footerHint = "Use 1/2/3, arrows, Enter, or Esc."
+                        drawMenu()
+                    } else if direction == .down {
+                        selectedIndex = min(options.count - 1, selectedIndex + 1)
+                        footerHint = "Use 1/2/3, arrows, Enter, or Esc."
+                        drawMenu()
+                    }
+                } else {
+                    // Alt-key combos or unsupported escape sequences are ignored.
+                    shouldDrainInputTail = true
+                    footerHint = "Unsupported key. Use 1/2/3, arrows, Enter, or Esc."
+                    drawMenu()
+                }
+            } else if byte == 10 || byte == 13 { // Enter
+                finalSelection = selectedIndex
+                break
+            } else if let numericSelection = TerminalKeyParser.numericSelection(for: byte, allowThirdOption: !isPlanMode) {
+                selectedIndex = numericSelection
+                footerHint = "Use 1/2/3, arrows, Enter, or Esc."
+                drawMenu()
+                finalSelection = numericSelection
+                break
+            } else if byte == 3 { // Ctrl+C
+                // Restore terminal and exit completely
+                tcsetattr(STDIN_FILENO, TCSANOW, &originalTermios)
+                print("\u{1B}[?25h\n")
+                exit(1)
+            } else {
+                footerHint = "Unsupported key. Use 1/2/3, arrows, Enter, or Esc."
+                drawMenu()
+            }
+        }
+        
+        // Drain buffered tails only when we consumed partial escape sequences.
+        if shouldDrainInputTail {
+            TerminalKeyParser.drainAvailableInput()
+        }
+        
+        // Restore terminal and show cursor
+        tcsetattr(STDIN_FILENO, TCSANOW, &originalTermios)
+        print("\u{1B}[?25h\n")
+        
+        if finalSelection == 0 {
+            await auditLogger?.logApprovalDecision(
+                toolName: name,
+                mode: mode.rawValue,
+                isPlanModePrompt: isPlanMode,
+                approved: true,
+                suggestion: nil
+            )
+            return await resumeCancelListeningAndReturn((true, nil))
+        } else if finalSelection == 1 && !isPlanMode {
+            autoApproveAllTools = true
+            await auditLogger?.logApprovalDecision(
+                toolName: name,
+                mode: mode.rawValue,
+                isPlanModePrompt: isPlanMode,
+                approved: true,
+                suggestion: "session_auto_approve_enabled"
+            )
+            return await resumeCancelListeningAndReturn((true, nil))
+        } else {
+            // Option 3 or ESC: Suggest changes
+            print("[\(name)] Blocked. Suggest changes (or press Enter to deny with no comment): ", terminator: "")
+            fflush(stdout)
+            guard let suggestion = readLine(strippingNewline: true)?.trimmingCharacters(in: .whitespacesAndNewlines), !suggestion.isEmpty else {
+                await auditLogger?.logApprovalDecision(
+                    toolName: name,
+                    mode: mode.rawValue,
+                    isPlanModePrompt: isPlanMode,
+                    approved: false,
+                    suggestion: nil
+                )
+                return await resumeCancelListeningAndReturn((false, nil))
+            }
+            await auditLogger?.logApprovalDecision(
+                toolName: name,
+                mode: mode.rawValue,
+                isPlanModePrompt: isPlanMode,
+                approved: false,
+                suggestion: suggestion
+            )
+            return await resumeCancelListeningAndReturn((false, suggestion))
+        }
+    }
+
+    /// Build the system prompt with tool definitions.
+    public static func buildSystemPromptComposition(
+        registry: ToolRegistry,
+        maxTokens: Int? = nil,
+        mode: WorkingMode = .agent,
+        thinkingLevel: ThinkingLevel = .high,
+        taskType: TaskType = .general,
+        baseInstructions: String? = nil,
+        memorySection: String? = nil,
+        customizationSection: String? = nil,
+        skillsMetadata: [SkillMetadata] = []
+    ) async -> PromptComposition {
+        let defaultInstructions = "You are a helpful coding assistant. You have access to tools to interact with the filesystem and execute code. CRITICAL: If you are working through a task list or todo list, YOU MUST ONLY PROCESS ONE ITEM AT A TIME. After completing a single item, YOU MUST exit and wait for the user to explicitly ask you to proceed to the next item. NEVER automatically move to the next task in the list without explicit user permission. ALWAYS check if a file exists before editing it. If the user doesn't mention a specific version for a library, ALWAYS use the latest stable version. If a CLI tool gives an error, you should run the CLI tool's help command (e.g., `--help`, `--help-all`) to learn more. Note that some tools have multiple levels of help, such as `dotnet list --help` and `dotnet list package --help`. When generating files, always build incrementally in small, controlled iterations: scaffold the minimal valid structure first, save to disk, then add one section at a time, saving after each iteration. Never generate large, monolithic files in a single step. Prefer append/update over rewrite. STABILITY: You MUST ONLY MODIFY ONE FILE PER TURN. After modifying a file (using `write_file`, `edit_file`, `append_file`, or `patch`), you MUST run the appropriate build or test command to verify the change and check for new errors. Do not attempt to fix multiple files in a single turn if any of them could affect the build. Always rebuild and check for errors after every single file modification."
+        
+        var coreInstructions = baseInstructions ?? defaultInstructions
+        
+        if mode == .plan {
+            coreInstructions += "\n\nCRITICAL: You are currently in PLAN MODE. Your goal is to research the codebase and propose a comprehensive plan. DO NOT execute any tools that modify the filesystem (like write_file, edit_file, append_file, patch) or the system (bash) WITHOUT ASKING FIRST. If you call one of these tools, the user will be prompted to switch you to AGENT MODE and execute. You can use this to transition from planning to implementation once your plan is approved. For now, focus on gathering context and designing your approach."
+        }
+        
+        if taskType == .reasoning {
+            coreInstructions += "\n\nREASONING TASK: Please reason step by step. If you reach a final mathematical or logical conclusion, put your final answer within \\boxed{}."
+        }
+        
+        if thinkingLevel == .fast {
+            coreInstructions += "\n\nTHINKING STYLE: DO NOT USE internal thinking (no <think> blocks). NO PREAMBLE. NO REASONING. RESPOND ONLY WITH THE FINAL ANSWER OR TOOL CALLS IMMEDIATELY. Be extremely concise/direct."
+        } else if thinkingLevel == .low {
+            coreInstructions += "\n\nTHINKING STYLE: Keep your internal thinking (between <think> and </think>) extremely concise and focused. Jump to the solution or tool call as quickly as possible."
+        } else {
+            coreInstructions += "\n\nTHINKING STYLE: Feel free to think deeply. Use the thinking space (between <think> and </think>) to explore multiple approaches, reason about the code, and plan your steps carefully."
+        }
+        
+        let now = Date()
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withDashSeparatorInDate, .withColonSeparatorInTime]
+        let dateString = formatter.string(from: now)
+        
+        let runtimeSection = """
+        Current time: \(dateString)
+
+        When you need to use a tool, respond with the tool call in this format:
+        \(ToolCallPattern.toolCallOpen)
+        {"name": "tool_name", "arguments": {"param": "value"}}
+        \(ToolCallPattern.toolCallClose)
+
+        You can call multiple tools in a single response. After tool results are returned, continue your reasoning.
+        """
+
+        let toolsBlock: String
+
+        do {
+            let promptFilter = buildToolPromptFilter(mode: mode, taskType: taskType)
+            toolsBlock = try await registry.generateToolsBlock(filter: promptFilter)
+        } catch {
+            toolsBlock = "<!-- error generating tools block: \(error) -->"
+        }
+
+        return PromptComposer.compose(
+            coreInstructions: coreInstructions,
+            memorySection: memorySection,
+            customizationSection: customizationSection,
+            runtimeSection: runtimeSection,
+            skillsMetadata: skillsMetadata,
+            toolsBlock: toolsBlock,
+            maxTokens: maxTokens
+        )
+    }
+
+    private static func buildToolPromptFilter(mode: WorkingMode, taskType: TaskType) -> ToolPromptFilter {
+        switch (mode, taskType) {
+        case (.plan, _):
+            return ToolPromptFilter(modeHint: mode.rawValue, taskTypeHint: taskType.rawValue, maxTools: 14, maxMCPTools: 1)
+        case (.agent, .coding):
+            return ToolPromptFilter(modeHint: mode.rawValue, taskTypeHint: taskType.rawValue, maxTools: 22, maxMCPTools: 2)
+        case (.agent, .reasoning):
+            return ToolPromptFilter(modeHint: mode.rawValue, taskTypeHint: taskType.rawValue, maxTools: 16, maxMCPTools: 1)
+        case (.agent, .general):
+            return ToolPromptFilter(modeHint: mode.rawValue, taskTypeHint: taskType.rawValue, maxTools: 18, maxMCPTools: 2)
+        }
+    }
+
+    public static func buildSystemPrompt(
+        registry: ToolRegistry,
+        maxTokens: Int? = nil,
+        mode: WorkingMode = .agent,
+        thinkingLevel: ThinkingLevel = .high,
+        taskType: TaskType = .general,
+        baseInstructions: String? = nil,
+        memorySection: String? = nil,
+        customizationSection: String? = nil,
+        skillsMetadata: [SkillMetadata] = []
+    ) async -> String {
+        let composition = await buildSystemPromptComposition(
+            registry: registry,
+            maxTokens: maxTokens,
+            mode: mode,
+            thinkingLevel: thinkingLevel,
+            taskType: taskType,
+            baseInstructions: baseInstructions,
+            memorySection: memorySection,
+            customizationSection: customizationSection,
+            skillsMetadata: skillsMetadata
+        )
+        return composition.prompt
+    }
+
+    /// Perform automated build check after file modifications in agent/coding mode.
+    /// This checks for build errors and attempts fixes if needed.
+    private func performBuildCheckIfNeeded() async {
+        renderer.printStatus("🔧 Checking builds in agent/coding mode...")
+        
+        let success = await buildCheckManager.checkBeforeCommit(
+            workspace: workspace,
+            onProgress: { msg in
+                // Progress updates from Ralph loop
+                self.renderer.printStatus("  → \(msg)")
+            },
+            streamRenderer: renderer
+        )
+        
+        if success {
+            renderer.printStatus("✅ Build check passed - ready for commit!")
+        } else {
+            // Build check failed even after fix attempts - inform user
+            renderer.printStatus("⚠️  Build has errors that need manual fixing")
+            renderer.printStatus("Use build_check tool for detailed error information, then fix and commit.")
+        }
+    }
+}

@@ -1,0 +1,68 @@
+// Sources/ToolSystem/Filesystem/WriteFileTool.swift
+// Create or overwrite files within the workspace
+
+import Foundation
+
+/// Creates or overwrites a file with the given content.
+public struct WriteFileTool: Tool {
+    public let name = "write_file"
+    public let description = "Create a new file or overwrite an existing file with the given content. Use this to scaffold the minimal valid structure of a file before adding sections incrementally."
+    public let parameters = JSONSchema(
+        type: "object",
+        properties: [
+            "path": PropertySchema(type: "string", description: "Path to the file to write (relative to workspace root)"),
+            "content": PropertySchema(type: "string", description: "Content to write to the file"),
+        ],
+        required: ["path", "content"]
+    )
+
+    private let permissions: PermissionEngine
+
+    public init(permissions: PermissionEngine) {
+        self.permissions = permissions
+    }
+
+    public func execute(arguments: [String: Any]) async throws -> ToolResult {
+        guard let path = arguments["path"] as? String else {
+            return .error("Missing required argument: path")
+        }
+        guard let content = arguments["content"] as? String else {
+            return .error("Missing required argument: content")
+        }
+
+        let resolvedPath: String
+        do {
+            resolvedPath = try permissions.validatePath(path)
+        } catch {
+            return .error(error.localizedDescription)
+        }
+
+        do {
+            // Create parent directories if needed
+            let parentDir = (resolvedPath as NSString).deletingLastPathComponent
+            try FileManager.default.createDirectory(
+                atPath: parentDir,
+                withIntermediateDirectories: true
+            )
+
+            // Security: Verify parent directory is still within workspace after creation
+            // This additional check protects against TOCTOU attacks where symlinks
+            // are created in the parent directory between validation and write operations.
+            do {
+                let parentValidated = try permissions.validatePath(parentDir)
+                guard parentValidated == parentDir else {
+                    return .error("Security violation: Parent directory failed validation after creation")
+                }
+            } catch {
+                return .error("Security violation: Parent directory path validation failed")
+            }
+
+            try content.write(toFile: resolvedPath, atomically: true, encoding: .utf8)
+
+            let lineCount = content.components(separatedBy: "\n").count
+            return .success("Wrote \(lineCount) lines to \(path)")
+        } catch {
+            return .error("Failed to write file: \(error.localizedDescription)")
+        }
+    }
+}
