@@ -1,0 +1,43 @@
+name: SonarCloud
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  sonarcloud:
+    name: SonarCloud Analysis
+    runs-on: macos-latest
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Swift 6.1
+        uses: swift-actions/setup-swift@v2
+        with:
+          swift-version: "6.1"
+
+      - name: Build and collect coverage
+        run: |
+          swift test --enable-code-coverage 2>&1 || true
+          xcrun llvm-cov export \
+            .build/debug/mlx-coderPackageTests.xctest/Contents/MacOS/mlx-coderPackageTests \
+            --instr-profile .build/debug/codecov/default.profdata \
+            --format=lcov \
+            --ignore-filename-regex="(.build|Tests)" \
+            > coverage.lcov || true
+
+      - name: SonarCloud Scan
+        uses: SonarSource/sonarqube-scan-action@v6
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
