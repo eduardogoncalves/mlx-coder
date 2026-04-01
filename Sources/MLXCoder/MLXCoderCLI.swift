@@ -66,6 +66,12 @@ struct ModelArguments: ParsableArguments, Sendable {
     @Option(name: .long, help: "KV cache quantization bits (nil = no quantization)")
     var kvBits: Int?
 
+    @Option(name: .long, help: "KV cache quantization group size (default: chip profile value, typically 64)")
+    var kvGroupSize: Int?
+
+    @Option(name: .long, help: "First transformer layer to apply KV cache quantization (0 = all layers)")
+    var quantizedKVStart: Int?
+
     @Flag(name: .long, inversion: .prefixedNo, help: "Enable macOS seatbelt sandboxing for shell commands")
     var sandbox: Bool = true
 
@@ -196,7 +202,9 @@ struct ChatCommand: AsyncParsableCommand {
             temperature: args.temperature,
             topP: args.topP,
             kvBits: args.kvBits ?? profile.kvBits,
-            kvGroupSize: 64, longContextThreshold: profile.longContextThreshold
+            kvGroupSize: args.kvGroupSize ?? profile.kvGroupSize,
+            quantizedKVStart: args.quantizedKVStart ?? profile.quantizedKVStart,
+            longContextThreshold: profile.longContextThreshold
         )
 
         // Set up tool registry
@@ -626,7 +634,9 @@ struct RunCommand: AsyncParsableCommand {
             temperature: args.temperature,
             topP: args.topP,
             kvBits: args.kvBits ?? profile.kvBits,
-            kvGroupSize: 64, longContextThreshold: profile.longContextThreshold
+            kvGroupSize: args.kvGroupSize ?? profile.kvGroupSize,
+            quantizedKVStart: args.quantizedKVStart ?? profile.quantizedKVStart,
+            longContextThreshold: profile.longContextThreshold
         )
         
         // Set up tools
