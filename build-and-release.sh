@@ -84,6 +84,16 @@ build_arch() {
     echo "$built_binary"
 }
 
+inject_version() {
+    local version_file="Sources/MLXCoder/MLXCoderCLI.swift"
+    log "Injecting version ${VERSION} into ${version_file}"
+    cp "$version_file" "${version_file}.bak"
+    # Restore the original file on exit so local checkouts stay clean
+    trap "mv '${version_file}.bak' '${version_file}'" EXIT
+    sed -i '' "s/version: \"[^\"]*\"/version: \"${VERSION}\"/" "$version_file"
+    ok "Version injected"
+}
+
 build_binary() {
     local output_bin="${WORK_DIR}/${CLI_NAME}"
     local arm_bin
@@ -212,6 +222,7 @@ main() {
     log "Architecture: ${ARCH}"
 
     require_tools
+    inject_version
 
     local output_binary shader_bundle
     output_binary="$(build_binary)"
