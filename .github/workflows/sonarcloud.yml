@@ -21,11 +21,6 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Set up Swift 6.1
-        uses: swift-actions/setup-swift@364295d9c23900ce04d4e5cc708387921b4e50f9 # v3
-        with:
-          swift-version: "6.1"
-
       - name: Build and collect coverage
         run: |
           swift test --enable-code-coverage 2>&1 || true

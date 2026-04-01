@@ -24,10 +24,6 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Set up Swift 6.1
-        uses: swift-actions/setup-swift@v3
-        with:
-          swift-version: "6.1"
 
       - name: Initialize CodeQL
         uses: github/codeql-action/init@v4
