@@ -103,12 +103,22 @@ public actor AgentLoop {
     private var currentGenerationConfig: GenerationEngine.Config
     private let condensationConfig = ToolResultCondensationConfig()
     private let contextReserveTokens: Int = 1024
-    private let contextKeepRecentMessages: Int = 12
+    /// Number of most-recent conversation turns to always keep verbatim during compaction.
+    private let contextKeepRecentTurns: Int = 6
 
     /// Messages injected between turns during the current run (checked before each generation step).
     private var steeringQueue: [String] = []
     /// Messages queued for automatic processing after the current run finishes.
     private var followUpQueue: [String] = []
+
+    // MARK: - Context transforms
+
+    /// A function that receives the current message list and returns a (possibly modified) copy.
+    /// Transforms are applied in registration order before every model generation call.
+    /// They operate on a **snapshot** — the stored history is never mutated by transforms.
+    public typealias ContextTransform = @Sendable ([Message]) async -> [Message]
+
+    private var contextTransforms: [ContextTransform] = []
 
     public init(
         modelContainer: ModelContainer,
@@ -590,6 +600,7 @@ public actor AgentLoop {
           - task: \(taskType.rawValue)
           - sandbox: \(useSandbox ? "enabled" : "disabled")
           - dry-run: \(dryRun ? "enabled" : "disabled")
+          - context transforms: \(contextTransforms.count)
                 \(toolsWarning)
         """
     }
@@ -735,6 +746,42 @@ public actor AgentLoop {
     /// Clears all pending follow-up messages.
     public func clearFollowUpQueue() {
         followUpQueue.removeAll()
+    }
+
+    // MARK: - Context Transforms
+
+    /// Registers a context transform that is applied to the message list before every model
+    /// generation call. Transforms are applied in registration order and receive a snapshot —
+    /// they never mutate the stored history.
+    ///
+    /// **Common uses:**
+    /// - Memory injection: retrieve relevant documents and prepend them as synthetic user messages.
+    /// - Dynamic pruning: drop old tool-result messages that are no longer relevant.
+    /// - Context enrichment: inject a live file snapshot, git diff, or environment state.
+    ///
+    /// Example (memory injection):
+    /// ```swift
+    /// agentLoop.addContextTransform { messages in
+    ///     let query  = messages.last?.content ?? ""
+    ///     let recalled = await myVectorStore.retrieve(query: query, topK: 3)
+    ///     var out = messages
+    ///     let injection = Message(role: .user, content: "[Memory]\n\(recalled.joined(separator: "\n"))")
+    ///     out.insert(injection, at: out.endIndex - 1)
+    ///     return out
+    /// }
+    /// ```
+    public func addContextTransform(_ transform: @escaping ContextTransform) {
+        contextTransforms.append(transform)
+    }
+
+    /// Removes all registered context transforms.
+    public func removeAllContextTransforms() {
+        contextTransforms.removeAll()
+    }
+
+    /// Returns the number of currently registered context transforms.
+    public var contextTransformCount: Int {
+        contextTransforms.count
     }
 
     /// Cycles to the next available mode (triggered by Shift+Tab).
@@ -1209,28 +1256,76 @@ public actor AgentLoop {
     private func applyDeterministicContextCompactionIfNeeded(reason: String) async {
         let threshold = max(currentGenerationConfig.longContextThreshold, contextReserveTokens + 1)
         let target = max(256, threshold - contextReserveTokens)
-        guard history.estimatedTokenCount > target else {
-            return
+
+        // Use the real tokenizer for accurate token counts when the model is loaded.
+        // We snapshot message contents, compute counts inside perform (which is Sendable-safe),
+        // then use a lookup table as the tokenCounter closure to avoid capturing non-Sendable state.
+        let contentSnapshot = history.messages.map(\.content)
+        let tokenCounts: [Int]?
+        do {
+            tokenCounts = try await modelContainer.perform { context in
+                contentSnapshot.map { context.tokenizer.encode(text: $0).count }
+            }
+        } catch {
+            if renderer.verbose {
+                renderer.printStatus("[debug] Compaction: tokenizer unavailable, falling back to char/4 estimate (\(error.localizedDescription))")
+            }
+            tokenCounts = nil
         }
 
-        let before = history.estimatedTokenCount
-        let compacted = history.compactDeterministically(
-            maxEstimatedTokens: target,
-            keepRecentMessages: contextKeepRecentMessages
+        let tokenCounter: ((String) -> Int)?
+        if let counts = tokenCounts {
+            // Build a lookup from content → token count. Falls back to chars/4 for content not
+            // in the snapshot (shouldn't happen, but safe).
+            let lookup = Dictionary(uniqueKeysWithValues: zip(contentSnapshot, counts))
+            tokenCounter = { text in lookup[text] ?? (text.count / 4) }
+        } else {
+            tokenCounter = nil
+        }
+
+        let currentTokens = tokenCounter.map { counter in
+            history.messages.reduce(0) { $0 + counter($1.content) }
+        } ?? history.estimatedTokenCount
+
+        guard currentTokens > target else { return }
+
+        let before = currentTokens
+        let compacted = history.compactByTurns(
+            maxTokens: target,
+            keepRecentTurns: contextKeepRecentTurns,
+            tokenCounter: tokenCounter
         )
-        guard compacted else {
-            return
+        guard compacted else { return }
+
+        // Re-snapshot after compaction for the "after" count.
+        let afterContentSnapshot = history.messages.map(\.content)
+        let after: Int
+        do {
+            let afterCounts = try await modelContainer.perform { context in
+                afterContentSnapshot.map { context.tokenizer.encode(text: $0).count }
+            }
+            after = afterCounts.reduce(0, +)
+        } catch {
+            if renderer.verbose {
+                renderer.printStatus("[debug] Compaction: post-compaction token count unavailable, using char/4 (\(error.localizedDescription))")
+            }
+            after = history.estimatedTokenCount
         }
 
-        let after = history.estimatedTokenCount
-        renderer.printStatus("[Context] Deterministic compaction triggered (\(reason)): before≈\(before), after≈\(after), target≈\(target)")
+        renderer.printStatus("[Context] Turn-aware compaction triggered (\(reason)): before≈\(before), after≈\(after), target≈\(target)")
         await hooks.emit(.compression(toolName: "context_history", beforeTokens: before, afterTokens: after, usedFallback: false))
     }
 
     /// Generate a response from the model using the current conversation history.
     private func generateResponse() async throws -> String {
         let enableThinking = thinkingLevel != .fast
-        let chatML = history.formatChatML(enableThinking: enableThinking)
+
+        // Apply context transforms (snapshot — does not mutate stored history)
+        var transformedMessages = history.messages
+        for transform in contextTransforms {
+            transformedMessages = await transform(transformedMessages)
+        }
+        let chatML = history.formatChatML(messages: transformedMessages, enableThinking: enableThinking)
 
         // Start processing spinner before inference begins
         let spinner = Spinner(message: "Processing...")

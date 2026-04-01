@@ -303,6 +303,7 @@ struct ChatCommand: AsyncParsableCommand {
                   \u{001B}[32m/context\u{001B}[0m       Show context usage breakdown (estimated tokens)
                   \u{001B}[32m/skills\u{001B}[0m        List discovered skills metadata
                   \u{001B}[32m/hooks\u{001B}[0m         List active hook pipeline entries
+                  \u{001B}[32m/transforms\u{001B}[0m    Show/clear context transforms (no arg = list count)
                   \u{001B}[32m/save-history [path]\u{001B}[0m Export chat transcript as Markdown (default: session-history.md)
                   \u{001B}[32m/save-history-json [path]\u{001B}[0m Export resumable JSON transcript (default: session-history.json)
                   \u{001B}[32m/load-history-json [path]\u{001B}[0m Load JSON transcript into current session
@@ -359,6 +360,22 @@ struct ChatCommand: AsyncParsableCommand {
                         print("- \(name)")
                     }
                     print("")
+                }
+                continue
+            }
+            if trimmed.hasPrefix("/transforms") {
+                let arg = String(trimmed.dropFirst("/transforms".count)).trimmingCharacters(in: .whitespacesAndNewlines)
+                if arg == "clear" {
+                    await agentLoop.removeAllContextTransforms()
+                    renderer.printStatus("All context transforms removed.")
+                } else {
+                    let count = await agentLoop.contextTransformCount
+                    if count == 0 {
+                        print("\nNo context transforms registered.\n")
+                    } else {
+                        print("\nContext transforms registered: \(count)")
+                        print("Use '/transforms clear' to remove all.\n")
+                    }
                 }
                 continue
             }
