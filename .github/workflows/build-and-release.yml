@@ -68,8 +68,10 @@ jobs:
 
       - name: Determine manual version
         id: vars
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
         run: |
-          version="${{ inputs.version }}"
+          version="$INPUT_VERSION"
           if [[ -z "$version" ]]; then
             version="manual-$(date +%Y%m%d%H%M%S)"
           fi
