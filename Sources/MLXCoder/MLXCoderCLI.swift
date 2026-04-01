@@ -258,15 +258,16 @@ struct ChatCommand: AsyncParsableCommand {
         // Clear the 5 startup status lines to make the UI cleaner
         renderer.clearPreviousLines(count: 5)
         
+        let currentVersion = MLXCoderCLI.configuration.version
+
         // REPL Header
-        print("mlx-coder \u{001B}[2m(v0.1.0)\u{001B}[0m")
+        print("mlx-coder \u{001B}[2m(v\(currentVersion))\u{001B}[0m")
         print("\u{001B}[2mModel: \(selectedModel)\u{001B}[0m")
         print("\u{001B}[2mWorkspace: \(absWorkspace)\u{001B}[0m\n")
         renderer.printStatus("[Key mode] Editing input. Enter sends, Shift+Tab cycles mode, Ctrl+C exits.")
 
         let interactiveInput = InteractiveInput()
         var sandboxEnabled = effectiveSandbox
-        let currentVersion = MLXCoderCLI.configuration.version
         
         // Set initial mode from arguments
         if args.mode.lowercased() == "agent" {
@@ -303,6 +304,7 @@ struct ChatCommand: AsyncParsableCommand {
                   \u{001B}[32m/context\u{001B}[0m       Show context usage breakdown (estimated tokens)
                   \u{001B}[32m/skills\u{001B}[0m        List discovered skills metadata
                   \u{001B}[32m/hooks\u{001B}[0m         List active hook pipeline entries
+                  \u{001B}[32m/transforms\u{001B}[0m    Show/clear context transforms (no arg = list count)
                   \u{001B}[32m/save-history [path]\u{001B}[0m Export chat transcript as Markdown (default: session-history.md)
                   \u{001B}[32m/save-history-json [path]\u{001B}[0m Export resumable JSON transcript (default: session-history.json)
                   \u{001B}[32m/load-history-json [path]\u{001B}[0m Load JSON transcript into current session
@@ -310,7 +312,9 @@ struct ChatCommand: AsyncParsableCommand {
                   \u{001B}[32m/plan\u{001B}[0m          Switch to PLAN MODE (read-only, safe browsing)
                   \u{001B}[32m/agent\u{001B}[0m         Switch to AGENT MODE (full filesystem/shell access)
                   \u{001B}[32m/task [type]\u{001B}[0m   Set task type: general, coding, reasoning
-                  \u{001B}[32m/thinking [lvl]\u{001B}[0m Set thinking level: low, high (default: low)
+                  \u{001B}[32m/thinking [lvl]\u{001B}[0m Set thinking budget: fast/off, minimal, low, medium, high (default: low)
+                  \u{001B}[32m/steer [msg]\u{001B}[0m   Queue a steering message injected between agent turns (no arg = list queue)
+                  \u{001B}[32m/followup [msg]\u{001B}[0m Queue a follow-up run after the current task (no arg = list queue)
                   \u{001B}[32m/sandbox\u{001B}[0m       Toggle macOS Seatbelt sandbox for shell commands
                   \u{001B}[32mEsc\u{001B}[0m            Cancel current generation
                   \u{001B}[32mShift+Tab\u{001B}[0m      Cycle modes (default starts at Plan low):
@@ -357,6 +361,22 @@ struct ChatCommand: AsyncParsableCommand {
                         print("- \(name)")
                     }
                     print("")
+                }
+                continue
+            }
+            if trimmed.hasPrefix("/transforms") {
+                let arg = String(trimmed.dropFirst("/transforms".count)).trimmingCharacters(in: .whitespacesAndNewlines)
+                if arg == "clear" {
+                    await agentLoop.removeAllContextTransforms()
+                    renderer.printStatus("All context transforms removed.")
+                } else {
+                    let count = await agentLoop.contextTransformCount
+                    if count == 0 {
+                        print("\nNo context transforms registered.\n")
+                    } else {
+                        print("\nContext transforms registered: \(count)")
+                        print("Use '/transforms clear' to remove all.\n")
+                    }
                 }
                 continue
             }
@@ -425,17 +445,58 @@ struct ChatCommand: AsyncParsableCommand {
                 let parts = trimmed.split(separator: " ")
                 if parts.count > 1 {
                     let level = parts[1].lowercased()
-                    if level == "low" {
+                    switch level {
+                    case "fast", "off":
+                        await agentLoop.setThinkingLevel(.fast)
+                    case "minimal":
+                        await agentLoop.setThinkingLevel(.minimal)
+                    case "low":
                         await agentLoop.setThinkingLevel(.low)
-                    } else if level == "high" {
+                    case "medium":
+                        await agentLoop.setThinkingLevel(.medium)
+                    case "high":
                         await agentLoop.setThinkingLevel(.high)
-                    } else {
-                        renderer.printError("Invalid thinking level: \(level). Use 'low' or 'high'.")
+                    default:
+                        renderer.printError("Invalid thinking level: \(level). Use 'fast/off', 'minimal', 'low', 'medium', or 'high'.")
                     }
                 } else {
-                    // Toggle if no level specified
-                    let newLevel: AgentLoop.ThinkingLevel = await agentLoop.thinkingLevel == .high ? .low : .high
-                    await agentLoop.setThinkingLevel(newLevel)
+                    // Show current level and budget when no argument given
+                    let current = await agentLoop.thinkingLevel
+                    renderer.printStatus("Thinking level: \(current.displayName)")
+                }
+                continue
+            }
+            if trimmed.hasPrefix("/steer") {
+                let msg = String(trimmed.dropFirst("/steer".count)).trimmingCharacters(in: .whitespacesAndNewlines)
+                if !msg.isEmpty {
+                    await agentLoop.steer(msg)
+                    renderer.printStatus("↩️  Steering message queued: \"\(msg)\"")
+                } else {
+                    let pending = await agentLoop.pendingSteeringMessages()
+                    if pending.isEmpty {
+                        renderer.printStatus("No steering messages queued.")
+                    } else {
+                        print("\nQueued steering messages (\(pending.count)):")
+                        for (i, m) in pending.enumerated() { print("  \(i + 1). \(m)") }
+                        print("")
+                    }
+                }
+                continue
+            }
+            if trimmed.hasPrefix("/followup") {
+                let msg = String(trimmed.dropFirst("/followup".count)).trimmingCharacters(in: .whitespacesAndNewlines)
+                if !msg.isEmpty {
+                    await agentLoop.queueFollowUp(msg)
+                    renderer.printStatus("🔄 Follow-up queued: \"\(msg)\"")
+                } else {
+                    let pending = await agentLoop.pendingFollowUps()
+                    if pending.isEmpty {
+                        renderer.printStatus("No follow-ups queued.")
+                    } else {
+                        print("\nQueued follow-ups (\(pending.count)):")
+                        for (i, m) in pending.enumerated() { print("  \(i + 1). \(m)") }
+                        print("")
+                    }
                 }
                 continue
             }
@@ -448,6 +509,32 @@ struct ChatCommand: AsyncParsableCommand {
                 await CancelController.shared.setTask(task)
                 try await task.value
                 await CancelController.shared.setTask(nil)
+
+                // Auto-process any queued follow-ups after the run completes.
+                // drainFollowUpQueue() collects all entries in O(1) preserving insertion order.
+                let pendingFollowUps = await agentLoop.drainFollowUpQueue()
+                for followUp in pendingFollowUps {
+                    renderer.printStatus("🔄 Auto follow-up: \"\(followUp)\"")
+                    await hooks.emit(.followUpStarted(message: followUp))
+                    let followUpTask = Task {
+                        try await agentLoop.processUserMessage(followUp)
+                    }
+                    await CancelController.shared.setTask(followUpTask)
+                    do {
+                        try await followUpTask.value
+                    } catch is CancellationError {
+                        renderer.printError("Follow-up cancelled.")
+                        await agentLoop.clearFollowUpQueue()
+                        await CancelController.shared.setTask(nil)
+                        break
+                    } catch {
+                        renderer.printError("Follow-up error: \(error.localizedDescription)")
+                        await agentLoop.clearFollowUpQueue()
+                        await CancelController.shared.setTask(nil)
+                        break
+                    }
+                    await CancelController.shared.setTask(nil)
+                }
             } catch is CancellationError {
                 renderer.printError("Generation cancelled by user.")
                 await CancelController.shared.setTask(nil)

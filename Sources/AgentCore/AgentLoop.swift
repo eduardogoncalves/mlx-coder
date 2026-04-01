@@ -45,9 +45,38 @@ public actor AgentLoop {
     }
     
     public enum ThinkingLevel: String, Codable, Sendable {
+        /// No thinking blocks — fastest, deterministic responses.
         case fast
+        /// ~100-token thinking budget — one or two sentences of internal reasoning.
+        case minimal
+        /// ~300-token thinking budget — concise reasoning focused on the key insight.
         case low
+        /// ~600-token thinking budget — moderate depth, balances speed and quality.
+        case medium
+        /// ~2000-token thinking budget — deep reasoning, explores multiple approaches.
         case high
+
+        /// Approximate token budget for the thinking block at this level.
+        public var budgetTokens: Int {
+            switch self {
+            case .fast:    return 0
+            case .minimal: return 100
+            case .low:     return 300
+            case .medium:  return 600
+            case .high:    return 2000
+            }
+        }
+
+        /// Human-readable label shown in status messages and the REPL.
+        public var displayName: String {
+            switch self {
+            case .fast:    return "fast (off)"
+            case .minimal: return "minimal (~\(budgetTokens) tokens)"
+            case .low:     return "low (~\(budgetTokens) tokens)"
+            case .medium:  return "medium (~\(budgetTokens) tokens)"
+            case .high:    return "high (~\(budgetTokens) tokens)"
+            }
+        }
     }
     
     public enum TaskType: String, Codable, Sendable {
@@ -74,7 +103,22 @@ public actor AgentLoop {
     private var currentGenerationConfig: GenerationEngine.Config
     private let condensationConfig = ToolResultCondensationConfig()
     private let contextReserveTokens: Int = 1024
-    private let contextKeepRecentMessages: Int = 12
+    /// Number of most-recent conversation turns to always keep verbatim during compaction.
+    private let contextKeepRecentTurns: Int = 6
+
+    /// Messages injected between turns during the current run (checked before each generation step).
+    private var steeringQueue: [String] = []
+    /// Messages queued for automatic processing after the current run finishes.
+    private var followUpQueue: [String] = []
+
+    // MARK: - Context transforms
+
+    /// A function that receives the current message list and returns a (possibly modified) copy.
+    /// Transforms are applied in registration order before every model generation call.
+    /// They operate on a **snapshot** — the stored history is never mutated by transforms.
+    public typealias ContextTransform = @Sendable ([Message]) async -> [Message]
+
+    private var contextTransforms: [ContextTransform] = []
 
     public init(
         modelContainer: ModelContainer,
@@ -135,22 +179,22 @@ public actor AgentLoop {
         // Ensure currentMode is synced with initial mode/thinking/task settings
         switch self.mode {
         case .plan:
-            self.currentMode = (self.thinkingLevel == .high) ? .planHigh : .planLow
+            self.currentMode = (self.thinkingLevel == .high || self.thinkingLevel == .medium) ? .planHigh : .planLow
         case .agent:
             if self.taskType == .coding {
                 switch self.thinkingLevel {
-                case .fast:
+                case .fast, .minimal:
                     self.currentMode = .agentCodingFast
-                case .low:
+                case .low, .medium:
                     self.currentMode = .agentCodingLow
                 case .high:
                     self.currentMode = .agentCodingHigh
                 }
             } else {
                 switch self.thinkingLevel {
-                case .fast:
+                case .fast, .minimal:
                     self.currentMode = .agentGeneralFast
-                case .low, .high:
+                case .low, .medium, .high:
                     self.currentMode = .agentGeneralLow
                 }
             }
@@ -401,6 +445,18 @@ public actor AgentLoop {
 
                 history.addToolResponse(toolResponse, toolCallId: call.name)
             }
+
+            // After processing all tool calls for this turn, drain the steering queue.
+            // Steering messages redirect the agent on the next generation turn.
+            if !steeringQueue.isEmpty {
+                let pending = steeringQueue
+                steeringQueue.removeAll()
+                for msg in pending {
+                    renderer.printStatus("↩️  Steering: \(msg)")
+                    history.addUser(msg)
+                    await hooks.emit(.steeringInjected(message: msg))
+                }
+            }
         }
 
         renderer.printError("Exceeded maximum tool iterations (\(maxToolIterations))")
@@ -544,6 +600,7 @@ public actor AgentLoop {
           - task: \(taskType.rawValue)
           - sandbox: \(useSandbox ? "enabled" : "disabled")
           - dry-run: \(dryRun ? "enabled" : "disabled")
+          - context transforms: \(contextTransforms.count)
                 \(toolsWarning)
         """
     }
@@ -628,8 +685,7 @@ public actor AgentLoop {
         promptSectionTokenEstimates = composition.sectionTokenEstimates
         history.updateSystemPrompt(composition.prompt)
         
-        let levelStr = level == .high ? "\u{001B}[32mHIGH\u{001B}[0m" : "\u{001B}[33mLOW\u{001B}[0m"
-        renderer.printStatus("Thinking Level: \(levelStr)")
+        renderer.printStatus("Thinking Level: \u{001B}[32m\(level.displayName.uppercased())\u{001B}[0m")
     }
 
     /// Sets the task type (general/coding/reasoning) and updates generation parameters.
@@ -640,6 +696,92 @@ public actor AgentLoop {
         
         let typeStr = type.rawValue.uppercased()
         renderer.printStatus("Task Type: \u{001B}[32m\(typeStr)\u{001B}[0m")
+    }
+
+    // MARK: - Steering & Follow-up
+
+    /// Queues a steering message to be injected before the next generation turn within the
+    /// current run. Steering messages let you redirect the agent mid-run — they are consumed
+    /// between tool-execution rounds, before the model generates its next response.
+    public func steer(_ message: String) {
+        steeringQueue.append(message)
+    }
+
+    /// Returns the pending steering messages without consuming them.
+    public func pendingSteeringMessages() -> [String] {
+        steeringQueue
+    }
+
+    /// Clears all pending steering messages.
+    public func clearSteeringQueue() {
+        steeringQueue.removeAll()
+    }
+
+    /// Queues a follow-up message for automatic processing after the current run completes.
+    /// The CLI drains this queue and calls `processUserMessage` for each entry without
+    /// requiring the user to type anything.
+    public func queueFollowUp(_ message: String) {
+        followUpQueue.append(message)
+    }
+
+    /// Dequeues and returns the next follow-up message, or `nil` if the queue is empty.
+    public func dequeueFollowUp() -> String? {
+        guard !followUpQueue.isEmpty else { return nil }
+        return followUpQueue.removeFirst()
+    }
+
+    /// Dequeues all pending follow-ups at once and clears the queue in O(1).
+    /// Prefer this over calling `dequeueFollowUp()` in a loop.
+    public func drainFollowUpQueue() -> [String] {
+        let all = followUpQueue
+        followUpQueue.removeAll()
+        return all
+    }
+
+    /// Returns the pending follow-up messages without consuming them.
+    public func pendingFollowUps() -> [String] {
+        followUpQueue
+    }
+
+    /// Clears all pending follow-up messages.
+    public func clearFollowUpQueue() {
+        followUpQueue.removeAll()
+    }
+
+    // MARK: - Context Transforms
+
+    /// Registers a context transform that is applied to the message list before every model
+    /// generation call. Transforms are applied in registration order and receive a snapshot —
+    /// they never mutate the stored history.
+    ///
+    /// **Common uses:**
+    /// - Memory injection: retrieve relevant documents and prepend them as synthetic user messages.
+    /// - Dynamic pruning: drop old tool-result messages that are no longer relevant.
+    /// - Context enrichment: inject a live file snapshot, git diff, or environment state.
+    ///
+    /// Example (memory injection):
+    /// ```swift
+    /// agentLoop.addContextTransform { messages in
+    ///     let query  = messages.last?.content ?? ""
+    ///     let recalled = await myVectorStore.retrieve(query: query, topK: 3)
+    ///     var out = messages
+    ///     let injection = Message(role: .user, content: "[Memory]\n\(recalled.joined(separator: "\n"))")
+    ///     out.insert(injection, at: out.endIndex - 1)
+    ///     return out
+    /// }
+    /// ```
+    public func addContextTransform(_ transform: @escaping ContextTransform) {
+        contextTransforms.append(transform)
+    }
+
+    /// Removes all registered context transforms.
+    public func removeAllContextTransforms() {
+        contextTransforms.removeAll()
+    }
+
+    /// Returns the number of currently registered context transforms.
+    public var contextTransformCount: Int {
+        contextTransforms.count
     }
 
     /// Cycles to the next available mode (triggered by Shift+Tab).
@@ -752,13 +894,13 @@ public actor AgentLoop {
     private func syncCurrentModeFromSettings() {
         switch mode {
         case .plan:
-            currentMode = (thinkingLevel == .high) ? .planHigh : .planLow
+            currentMode = (thinkingLevel == .high || thinkingLevel == .medium) ? .planHigh : .planLow
         case .agent:
             if taskType == .coding {
                 switch thinkingLevel {
-                case .fast:
+                case .fast, .minimal:
                     currentMode = .agentCodingFast
-                case .low:
+                case .low, .medium:
                     currentMode = .agentCodingLow
                 case .high:
                     currentMode = .agentCodingHigh
@@ -766,9 +908,9 @@ public actor AgentLoop {
             } else {
                 // No dedicated General (high) label exists in ModelMode; keep non-coding labels stable.
                 switch thinkingLevel {
-                case .fast:
+                case .fast, .minimal:
                     currentMode = .agentGeneralFast
-                case .low, .high:
+                case .low, .medium, .high:
                     currentMode = .agentGeneralLow
                 }
             }
@@ -789,49 +931,69 @@ public actor AgentLoop {
         var presencePenalty: Float? = nil
         var repetitionPenalty: Float? = nil
         
-        // Determine task type implicitly if not strictly set? 
-        // User's request mapping:
+        // Prescribed parameter mapping:
         // 1. Thinking mode for general tasks: temperature=1.0, top_p=0.95, top_k=20, min_p=0.0, presence_penalty=1.5, repetition_penalty=1.0
         // 2. Thinking mode for precise coding tasks (e.g. WebDev): temperature=0.6, top_p=0.95, top_k=20, min_p=0.0, presence_penalty=0.0, repetition_penalty=1.0
         // 3. Instruct (or non-thinking) mode for general tasks: temperature=0.7, top_p=0.8, top_k=20, min_p=0.0, presence_penalty=1.5, repetition_penalty=1.0
         // 4. Instruct (or non-thinking) mode for reasoning tasks: temperature=1.0, top_p=0.95, top_k=20, min_p=0.0, presence_penalty=1.5, repetition_penalty=1.0
         
-        if thinkingLevel == .fast {
-            // "Fast" mode (Deterministic, no reasoning)
+        switch thinkingLevel {
+        case .fast:
+            // Deterministic, no thinking
             topK = 1
             repetitionPenalty = 1.0
             temp = 0.0
             topP = 1.0
             presencePenalty = 0.0
-        } else if thinkingLevel == .high {
-            // Thinking mode
+
+        case .minimal:
+            // Very brief thinking — close to deterministic but allows a short think block
+            topK = 5
+            repetitionPenalty = 1.0
+            temp = 0.3
+            topP = 0.85
+            presencePenalty = 0.5
+
+        case .low:
+            // Instruct-style with concise thinking
+            topK = 20
+            repetitionPenalty = 1.0
+            if mode == .plan || taskType == .reasoning {
+                temp = 1.0
+                topP = 0.95
+                presencePenalty = 1.5
+            } else {
+                temp = 0.7
+                topP = 0.8
+                presencePenalty = 1.5
+            }
+
+        case .medium:
+            // Moderate thinking — balanced depth and speed
+            topK = 15
+            repetitionPenalty = 1.0
+            if mode == .agent || taskType == .coding {
+                temp = 0.55
+                topP = 0.90
+                presencePenalty = 0.0
+            } else {
+                temp = 0.85
+                topP = 0.92
+                presencePenalty = 1.0
+            }
+
+        case .high:
+            // Deep thinking — full reasoning budget
             topP = 0.95
             topK = 20
             repetitionPenalty = 1.0
-            
             if mode == .agent || taskType == .coding {
                 // Precise coding tasks
                 temp = 0.6
                 presencePenalty = 0.0
             } else {
-                // General tasks (including reasoning if in high thinking)
+                // General tasks (including reasoning)
                 temp = 1.0
-                presencePenalty = 1.5
-            }
-        } else {
-            // Instruct mode
-            topK = 20
-            repetitionPenalty = 1.0
-            
-            if mode == .plan || taskType == .reasoning {
-                // Reasoning tasks (Instruct)
-                temp = 1.0
-                topP = 0.95
-                presencePenalty = 1.5
-            } else {
-                // General tasks (Instruct)
-                temp = 0.7
-                topP = 0.8
                 presencePenalty = 1.5
             }
         }
@@ -1094,28 +1256,81 @@ public actor AgentLoop {
     private func applyDeterministicContextCompactionIfNeeded(reason: String) async {
         let threshold = max(currentGenerationConfig.longContextThreshold, contextReserveTokens + 1)
         let target = max(256, threshold - contextReserveTokens)
-        guard history.estimatedTokenCount > target else {
-            return
+
+        // Use the real tokenizer for accurate token counts when the model is loaded.
+        // We snapshot message contents, compute counts inside perform (which is Sendable-safe),
+        // then use a lookup table as the tokenCounter closure to avoid capturing non-Sendable state.
+        let contentSnapshot = history.messages.map(\.content)
+        let tokenCounts: [Int]?
+        do {
+            tokenCounts = try await modelContainer.perform { context in
+                contentSnapshot.map { context.tokenizer.encode(text: $0).count }
+            }
+        } catch {
+            if renderer.verbose {
+                renderer.printStatus("[debug] Compaction: tokenizer unavailable, falling back to char/4 estimate (\(error.localizedDescription))")
+            }
+            tokenCounts = nil
         }
 
-        let before = history.estimatedTokenCount
-        let compacted = history.compactDeterministically(
-            maxEstimatedTokens: target,
-            keepRecentMessages: contextKeepRecentMessages
+        let tokenCounter: ((String) -> Int)?
+        if let counts = tokenCounts {
+            // Build a lookup from content → token count. Falls back to chars/4 for content not
+            // in the snapshot (shouldn't happen, but safe).
+            let lookup = Dictionary(uniqueKeysWithValues: zip(contentSnapshot, counts))
+            tokenCounter = { text in lookup[text] ?? (text.count / 4) }
+        } else {
+            tokenCounter = nil
+        }
+
+        let currentTokens = tokenCounter.map { counter in
+            history.messages.reduce(0) { $0 + counter($1.content) }
+        } ?? history.estimatedTokenCount
+
+        guard currentTokens > target else { return }
+
+        let before = currentTokens
+        let compacted = history.compactByTurns(
+            maxTokens: target,
+            keepRecentTurns: contextKeepRecentTurns,
+            tokenCounter: tokenCounter
         )
-        guard compacted else {
-            return
+        guard compacted else { return }
+
+        // Re-snapshot after compaction for the "after" count.
+        let afterContentSnapshot = history.messages.map(\.content)
+        let after: Int
+        do {
+            let afterCounts = try await modelContainer.perform { context in
+                afterContentSnapshot.map { context.tokenizer.encode(text: $0).count }
+            }
+            after = afterCounts.reduce(0, +)
+        } catch {
+            if renderer.verbose {
+                renderer.printStatus("[debug] Compaction: post-compaction token count unavailable, using char/4 (\(error.localizedDescription))")
+            }
+            after = history.estimatedTokenCount
         }
 
-        let after = history.estimatedTokenCount
-        renderer.printStatus("[Context] Deterministic compaction triggered (\(reason)): before≈\(before), after≈\(after), target≈\(target)")
+        renderer.printStatus("[Context] Turn-aware compaction triggered (\(reason)): before≈\(before), after≈\(after), target≈\(target)")
         await hooks.emit(.compression(toolName: "context_history", beforeTokens: before, afterTokens: after, usedFallback: false))
     }
 
     /// Generate a response from the model using the current conversation history.
     private func generateResponse() async throws -> String {
         let enableThinking = thinkingLevel != .fast
-        let chatML = history.formatChatML(enableThinking: enableThinking)
+
+        // Apply context transforms (snapshot — does not mutate stored history)
+        var transformedMessages = history.messages
+        for (index, transform) in contextTransforms.enumerated() {
+            let before = transformedMessages.count
+            transformedMessages = await transform(transformedMessages)
+            let after = transformedMessages.count
+            if after != before {
+                await hooks.emit(.contextTransformApplied(transformIndex: index, messagesBefore: before, messagesAfter: after))
+            }
+        }
+        let chatML = history.formatChatML(messages: transformedMessages, enableThinking: enableThinking)
 
         // Start processing spinner before inference begins
         let spinner = Spinner(message: "Processing...")
@@ -1497,10 +1712,14 @@ public actor AgentLoop {
         
         if thinkingLevel == .fast {
             coreInstructions += "\n\nTHINKING STYLE: DO NOT USE internal thinking (no <think> blocks). NO PREAMBLE. NO REASONING. RESPOND ONLY WITH THE FINAL ANSWER OR TOOL CALLS IMMEDIATELY. Be extremely concise/direct."
+        } else if thinkingLevel == .minimal {
+            coreInstructions += "\n\nTHINKING STYLE: Use at most ~\(thinkingLevel.budgetTokens) tokens of internal thinking (between <think> and </think>). One or two sentences of reasoning at most. Jump immediately to your answer or tool call."
         } else if thinkingLevel == .low {
-            coreInstructions += "\n\nTHINKING STYLE: Keep your internal thinking (between <think> and </think>) extremely concise and focused. Jump to the solution or tool call as quickly as possible."
+            coreInstructions += "\n\nTHINKING STYLE: Keep your internal thinking (between <think> and </think>) to at most ~\(thinkingLevel.budgetTokens) tokens. Be concise — identify the key insight and proceed to the solution quickly."
+        } else if thinkingLevel == .medium {
+            coreInstructions += "\n\nTHINKING STYLE: Use moderate internal thinking (between <think> and </think>), targeting ~\(thinkingLevel.budgetTokens) tokens. Reason through the key steps but stay focused. Avoid over-thinking straightforward decisions."
         } else {
-            coreInstructions += "\n\nTHINKING STYLE: Feel free to think deeply. Use the thinking space (between <think> and </think>) to explore multiple approaches, reason about the code, and plan your steps carefully."
+            coreInstructions += "\n\nTHINKING STYLE: Feel free to think deeply (target up to ~\(thinkingLevel.budgetTokens) tokens between <think> and </think>). Explore multiple approaches, reason about trade-offs, and plan your steps carefully before responding."
         }
         
         let now = Date()

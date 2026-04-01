@@ -27,6 +27,12 @@ private struct RecordingHook: AgentHook {
             await collector.append("post:\(toolName):\(isError)")
         case .compression(let toolName, let before, let after, let usedFallback):
             await collector.append("compression:\(toolName):\(before):\(after):\(usedFallback)")
+        case .steeringInjected(let message):
+            await collector.append("steering:\(message)")
+        case .followUpStarted(let message):
+            await collector.append("followUp:\(message)")
+        case .contextTransformApplied(let transformIndex, let messagesBefore, let messagesAfter):
+            await collector.append("contextTransform:\(transformIndex):\(messagesBefore):\(messagesAfter)")
         }
     }
 }
