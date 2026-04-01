@@ -1,4 +1,5 @@
 import Foundation
+#if canImport(FoundationModels)
 import FoundationModels
 
 @available(macOS 26.0, *)
@@ -22,3 +23,11 @@ struct App {
         }
     }
 }
+#else
+@main
+struct App {
+    static func main() {
+        print("FoundationModels is not available on this platform.")
+    }
+}
+#endif
