@@ -77,7 +77,7 @@ build_arch() {
         -configuration Release \
         -destination "platform=macOS,arch=${target_arch}" \
         -derivedDataPath "$derived_data" \
-        build >/dev/null
+        build
 
     local built_binary="${derived_data}/Build/Products/Release/${SCHEME_NAME}"
     [[ -f "$built_binary" ]] || fail "Expected binary not found: ${built_binary}"
