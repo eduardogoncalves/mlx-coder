@@ -258,15 +258,16 @@ struct ChatCommand: AsyncParsableCommand {
         // Clear the 5 startup status lines to make the UI cleaner
         renderer.clearPreviousLines(count: 5)
         
+        let currentVersion = MLXCoderCLI.configuration.version
+
         // REPL Header
-        print("mlx-coder \u{001B}[2m(v0.1.0)\u{001B}[0m")
+        print("mlx-coder \u{001B}[2m(v\(currentVersion))\u{001B}[0m")
         print("\u{001B}[2mModel: \(selectedModel)\u{001B}[0m")
         print("\u{001B}[2mWorkspace: \(absWorkspace)\u{001B}[0m\n")
         renderer.printStatus("[Key mode] Editing input. Enter sends, Shift+Tab cycles mode, Ctrl+C exits.")
 
         let interactiveInput = InteractiveInput()
         var sandboxEnabled = effectiveSandbox
-        let currentVersion = MLXCoderCLI.configuration.version
         
         // Set initial mode from arguments
         if args.mode.lowercased() == "agent" {
