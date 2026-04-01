@@ -9,6 +9,9 @@ public enum AgentHookEvent: Sendable {
     case steeringInjected(message: String)
     /// Emitted when an automatic follow-up is started after a completed run.
     case followUpStarted(message: String)
+    /// Emitted after a context transform runs and produces a different message list.
+    /// `transformIndex` is the zero-based position in the registered transform pipeline.
+    case contextTransformApplied(transformIndex: Int, messagesBefore: Int, messagesAfter: Int)
 }
 
 public protocol AgentHook: Sendable {

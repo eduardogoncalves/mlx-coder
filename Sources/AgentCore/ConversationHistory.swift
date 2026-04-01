@@ -245,7 +245,7 @@ public struct ConversationHistory: Sendable {
         let recentTokens = recentTurns.flatMap(\.allMessages).reduce(0) { $0 + count($1.content) }
 
         // Sort candidates by importance ascending so we drop least-important first.
-        var sortedIndices = candidateTurns.indices.sorted {
+        let sortedIndices = candidateTurns.indices.sorted {
             candidateTurns[$0].importanceScore < candidateTurns[$1].importanceScore
         }
 

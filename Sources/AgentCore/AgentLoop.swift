@@ -1322,8 +1322,13 @@ public actor AgentLoop {
 
         // Apply context transforms (snapshot — does not mutate stored history)
         var transformedMessages = history.messages
-        for transform in contextTransforms {
+        for (index, transform) in contextTransforms.enumerated() {
+            let before = transformedMessages.count
             transformedMessages = await transform(transformedMessages)
+            let after = transformedMessages.count
+            if after != before {
+                await hooks.emit(.contextTransformApplied(transformIndex: index, messagesBefore: before, messagesAfter: after))
+            }
         }
         let chatML = history.formatChatML(messages: transformedMessages, enableThinking: enableThinking)
 
