@@ -5,6 +5,7 @@ import Foundation
 import MLX
 import MLXLLM
 import MLXLMCommon
+import MLXVLM
 
 /// Loads a model from a local filesystem path.
 /// The model runs in-process — no HTTP server, no external API.
@@ -83,7 +84,18 @@ public final class ModelLoader: Sendable {
         }
 
         let progressTracker = DownloadProgressTracker()
-        let container = try await LLMModelFactory.shared.loadContainer(
+
+        // Register "glm4v" as an alias for GlmOcr — GLM-4.6V-Flash uses this model_type
+        // string but shares the same architecture as the glm_ocr family already supported by
+        // MLXVLM.  Registration is idempotent so repeated calls are safe.
+        await VLMTypeRegistry.shared.registerModelType("glm4v") { data in
+            let config = try JSONDecoder.json5().decode(GlmOcrConfiguration.self, from: data)
+            return GlmOcr(config)
+        }
+
+        // Use the MLXLMCommon free function which automatically routes through all registered
+        // model factories (MLXVLM first, then MLXLLM), so VLMs and LLMs are handled uniformly.
+        let container = try await loadModelContainer(
             hub: .init(downloadBase: modelsBaseURL),
             configuration: configuration,
             progressHandler: { progress in

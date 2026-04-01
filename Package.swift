@@ -16,6 +16,7 @@ let package = Package(
             dependencies: [
                 .product(name: "MLX",           package: "mlx-swift"),
                 .product(name: "MLXLLM",        package: "mlx-swift-lm"),
+                .product(name: "MLXVLM",        package: "mlx-swift-lm"),
                 .product(name: "MLXLMCommon",   package: "mlx-swift-lm"),
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
                 .product(name: "Yams",          package: "Yams"),
