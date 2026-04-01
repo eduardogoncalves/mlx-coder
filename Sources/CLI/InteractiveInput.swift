@@ -48,7 +48,7 @@ public final class InteractiveInput: @unchecked Sendable {
         
         var rawTerm = originalTerm
         // Turn off ECHO, Canonical mode, and ISIG to read character by character without signals firing
-        rawTerm.c_lflag &= ~UInt(ECHO | ICANON | ISIG)
+        rawTerm.c_lflag &= ~tcflag_t(ECHO | ICANON | ISIG)
         rawTerm.c_cc.16 = 1 // VMIN
         rawTerm.c_cc.17 = 0 // VTIME
         tcsetattr(STDIN_FILENO, TCSANOW, &rawTerm)

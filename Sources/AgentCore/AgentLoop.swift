@@ -1524,7 +1524,7 @@ public actor AgentLoop {
         tcgetattr(STDIN_FILENO, &originalTermios)
         
         var rawTermios = originalTermios
-        rawTermios.c_lflag &= ~UInt(ICANON | ECHO | ISIG)
+        rawTermios.c_lflag &= ~tcflag_t(ICANON | ECHO | ISIG)
         rawTermios.c_cc.16 = 1  // VMIN - wait for at least 1 byte
         rawTermios.c_cc.17 = 0  // VTIME
         tcsetattr(STDIN_FILENO, TCSANOW, &rawTermios)
