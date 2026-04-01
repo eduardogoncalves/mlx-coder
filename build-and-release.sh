@@ -77,7 +77,7 @@ build_arch() {
         -configuration Release \
         -destination "platform=macOS,arch=${target_arch}" \
         -derivedDataPath "$derived_data" \
-        build
+        build >&2
 
     local built_binary="${derived_data}/Build/Products/Release/${SCHEME_NAME}"
     [[ -f "$built_binary" ]] || fail "Expected binary not found: ${built_binary}"
@@ -97,7 +97,7 @@ inject_version() {
 build_binary() {
     local output_bin="${WORK_DIR}/${CLI_NAME}"
     local arm_bin
-    arm_bin="$(build_arch arm64 "$BUILD_DIR_ARM64")"
+    arm_bin="$(build_arch arm64 "$BUILD_DIR_ARM64")" || exit $?
     cp "$arm_bin" "$output_bin"
     chmod +x "$output_bin"
     echo "$output_bin"
@@ -225,8 +225,8 @@ main() {
     inject_version
 
     local output_binary shader_bundle
-    output_binary="$(build_binary)"
-    shader_bundle="$(copy_shader_bundle)"
+    output_binary="$(build_binary)" || exit $?
+    shader_bundle="$(copy_shader_bundle)" || exit $?
 
     stage_cli_payload "$output_binary" "$shader_bundle"
     create_cli_archive

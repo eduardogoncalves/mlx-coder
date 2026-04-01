@@ -65,7 +65,7 @@ public actor CancelController {
             
             var rawTerm = originalTerm
             // Disable ICANON, ECHO, and ISIG to read char-by-char and catch ESC/Ctrl+C
-            rawTerm.c_lflag &= ~UInt(ICANON | ECHO | ISIG)
+            rawTerm.c_lflag &= ~tcflag_t(ICANON | ECHO | ISIG)
             // Non-blocking read
             rawTerm.c_cc.16 = 0 // VMIN
             rawTerm.c_cc.17 = 1 // VTIME (0.1s)
