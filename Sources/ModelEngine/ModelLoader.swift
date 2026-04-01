@@ -171,6 +171,12 @@ private final class DownloadProgressTracker: @unchecked Sendable {
             return "Loading model weights..."
         }
 
+        // When the Progress tracks individual files (kind == .file), unit counts
+        // represent file counts, not bytes.  Display "X / Y files" in that case.
+        if progress.kind == .file {
+            return "Downloading: \(completed) / \(total) files (\(pct)%)"
+        }
+
         let completedStr = Self.formatBytes(completed)
         let totalStr = Self.formatBytes(total)
 
