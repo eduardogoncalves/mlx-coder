@@ -48,4 +48,32 @@ final class AuditHookTests: XCTestCase {
         XCTAssertTrue(contents.contains("\"hook_event\":\"compression\""))
         XCTAssertTrue(contents.contains("\"tool\":\"web_fetch\""))
     }
+
+    func testAuditHookWritesSteeringFollowUpAndContextTransformEvents() async throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("native-agent-audit-hook-tests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let logPath = tempDir.appendingPathComponent("audit.log.jsonl").path
+        let logger = ToolAuditLogger(
+            logFilePath: logPath,
+            workspaceRoot: "/tmp/workspace",
+            approvalMode: PermissionEngine.ApprovalMode.default.rawValue
+        )
+        let hook = AuditHook(logger: logger)
+
+        await hook.handle(event: .steeringInjected(message: "keep it short"))
+        await hook.handle(event: .followUpStarted(message: "auto-follow"))
+        await hook.handle(event: .contextTransformApplied(transformIndex: 0, messagesBefore: 10, messagesAfter: 7))
+
+        let contents = try String(contentsOfFile: logPath, encoding: .utf8)
+        XCTAssertTrue(contents.contains("\"hook_event\":\"steering_injected\""))
+        XCTAssertTrue(contents.contains("keep it short"))
+        XCTAssertTrue(contents.contains("\"hook_event\":\"follow_up_started\""))
+        XCTAssertTrue(contents.contains("auto-follow"))
+        XCTAssertTrue(contents.contains("\"hook_event\":\"context_transform_applied\""))
+        XCTAssertTrue(contents.contains("messages_before=10"))
+        XCTAssertTrue(contents.contains("messages_after=7"))
+    }
 }
