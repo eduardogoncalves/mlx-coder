@@ -1373,7 +1373,12 @@ public actor AgentLoop {
             func stopSpinnerOnFirstVisibleOutput() {
                 guard !hasShownVisibleOutput else { return }
                 hasShownVisibleOutput = true
-                Task { await spinner.stop(clearLine: true) }
+                let semaphore = DispatchSemaphore(value: 0)
+                Task {
+                    await spinner.stop(clearLine: true)
+                    semaphore.signal()
+                }
+                semaphore.wait()
             }
             
             // For correct streaming detokenization
