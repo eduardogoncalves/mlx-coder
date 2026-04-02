@@ -615,7 +615,7 @@ struct RunCommand: AsyncParsableCommand {
                 return
             }
             renderer.printError("Apple Foundation model is unavailable. Use --model with a local model path or a Hugging Face model ID.")
-            renderer.printStatus("Suggested IDs: mlx-community/Qwen3.5-9B-MLX-4bit, Tesslate/OmniCoder-9B, lmstudio-community/GLM-4.6V-Flash-MLX-4bit")
+            renderer.printStatus("Suggested IDs: mlx-community/Qwen3.5-9B-MLX-4bit, Tesslate/OmniCoder-9B")
             return
         }
 
@@ -1024,7 +1024,6 @@ struct DoctorCommand: AsyncParsableCommand {
 private let recommendedHubModels = [
     "mlx-community/Qwen3.5-9B-MLX-4bit",
     "Tesslate/OmniCoder-9B",
-    "lmstudio-community/GLM-4.6V-Flash-MLX-4bit",
 ]
 
 private func localModelExists(_ path: String) -> Bool {
@@ -1044,9 +1043,8 @@ private func promptForRecommendedModelDownload() -> String? {
     print("\nNo local MLX model found. Download one now?")
     print("  1) \(recommendedHubModels[0])")
     print("  2) \(recommendedHubModels[1])")
-    print("  3) \(recommendedHubModels[2])")
     print("  0) Skip download and use Apple Foundation fallback")
-    print("Choose [1/2/3/0]: ", terminator: "")
+    print("Choose [1/2/0]: ", terminator: "")
 
     guard let input = readLine()?.trimmingCharacters(in: .whitespacesAndNewlines) else {
         return nil
@@ -1055,7 +1053,6 @@ private func promptForRecommendedModelDownload() -> String? {
     switch input {
     case "1": return recommendedHubModels[0]
     case "2": return recommendedHubModels[1]
-    case "3": return recommendedHubModels[2]
     default: return nil
     }
 }
