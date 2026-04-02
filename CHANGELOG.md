@@ -4,6 +4,11 @@ All notable changes to mlx-coder are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- GLM-4.6V (`glm4v`) model support: the `ModelLoader` now registers `glm4v` as an alias for the `GlmOcr` VLM architecture before each model load, so models such as `lmstudio-community/GLM-4.6V-Flash-MLX-4bit` load without the "Unsupported model type: glm4v" error.  The `Glm46VProcessor` required by these models is already built into MLXVLM.
+
 ## [0.1.0] - 2026-03-30
 
 ### ✅ Initial Public Release
