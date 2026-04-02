@@ -177,12 +177,18 @@ public actor AgentLoop {
         )
         
         // Ensure currentMode is synced with initial mode/thinking/task settings
+        let initialThinkingLevel = self.thinkingLevel
         switch self.mode {
         case .plan:
-            self.currentMode = (self.thinkingLevel == .high || self.thinkingLevel == .medium) ? .planHigh : .planLow
+            switch initialThinkingLevel {
+            case .high, .medium:
+                self.currentMode = .planHigh
+            case .fast, .minimal, .low:
+                self.currentMode = .planLow
+            }
         case .agent:
             if self.taskType == .coding {
-                switch self.thinkingLevel {
+                switch initialThinkingLevel {
                 case .fast, .minimal:
                     self.currentMode = .agentCodingFast
                 case .low, .medium:
@@ -191,7 +197,7 @@ public actor AgentLoop {
                     self.currentMode = .agentCodingHigh
                 }
             } else {
-                switch self.thinkingLevel {
+                switch initialThinkingLevel {
                 case .fast, .minimal:
                     self.currentMode = .agentGeneralFast
                 case .low, .medium, .high:

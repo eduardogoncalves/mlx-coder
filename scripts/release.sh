@@ -10,7 +10,7 @@
 #    -m, --message MSG       Release commit message.  Optional.
 #    -n, --dry-run           Print all steps but do not modify anything.
 #    -k, --no-push           Tag locally but skip git pull and git push.
-#    -b, --build-only        Only build the release binary, skip tests and updates.
+#    -b, --build-only        Build-only mode: still updates dependencies, skips tests and git/publish steps.
 #    -h, --help              Show this help.
 #
 #  What it does:
@@ -21,6 +21,9 @@
 #    4. Runs the test suite to verify correctness.
 #    5. Builds distributable artifacts (.tar.gz, .pkg, .sha256 via build-and-release.sh).
 #    6. Commits Package.resolved, tags, and pushes.
+#
+#    Note: with --build-only, step 2 still runs so Package.resolved stays fresh;
+#    steps 4-6 are skipped.
 #
 #  Metal shader pre-compilation rationale:
 #    MLX kernels are compiled as Metal shaders at first use.  Without an
@@ -170,10 +173,7 @@ fi
 # ─────────────────────────────────────────────────────────────────────────────
 # STEP 2 — Update dependencies
 # ─────────────────────────────────────────────────────────────────────────────
-if $BUILD_ONLY; then
-  log_step "Step 2/5 – Update Swift Package dependencies (SKIPPED)"
-else
-  log_step "Step 2/5 – Update Swift Package dependencies"
+log_step "Step 2/5 – Update Swift Package dependencies"
 
 # Capture the state before update
 if [[ -f Package.resolved ]]; then
@@ -212,15 +212,25 @@ for k, ov in old.items():
     if k not in new: changes.append(f'  {k}: [REMOVED] {ov}')
 if changes: print('\n'.join(changes))
 " 2>/dev/null || true)
-    rm Package.resolved.bak
   fi
 fi
+
+if [[ -f Package.resolved.bak ]]; then
+  rm Package.resolved.bak
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
 # STEP 3 — Build (Release) with Metal shader pre-compilation
 # ─────────────────────────────────────────────────────────────────────────────
 log_step "Step 3/5 – Build release binary (with Metal shader pre-warming)"
+
+# If the repo was moved/renamed, stale clang PCH entries can keep absolute paths
+# from the old location and fail with "PCH was compiled with module cache path".
+MODULE_CACHE_DIR="${REPO_ROOT}/.build/arm64-apple-macosx/release/ModuleCache"
+if [[ -d "$MODULE_CACHE_DIR" ]]; then
+  log_info "Clearing stale module cache: ${MODULE_CACHE_DIR}"
+  run rm -rf "$MODULE_CACHE_DIR"
+fi
 
 if $BUILD_ONLY && [[ -n "${BASE_VERSION:-}" ]]; then
   if ! $DRY_RUN; then
