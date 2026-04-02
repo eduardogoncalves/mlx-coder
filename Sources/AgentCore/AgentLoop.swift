@@ -1259,6 +1259,16 @@ public actor AgentLoop {
         return text
     }
 
+    static func makeTokenCountLookup(contents: [String], counts: [Int]) -> [String: Int] {
+        var lookup: [String: Int] = [:]
+        lookup.reserveCapacity(min(contents.count, counts.count))
+        for (content, count) in zip(contents, counts) {
+            // Duplicate message content is expected; token count for identical text is identical.
+            lookup[content] = count
+        }
+        return lookup
+    }
+
     private func applyDeterministicContextCompactionIfNeeded(reason: String) async {
         let threshold = max(currentGenerationConfig.longContextThreshold, contextReserveTokens + 1)
         let target = max(256, threshold - contextReserveTokens)
@@ -1283,7 +1293,7 @@ public actor AgentLoop {
         if let counts = tokenCounts {
             // Build a lookup from content → token count. Falls back to chars/4 for content not
             // in the snapshot (shouldn't happen, but safe).
-            let lookup = Dictionary(uniqueKeysWithValues: zip(contentSnapshot, counts))
+            let lookup = Self.makeTokenCountLookup(contents: contentSnapshot, counts: counts)
             tokenCounter = { text in lookup[text] ?? (text.count / 4) }
         } else {
             tokenCounter = nil
