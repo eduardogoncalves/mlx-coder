@@ -31,6 +31,8 @@ PKG_FILE="${RELEASE_DIR}/${ARTIFACT_BASE}.pkg"
 SHA_FILE="${RELEASE_DIR}/${ARTIFACT_BASE}.sha256"
 NOTES_FILE="${RELEASE_DIR}/RELEASE_NOTES_v${VERSION}.md"
 
+BUILT_BINARY_PATH=""
+
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 BLUE='\033[0;34m'
@@ -66,22 +68,58 @@ require_tools() {
     ok "Build tools are available"
 }
 
+patch_mlx_swift_lm_for_swift6() {
+    local derived_data="$1"
+    local target_file="${derived_data}/SourcePackages/checkouts/mlx-swift-lm/Libraries/MLXVLM/MediaProcessing.swift"
+
+    [[ -f "$target_file" ]] || fail "mlx-swift-lm source not found for patching: ${target_file}"
+
+    if grep -q '^private let context = CIContext()$' "$target_file"; then
+        log "Patching mlx-swift-lm MediaProcessing.swift for Swift 6 concurrency checks"
+        sed -i '' 's/^private let context = CIContext()$/nonisolated(unsafe) private let context = CIContext()/g' "$target_file"
+        ok "Applied Swift 6 concurrency patch to mlx-swift-lm"
+        return
+    fi
+
+    if grep -q '^nonisolated(unsafe) private let context = CIContext()$' "$target_file"; then
+        log "mlx-swift-lm concurrency patch already present"
+        return
+    fi
+
+    fail "Could not find expected CIContext declaration to patch in ${target_file}"
+}
+
 build_arch() {
     local target_arch="$1"
     local derived_data="$2"
 
     log "Building ${APP_NAME} for ${target_arch}"
     rm -rf "$derived_data"
-    xcodebuild \
+
+    log "Resolving Swift package dependencies"
+    if ! xcodebuild \
         -scheme "$SCHEME_NAME" \
         -configuration Release \
         -destination "platform=macOS,arch=${target_arch}" \
         -derivedDataPath "$derived_data" \
-        build >&2
+        -resolvePackageDependencies >&2; then
+        fail "xcodebuild failed while resolving package dependencies for architecture ${target_arch}"
+    fi
+
+    patch_mlx_swift_lm_for_swift6 "$derived_data"
+
+    if ! xcodebuild \
+        -scheme "$SCHEME_NAME" \
+        -configuration Release \
+        -destination "platform=macOS,arch=${target_arch}" \
+        -derivedDataPath "$derived_data" \
+        build >&2; then
+        fail "xcodebuild failed for architecture ${target_arch}"
+    fi
 
     local built_binary="${derived_data}/Build/Products/Release/${SCHEME_NAME}"
     [[ -f "$built_binary" ]] || fail "Expected binary not found: ${built_binary}"
-    echo "$built_binary"
+    BUILT_BINARY_PATH="$built_binary"
 }
 
 inject_version() {
@@ -96,8 +134,8 @@ inject_version() {
 
 build_binary() {
     local output_bin="${WORK_DIR}/${CLI_NAME}"
-    local arm_bin
-    arm_bin="$(build_arch arm64 "$BUILD_DIR_ARM64")" || exit $?
+    build_arch arm64 "$BUILD_DIR_ARM64"
+    local arm_bin="$BUILT_BINARY_PATH"
     cp "$arm_bin" "$output_bin"
     chmod +x "$output_bin"
     echo "$output_bin"
