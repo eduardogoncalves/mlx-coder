@@ -1085,7 +1085,7 @@ private func runAppleFoundationChatFallback(renderer: StreamRenderer) async -> B
                 if trimmed == "exit" || trimmed == "quit" { break }
 
                 let response = try await session.respond(to: trimmed)
-                print(String(describing: response))
+                print(response.content)
                 print("")
             }
 
@@ -1108,7 +1108,7 @@ private func runAppleFoundationSinglePromptFallback(prompt: String, renderer: St
         do {
             let session = LanguageModelSession()
             let response = try await session.respond(to: prompt)
-            print(String(describing: response))
+            print(response.content)
             return true
         } catch {
             renderer.printError("Foundation fallback failed: \(error.localizedDescription)")
