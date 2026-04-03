@@ -16,7 +16,7 @@ struct MLXCoderCLI: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "mlx-coder",
         abstract: "Swift terminal agent for Apple Silicon — loads LLM in-process via MLX-Swift",
-        version: "0.1.0.202603221347",
+        version: "0.1.0.202604021706",
         subcommands: [ChatCommand.self, RunCommand.self, ListToolsCommand.self, ShowAuditCommand.self, ShowConfigCommand.self, DoctorCommand.self],
         defaultSubcommand: ChatCommand.self
     )
@@ -162,11 +162,14 @@ struct ChatCommand: AsyncParsableCommand {
         renderer.printStatus("Loading model from \(selectedModel)...")
         let modelContainer: ModelContainer
         do {
-            modelContainer = try await ModelLoader.load(
+            modelContainer = try await loadModelWithCancellation(
                 from: selectedModel,
                 memoryLimit: budget.totalBytes,
-                cacheLimit: budget.cacheBytes
+                cacheLimit: budget.cacheBytes,
+                renderer: renderer
             )
+        } catch is CancellationError {
+            return
         } catch {
             renderer.printError("Failed to load model: \(error.localizedDescription)")
             return
@@ -621,11 +624,20 @@ struct RunCommand: AsyncParsableCommand {
 
         // Load model
         renderer.printStatus("Loading model...")
-        let modelContainer = try await ModelLoader.load(
-            from: selectedModel,
-            memoryLimit: budget.totalBytes,
-            cacheLimit: budget.cacheBytes
-        )
+        let modelContainer: ModelContainer
+        do {
+            modelContainer = try await loadModelWithCancellation(
+                from: selectedModel,
+                memoryLimit: budget.totalBytes,
+                cacheLimit: budget.cacheBytes,
+                renderer: renderer
+            )
+        } catch is CancellationError {
+            return
+        } catch {
+            renderer.printError("Failed to load model: \(error.localizedDescription)")
+            return
+        }
 
         // Run single prompt setup
         let profile = ParameterProfile.forChip(chipInfo)
@@ -1023,7 +1035,7 @@ struct DoctorCommand: AsyncParsableCommand {
 
 private let recommendedHubModels = [
     "mlx-community/Qwen3.5-9B-MLX-4bit",
-    "Tesslate/OmniCoder-9B",
+    "NexVeridian/OmniCoder-9B-4bit",
 ]
 
 private func localModelExists(_ path: String) -> Bool {
@@ -1109,6 +1121,35 @@ private func runAppleFoundationSinglePromptFallback(prompt: String, renderer: St
     _ = renderer
     return false
     #endif
+}
+
+private func loadModelWithCancellation(
+    from path: String,
+    memoryLimit: Int?,
+    cacheLimit: Int?,
+    renderer: StreamRenderer
+) async throws -> ModelContainer {
+    let loadTask = Task {
+        try await ModelLoader.load(
+            from: path,
+            memoryLimit: memoryLimit,
+            cacheLimit: cacheLimit
+        )
+    }
+
+    await CancelController.shared.setTask(loadTask)
+
+    do {
+        let container = try await loadTask.value
+        await CancelController.shared.setTask(nil)
+        return container
+    } catch {
+        await CancelController.shared.setTask(nil)
+        if error is CancellationError {
+            renderer.printError("Model loading cancelled by user.")
+        }
+        throw error
+    }
 }
 
 private func parseApprovalMode(_ value: String) -> PermissionEngine.ApprovalMode {

@@ -97,7 +97,36 @@ public final class ModelLoader: Sendable {
             }
         )
 
+        if usesHubID {
+            pruneHuggingFaceCache(forModelID: path)
+        }
+
         return container
+    }
+
+    private static func pruneHuggingFaceCache(forModelID modelID: String) {
+        let fileManager = FileManager.default
+        let normalizedRepo = modelID.replacingOccurrences(of: "/", with: "--")
+        let cacheFolderName = "models--\(normalizedRepo)"
+
+        let cacheRoots: [URL] = [
+            fileManager.homeDirectoryForCurrentUser
+                .appendingPathComponent("Library")
+                .appendingPathComponent("Caches")
+                .appendingPathComponent("huggingface")
+                .appendingPathComponent("hub"),
+            fileManager.homeDirectoryForCurrentUser
+                .appendingPathComponent(".cache")
+                .appendingPathComponent("huggingface")
+                .appendingPathComponent("hub")
+        ]
+
+        for root in cacheRoots {
+            let candidate = root.appendingPathComponent(cacheFolderName)
+            if fileManager.fileExists(atPath: candidate.path) {
+                try? fileManager.removeItem(at: candidate)
+            }
+        }
     }
 
     // ── Metal shader pre-warm helper ──────────────────────────────────────────
@@ -129,10 +158,19 @@ public final class ModelLoader: Sendable {
 private final class DownloadProgressTracker: @unchecked Sendable {
     private let lock = NSLock()
     private var startTime: Date?
+    private var firstProgressTime: Date?
+    private var lastKnownFilename: String?
+    private var lastKnownCompletedBytes: Int64?
+    private var lastKnownTotalBytes: Int64?
 
     /// Minimum elapsed time before a speed estimate is shown, to avoid
     /// misleadingly high values from a tiny early-burst sample.
     private static let minimumElapsedTimeForSpeedCalculation: TimeInterval = 0.5
+
+    /// MLX/HF snapshot progress sometimes uses synthetic weights of 1 per file
+    /// when the server does not provide a real byte size. In that case the raw
+    /// `Progress` values are file counts, not byte counts.
+    private static let syntheticCountProgressThreshold: Int64 = 1_024
 
     /// Returns a human-readable status string based on the current `Progress` snapshot.
     ///
@@ -148,13 +186,20 @@ private final class DownloadProgressTracker: @unchecked Sendable {
         if startTime == nil {
             startTime = now
         }
+        if firstProgressTime == nil {
+            firstProgressTime = now
+        }
 
         let completed = progress.completedUnitCount
         let total = progress.totalUnitCount
 
-        // Total unknown – just show a generic message
+        // Total unknown – we are still resolving repo metadata.
         guard total > 0 else {
-            return "Downloading model from Hugging Face..."
+            if let firstProgressTime {
+                let resolvingSeconds = Int(max(0, now.timeIntervalSince(firstProgressTime)))
+                return "Resolving Hugging Face files... (\(resolvingSeconds)s)"
+            }
+            return "Preparing Hugging Face download..."
         }
 
         // Download fully complete – hand off to the weight-loading phase
@@ -163,9 +208,18 @@ private final class DownloadProgressTracker: @unchecked Sendable {
             return "Loading model weights..."
         }
 
-        // When the Progress tracks individual files (kind == .file), unit counts
-        // represent file counts, not bytes.  Display "X / Y files" in that case.
-        if progress.kind == .file {
+        if let detailed = formattedPerFileStatus(
+            progress: progress,
+            completedFiles: completed,
+            totalFiles: total
+        ) {
+            return detailed
+        }
+
+        // When the Progress tracks individual files, or when the Hub falls back
+        // to synthetic unit weights for unknown file sizes, the unit counts are
+        // file counts rather than bytes. Display file counts in that case.
+        if progress.kind == .file || Self.usesCountBasedProgress(progress) {
             return "Downloading: \(completed) / \(total) files (\(pct)%)"
         }
 
@@ -195,6 +249,49 @@ private final class DownloadProgressTracker: @unchecked Sendable {
         } else {
             return "\(bytes) B"
         }
+    }
+
+    private static func usesCountBasedProgress(_ progress: Progress) -> Bool {
+        let total = progress.totalUnitCount
+        guard total > 0, total <= syntheticCountProgressThreshold else {
+            return false
+        }
+
+        let completed = progress.completedUnitCount
+        return completed >= 0 && completed <= total
+    }
+
+    private func formattedPerFileStatus(progress: Progress, completedFiles: Int64, totalFiles: Int64) -> String? {
+        let filenameKey = ProgressUserInfoKey("mlxCurrentFilename")
+        let completedBytesKey = ProgressUserInfoKey("mlxCurrentFileCompletedBytes")
+        let totalBytesKey = ProgressUserInfoKey("mlxCurrentFileTotalBytes")
+
+        if let filename = progress.userInfo[filenameKey] as? String {
+            lastKnownFilename = filename
+        }
+
+        if let completedBytesNumber = progress.userInfo[completedBytesKey] as? NSNumber {
+            lastKnownCompletedBytes = completedBytesNumber.int64Value
+        }
+
+        if let totalBytesNumber = progress.userInfo[totalBytesKey] as? NSNumber {
+            lastKnownTotalBytes = max(1, totalBytesNumber.int64Value)
+        }
+
+        guard
+            let filename = lastKnownFilename,
+            let fileCompleted = lastKnownCompletedBytes,
+            let fileTotal = lastKnownTotalBytes
+        else {
+            return nil
+        }
+
+        let filePct = Int(Double(max(0, min(fileCompleted, fileTotal))) / Double(fileTotal) * 100)
+        let completedStr = Self.formatBytes(fileCompleted)
+        let totalStr = Self.formatBytes(fileTotal)
+        let clampedCompletedFiles = max(0, min(completedFiles, totalFiles))
+
+        return "Downloading: \(clampedCompletedFiles) / \(totalFiles) files \(filename) \(completedStr) of \(totalStr) (\(filePct)%)"
     }
 }
 

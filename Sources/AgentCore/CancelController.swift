@@ -7,15 +7,36 @@ import Foundation
 public actor CancelController {
     public static let shared = CancelController()
     
-    // We store the current generation task
-    private var generationTask: Task<Void, Error>?
+    // Stores a cancellation closure for the current async operation.
+    private var cancelCurrentTask: (@Sendable () -> Void)?
     private var listeningTask: Task<Void, Never>?
     
     private init() {}
     
-    /// Set the current generation task and start listening for ESC
+    /// Set the current operation task and start listening for ESC/Ctrl+C.
     public func setTask(_ task: Task<Void, Error>?) async {
-        self.generationTask = task
+        let canceler: (@Sendable () -> Void)?
+        if let task {
+            canceler = { task.cancel() }
+        } else {
+            canceler = nil
+        }
+        await updateTrackedCancellation(canceler)
+    }
+
+    /// Set any typed task as the current cancellable operation.
+    public func setTask<T>(_ task: Task<T, Error>?) async {
+        let canceler: (@Sendable () -> Void)?
+        if let task {
+            canceler = { task.cancel() }
+        } else {
+            canceler = nil
+        }
+        await updateTrackedCancellation(canceler)
+    }
+
+    private func updateTrackedCancellation(_ canceler: (@Sendable () -> Void)?) async {
+        self.cancelCurrentTask = canceler
 
         // Always cancel any previous listener first.
         // When starting a new task, do not block listener startup on teardown;
@@ -24,7 +45,7 @@ public actor CancelController {
         existingListener?.cancel()
         listeningTask = nil
 
-        if task != nil {
+        if canceler != nil {
             startListening()
             return
         }
@@ -48,14 +69,14 @@ public actor CancelController {
 
     /// Resume listening only when there is an active generation task.
     public func resumeListeningIfNeeded() {
-        guard generationTask != nil, listeningTask == nil else { return }
+        guard cancelCurrentTask != nil, listeningTask == nil else { return }
         startListening()
     }
     
     /// Cancel the current task if any
     public func cancel() {
-        generationTask?.cancel()
-        generationTask = nil
+        cancelCurrentTask?()
+        cancelCurrentTask = nil
     }
     
     private func startListening() {

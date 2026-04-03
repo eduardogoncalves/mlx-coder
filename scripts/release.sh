@@ -92,6 +92,30 @@ run() {
   fi
 }
 
+patch_mlx_swift_lm_for_swift6() {
+  local derived_data="$1"
+  local target_file="${derived_data}/SourcePackages/checkouts/mlx-swift-lm/Libraries/MLXVLM/MediaProcessing.swift"
+
+  if [[ ! -f "$target_file" ]]; then
+    log_warn "mlx-swift-lm source not found for Swift 6 patch at: ${target_file}"
+    return
+  fi
+
+  if grep -q '^private let context = CIContext()$' "$target_file"; then
+    log_info "Patching mlx-swift-lm MediaProcessing.swift for Swift 6 concurrency checks"
+    run sed -i '' 's/^private let context = CIContext()$/nonisolated(unsafe) private let context = CIContext()/g' "$target_file"
+    log_ok "Applied Swift 6 concurrency patch to mlx-swift-lm"
+    return
+  fi
+
+  if grep -q '^nonisolated(unsafe) private let context = CIContext()$' "$target_file"; then
+    log_info "mlx-swift-lm Swift 6 patch already present"
+    return
+  fi
+
+  log_warn "Could not find expected CIContext declaration to patch in ${target_file}"
+}
+
 # ── Validate inputs ────────────────────────────────────────────────────────
 if [[ -z "$VERSION" ]]; then
   if $BUILD_ONLY; then
@@ -122,13 +146,13 @@ log_step "Step 1/5 – Environment checks"
 cd "$REPO_ROOT"
 
 # Check for required tools
-for tool in swift git; do
+for tool in swift git xcodebuild; do
   if ! command -v "$tool" &>/dev/null; then
     log_error "'${tool}' not found in PATH."
     exit 1
   fi
 done
-log_ok "Required tools present (swift, git)"
+log_ok "Required tools present (swift, git, xcodebuild)"
 
 # Must be on main branch (skipped with --build-only since no git operations occur)
 if ! $BUILD_ONLY; then
@@ -175,6 +199,10 @@ fi
 # ─────────────────────────────────────────────────────────────────────────────
 log_step "Step 2/5 – Update Swift Package dependencies"
 
+if $BUILD_ONLY; then
+  log_warn "Skipping dependency update in --build-only mode (uses pinned dependencies from Package.resolved)"
+else
+
 # Capture the state before update
 if [[ -f Package.resolved ]]; then
   cp Package.resolved Package.resolved.bak
@@ -218,11 +246,37 @@ fi
 if [[ -f Package.resolved.bak ]]; then
   rm Package.resolved.bak
 fi
+fi
 
 # ─────────────────────────────────────────────────────────────────────────────
 # STEP 3 — Build (Release) with Metal shader pre-compilation
 # ─────────────────────────────────────────────────────────────────────────────
 log_step "Step 3/5 – Build release binary (with Metal shader pre-warming)"
+
+if $BUILD_ONLY; then
+  if $DRY_RUN; then
+    log_info "[dry-run] Would run: MLX_CODER_VERSION=${VERSION} ${REPO_ROOT}/build-and-release.sh arm64"
+    BINARY_PATH="${REPO_ROOT}/.build/release/mlx-coder"
+    log_info "[dry-run] Would verify binary at: ${BINARY_PATH}"
+  else
+    log_info "Delegating build-only pipeline to build-and-release.sh"
+    run env MLX_CODER_VERSION="${VERSION}" "${REPO_ROOT}/build-and-release.sh" arm64
+
+    BINARY_PATH="${REPO_ROOT}/.build/release/mlx-coder"
+    if [[ ! -f "$BINARY_PATH" ]]; then
+      log_error "Expected build-only binary not found at: ${BINARY_PATH}"
+      exit 1
+    fi
+
+    log_ok "Binary built: ${BINARY_PATH}"
+    log_info "Smoke-testing binary (--help)…"
+    "$BINARY_PATH" --help &>/dev/null || {
+      log_error "Binary smoke test failed – check build output."
+      exit 1
+    }
+    log_ok "Binary smoke test passed"
+  fi
+else
 
 # If the repo was moved/renamed, stale clang PCH entries can keep absolute paths
 # from the old location and fail with "PCH was compiled with module cache path".
@@ -265,19 +319,39 @@ BUILD_ENV=(
   MTL_SHADER_VALIDATION=1
 )
 
+XCODE_DERIVED_DATA="${REPO_ROOT}/.build/xcode"
+
+log_info "Resetting Xcode derived data at: ${XCODE_DERIVED_DATA}"
+run rm -rf "${XCODE_DERIVED_DATA}"
+
+log_info "Resolving Swift package dependencies via xcodebuild"
+run xcodebuild \
+  -scheme MLXCoder \
+  -configuration Release \
+  -destination 'platform=macOS,arch=arm64' \
+  -derivedDataPath "${XCODE_DERIVED_DATA}" \
+  -resolvePackageDependencies
+
+if ! $DRY_RUN; then
+  patch_mlx_swift_lm_for_swift6 "${XCODE_DERIVED_DATA}"
+fi
+
 log_info "Building with: ${BUILD_ENV[*]}"
 run env "${BUILD_ENV[@]}" \
-  swift build \
-    --configuration release \
-    --arch arm64 \
-    -Xswiftc -DMLX_PREWARM_SHADERS
+  xcodebuild \
+    -scheme MLXCoder \
+    -configuration Release \
+    -destination 'platform=macOS,arch=arm64' \
+    -derivedDataPath "${XCODE_DERIVED_DATA}" \
+    SWIFT_ACTIVE_COMPILATION_CONDITIONS='MLX_PREWARM_SHADERS' \
+    build
 
 if $DRY_RUN; then
-  BINARY_PATH="${REPO_ROOT}/.build/arm64-apple-macosx/release/MLXCoder"
+  BINARY_PATH="${XCODE_DERIVED_DATA}/Build/Products/Release/MLXCoder"
   log_info "[dry-run] Would verify binary at: ${BINARY_PATH}"
   log_info "[dry-run] Would find and colocate default.metallib next to binary"
 else
-  BINARY_PATH=$(swift build --configuration release --arch arm64 --show-bin-path 2>/dev/null)/MLXCoder
+  BINARY_PATH="${XCODE_DERIVED_DATA}/Build/Products/Release/MLXCoder"
   if [[ ! -f "$BINARY_PATH" ]]; then
     log_error "Expected release binary not found at: ${BINARY_PATH}"
     exit 1
@@ -286,19 +360,23 @@ else
 
   # --- Metal Library Colocation ---
   # MLX requires default.metallib to be colocated with the binary or in a bundle.
-  # SPM sometimes puts it in a nested bundle directory.
   BINARY_DIR=$(dirname "$BINARY_PATH")
-  METALLIB_SOURCE=$(find .build -name "default.metallib" | grep "Release" | head -n 1 || true)
+  BUNDLE_SOURCE="${XCODE_DERIVED_DATA}/Build/Products/Release/mlx-swift_Cmlx.bundle"
+  METALLIB_SOURCE="${BUNDLE_SOURCE}/default.metallib"
 
-  if [[ -n "$METALLIB_SOURCE" ]]; then
+  if [[ -f "$METALLIB_SOURCE" ]]; then
     log_info "Found Metal library at: ${METALLIB_SOURCE}"
     # Copy both as default.metallib and mlx.metallib
     # load_colocated_library() specifically looks for "mlx.metallib"
     run cp "$METALLIB_SOURCE" "${BINARY_DIR}/default.metallib"
     run cp "$METALLIB_SOURCE" "${BINARY_DIR}/mlx.metallib"
+    if [[ -d "$BUNDLE_SOURCE" ]]; then
+      run rm -rf "${BINARY_DIR}/mlx-swift_Cmlx.bundle"
+      run cp -R "$BUNDLE_SOURCE" "${BINARY_DIR}/mlx-swift_Cmlx.bundle"
+    fi
     log_ok "Colocated Metal libraries with binary (default.metallib and mlx.metallib)"
   else
-    log_warn "Could not find default.metallib in .build directory. MLX may fail at runtime."
+    log_warn "Could not find default.metallib in Xcode Release output. MLX may fail at runtime."
   fi
   # --------------------------------
 
@@ -309,6 +387,7 @@ else
     exit 1
   }
   log_ok "Binary smoke test passed"
+fi
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
