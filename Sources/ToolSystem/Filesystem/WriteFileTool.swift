@@ -48,12 +48,14 @@ public struct WriteFileTool: Tool {
             // Security: Verify parent directory is still within workspace after creation
             // This additional check protects against TOCTOU attacks where symlinks
             // are created in the parent directory between validation and write operations.
-            do {
-                let parentValidated = try permissions.validatePath(parentDir)
-                guard parentValidated == parentDir else {
-                    return .error("Security violation: Parent directory failed validation after creation")
-                }
-            } catch {
+            let canonicalParent = URL(filePath: parentDir).standardized.resolvingSymlinksInPath().path()
+            let canonicalWorkspaceRoot = URL(filePath: permissions.workspaceRoot)
+                .standardized
+                .resolvingSymlinksInPath()
+                .path()
+            let parentInsideWorkspace = canonicalParent == canonicalWorkspaceRoot
+                || canonicalParent.hasPrefix(canonicalWorkspaceRoot + "/")
+            guard parentInsideWorkspace else {
                 return .error("Security violation: Parent directory path validation failed")
             }
 
