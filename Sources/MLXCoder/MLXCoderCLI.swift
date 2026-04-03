@@ -279,6 +279,7 @@ struct ChatCommand: AsyncParsableCommand {
 
         let interactiveInput = InteractiveInput()
         var sandboxEnabled = effectiveSandbox
+        var announcedGeneralFastFoundationRoute = false
         
         // Set initial mode from arguments
         if args.mode.lowercased() == "agent" {
@@ -513,6 +514,20 @@ struct ChatCommand: AsyncParsableCommand {
             }
 
             do {
+                let activeMode = await agentLoop.currentMode
+                if activeMode == .agentGeneralFast && isAppleFoundationModelAvailable() {
+                    if !announcedGeneralFastFoundationRoute {
+                        renderer.printStatus("AGENT (general/fast) is using Apple Foundation model when available.")
+                        announcedGeneralFastFoundationRoute = true
+                    }
+
+                    if await runAppleFoundationSinglePromptFallback(prompt: trimmed, renderer: renderer) {
+                        continue
+                    }
+
+                    renderer.printStatus("Apple Foundation model was not available for this turn. Falling back to local MLX model.")
+                }
+
                 renderer.printStatus("[Key mode] Generation active. Press Esc to cancel.")
                 let task = Task {
                     try await agentLoop.processUserMessage(trimmed)
@@ -1119,6 +1134,17 @@ private func runAppleFoundationSinglePromptFallback(prompt: String, renderer: St
     #else
     _ = prompt
     _ = renderer
+    return false
+    #endif
+}
+
+private func isAppleFoundationModelAvailable() -> Bool {
+    #if canImport(FoundationModels)
+    if #available(macOS 26.0, *) {
+        return true
+    }
+    return false
+    #else
     return false
     #endif
 }

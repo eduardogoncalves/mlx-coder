@@ -256,23 +256,23 @@ log_step "Step 3/5 – Build release binary (with Metal shader pre-warming)"
 if $BUILD_ONLY; then
   if $DRY_RUN; then
     log_info "[dry-run] Would inject version ${VERSION} into MLXCoderCLI.swift"
-    log_info "[dry-run] Would run: swift build --configuration release --arch arm64 -Xswiftc -DMLX_PREWARM_SHADERS"
-    BINARY_PATH="${REPO_ROOT}/.build/arm64-apple-macosx/release/mlx-coder"
+    log_info "[dry-run] Would run: MLX_CODER_VERSION=${VERSION} ${REPO_ROOT}/build-and-release.sh arm64"
+    log_info "[dry-run] Would copy Xcode binary to .build/arm64-apple-macosx/release/mlx-coder for iterative dev runs"
+    BINARY_PATH="${REPO_ROOT}/.build/release/cli/mlx-coder"
     log_info "[dry-run] Would verify binary at: ${BINARY_PATH}"
   else
-    log_info "Using fast build-only pipeline via swift build"
+    log_info "Using build-only pipeline via build-and-release.sh (matches release framework/link behavior)"
     log_info "Injecting version ${VERSION} into MLXCoderCLI.swift"
     cp "${REPO_ROOT}/Sources/MLXCoder/MLXCoderCLI.swift" "/tmp/MLXCoderCLI.swift.bak"
     trap 'mv "/tmp/MLXCoderCLI.swift.bak" "${REPO_ROOT}/Sources/MLXCoder/MLXCoderCLI.swift"' EXIT
     sed -i '' "s/version: \".*\"/version: \"${VERSION}\"/g" "${REPO_ROOT}/Sources/MLXCoder/MLXCoderCLI.swift"
 
+    log_info "Building release artifacts to source a known-good binary"
     run env METAL_DEVICE_WRAPPER_TYPE=1 MTL_SHADER_VALIDATION=1 \
-      swift build \
-        --configuration release \
-        --arch arm64 \
-        -Xswiftc -DMLX_PREWARM_SHADERS
+      MLX_CODER_VERSION="${VERSION}" \
+      "${REPO_ROOT}/build-and-release.sh" arm64
 
-    BINARY_PATH="$(swift build --configuration release --arch arm64 --show-bin-path 2>/dev/null)/mlx-coder"
+    BINARY_PATH="${REPO_ROOT}/.build/release/cli/mlx-coder"
     if [[ ! -f "$BINARY_PATH" ]]; then
       log_error "Expected build-only binary not found at: ${BINARY_PATH}"
       exit 1
@@ -280,15 +280,30 @@ if $BUILD_ONLY; then
 
     log_ok "Binary built: ${BINARY_PATH}"
 
-    METALLIB_SOURCE=$(find .build -name "default.metallib" | grep "Release" | head -n 1 || true)
-    if [[ -n "$METALLIB_SOURCE" ]]; then
+    DEV_BIN_DIR="${REPO_ROOT}/.build/arm64-apple-macosx/release"
+    DEV_BIN_PATH="${DEV_BIN_DIR}/mlx-coder"
+    run mkdir -p "${DEV_BIN_DIR}"
+    run cp "$BINARY_PATH" "$DEV_BIN_PATH"
+    run chmod +x "$DEV_BIN_PATH"
+    log_ok "Copied iterative dev binary to: ${DEV_BIN_PATH}"
+
+    BUNDLE_SOURCE="${REPO_ROOT}/.build/release/cli/mlx-swift_Cmlx.bundle"
+    METALLIB_SOURCE="${BUNDLE_SOURCE}/default.metallib"
+    if [[ -f "$METALLIB_SOURCE" ]]; then
       BINARY_DIR=$(dirname "$BINARY_PATH")
       log_info "Found Metal library at: ${METALLIB_SOURCE}"
       run cp "$METALLIB_SOURCE" "${BINARY_DIR}/default.metallib"
       run cp "$METALLIB_SOURCE" "${BINARY_DIR}/mlx.metallib"
+      run cp "$METALLIB_SOURCE" "${DEV_BIN_DIR}/default.metallib"
+      run cp "$METALLIB_SOURCE" "${DEV_BIN_DIR}/mlx.metallib"
+      if [[ -d "$BUNDLE_SOURCE" ]]; then
+        run rm -rf "${BINARY_DIR}/mlx-swift_Cmlx.bundle" "${DEV_BIN_DIR}/mlx-swift_Cmlx.bundle"
+        run cp -R "$BUNDLE_SOURCE" "${BINARY_DIR}/mlx-swift_Cmlx.bundle"
+        run cp -R "$BUNDLE_SOURCE" "${DEV_BIN_DIR}/mlx-swift_Cmlx.bundle"
+      fi
       log_ok "Colocated Metal libraries with binary (default.metallib and mlx.metallib)"
     else
-      log_warn "Could not find default.metallib in .build directory. MLX may fail at runtime."
+      log_warn "Could not find default.metallib in Xcode Release output. MLX may fail at runtime."
     fi
 
     log_info "Smoke-testing binary (--help)…"
