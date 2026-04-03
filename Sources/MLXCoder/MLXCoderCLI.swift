@@ -16,7 +16,7 @@ struct MLXCoderCLI: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "mlx-coder",
         abstract: "Swift terminal agent for Apple Silicon — loads LLM in-process via MLX-Swift",
-        version: "0.1.0.202604021706",
+        version: "0.1.0.202604031546",
         subcommands: [ChatCommand.self, RunCommand.self, ListToolsCommand.self, ShowAuditCommand.self, ShowConfigCommand.self, DoctorCommand.self],
         defaultSubcommand: ChatCommand.self
     )
@@ -313,6 +313,7 @@ struct ChatCommand: AsyncParsableCommand {
                   \u{001B}[32m?\u{001B}[0m              Show this help message
                   \u{001B}[32mexit/quit\u{001B}[0m      Exit the application
                   \u{001B}[32m/clear\u{001B}[0m         Clear conversation history and free memory
+                  \u{001B}[32m/model [id]\u{001B}[0m    List/select local models in ~/models, or switch via user/model
                   \u{001B}[32m/context\u{001B}[0m       Show context usage breakdown (estimated tokens)
                   \u{001B}[32m/skills\u{001B}[0m        List discovered skills metadata
                   \u{001B}[32m/hooks\u{001B}[0m         List active hook pipeline entries
@@ -343,6 +344,55 @@ struct ChatCommand: AsyncParsableCommand {
             }
             if trimmed == "/clear" {
                 await agentLoop.clearHistory()
+                continue
+            }
+            if trimmed.hasPrefix("/model") {
+                let modelArg = String(trimmed.dropFirst("/model".count)).trimmingCharacters(in: .whitespacesAndNewlines)
+
+                if modelArg.isEmpty {
+                    let localModels = listHomeModelsAsRepoIDs()
+                    if localModels.isEmpty {
+                        print("\nNo local models found under ~/models.\n")
+                    } else {
+                        if let selectedIndex = await interactiveInput.selectOption(prompt: "Available local models (user/model)", options: localModels) {
+                            let modelID = localModels[selectedIndex]
+                            let modelPath = "~/models/\(modelID)"
+                            do {
+                                renderer.printStatus("Switching model to \(modelID)...")
+                                try await agentLoop.switchModel(to: modelPath)
+                                selectedModel = modelPath
+                                announcedGeneralFastFoundationRoute = false
+                                renderer.printStatus("Active model: \(selectedModel)")
+                            } catch {
+                                renderer.printError("Failed to switch model: \(error.localizedDescription)")
+                            }
+                        } else {
+                            renderer.printStatus("Model selection cancelled.")
+                        }
+                    }
+                    continue
+                }
+
+                guard let modelID = parseUserModelIdentifier(modelArg) else {
+                    renderer.printError("Invalid model identifier '\(modelArg)'. Use format 'user/model'.")
+                    continue
+                }
+
+                let modelPath = "~/models/\(modelID)"
+                guard localModelExists(modelPath) else {
+                    renderer.printError("Model not found at \(modelPath). Use /model to list installed models.")
+                    continue
+                }
+
+                do {
+                    renderer.printStatus("Switching model to \(modelID)...")
+                    try await agentLoop.switchModel(to: modelPath)
+                    selectedModel = modelPath
+                    announcedGeneralFastFoundationRoute = false
+                    renderer.printStatus("Active model: \(selectedModel)")
+                } catch {
+                    renderer.printError("Failed to switch model: \(error.localizedDescription)")
+                }
                 continue
             }
             if trimmed == "/context" {
@@ -521,7 +571,11 @@ struct ChatCommand: AsyncParsableCommand {
                         announcedGeneralFastFoundationRoute = true
                     }
 
-                    if await runAppleFoundationSinglePromptFallback(prompt: trimmed, renderer: renderer) {
+                    if await runAppleFoundationSinglePromptWithTools(
+                        prompt: trimmed,
+                        registry: registry,
+                        renderer: renderer
+                    ) {
                         continue
                     }
 
@@ -1066,6 +1120,78 @@ private func looksLikeHubModelID(_ value: String) -> Bool {
     return parts.count == 2 && !parts[0].isEmpty && !parts[1].isEmpty
 }
 
+private func parseUserModelIdentifier(_ value: String) -> String? {
+    let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+    if trimmed.isEmpty || trimmed.hasPrefix("/") || trimmed.hasPrefix("~") || trimmed.hasPrefix(".") {
+        return nil
+    }
+
+    let parts = trimmed.split(separator: "/", omittingEmptySubsequences: false)
+    guard parts.count == 2 else {
+        return nil
+    }
+
+    let owner = String(parts[0]).trimmingCharacters(in: .whitespacesAndNewlines)
+    let model = String(parts[1]).trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !owner.isEmpty, !model.isEmpty else {
+        return nil
+    }
+
+    return "\(owner)/\(model)"
+}
+
+private func listHomeModelsAsRepoIDs() -> [String] {
+    let fileManager = FileManager.default
+    let modelsRoot = fileManager.homeDirectoryForCurrentUser.appendingPathComponent("models", isDirectory: true)
+
+    var isDirectory: ObjCBool = false
+    guard fileManager.fileExists(atPath: modelsRoot.path, isDirectory: &isDirectory), isDirectory.boolValue else {
+        return []
+    }
+
+    let keys: Set<URLResourceKey> = [.isDirectoryKey, .isHiddenKey]
+
+    guard let ownerDirs = try? fileManager.contentsOfDirectory(
+        at: modelsRoot,
+        includingPropertiesForKeys: Array(keys),
+        options: [.skipsHiddenFiles, .skipsPackageDescendants]
+    ) else {
+        return []
+    }
+
+    var models: [String] = []
+    let sortedOwners = ownerDirs.sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
+
+    for ownerURL in sortedOwners {
+        guard let ownerValues = try? ownerURL.resourceValues(forKeys: keys),
+              ownerValues.isDirectory == true,
+              ownerValues.isHidden != true else {
+            continue
+        }
+
+        guard let modelDirs = try? fileManager.contentsOfDirectory(
+            at: ownerURL,
+            includingPropertiesForKeys: Array(keys),
+            options: [.skipsHiddenFiles, .skipsPackageDescendants]
+        ) else {
+            continue
+        }
+
+        let sortedModels = modelDirs.sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
+        for modelURL in sortedModels {
+            guard let modelValues = try? modelURL.resourceValues(forKeys: keys),
+                  modelValues.isDirectory == true,
+                  modelValues.isHidden != true else {
+                continue
+            }
+
+            models.append("\(ownerURL.lastPathComponent)/\(modelURL.lastPathComponent)")
+        }
+    }
+
+    return models
+}
+
 private func promptForRecommendedModelDownload() -> String? {
     print("\nNo local MLX model found. Download one now?")
     print("  1) \(recommendedHubModels[0])")
@@ -1136,6 +1262,352 @@ private func runAppleFoundationSinglePromptFallback(prompt: String, renderer: St
     _ = renderer
     return false
     #endif
+}
+
+private let foundationAllowedToolNames: Set<String> = [
+    "glob",
+    "grep",
+    "list_dir",
+    "web_search",
+    "web_fetch"
+]
+
+private func runAppleFoundationSinglePromptWithTools(
+    prompt: String,
+    registry: ToolRegistry,
+    renderer: StreamRenderer
+) async -> Bool {
+    if shouldBypassFoundationTools(for: prompt) {
+        return await runAppleFoundationSinglePromptFallback(prompt: prompt, renderer: renderer)
+    }
+
+    #if canImport(FoundationModels)
+    if #available(macOS 26.0, *) {
+        do {
+            let session = LanguageModelSession()
+            let maxIterations = 6
+            var iteration = 0
+            var pendingPrompt = foundationSystemToolPrompt(userPrompt: prompt)
+
+            while iteration < maxIterations {
+                iteration += 1
+                let response = try await session.respond(to: pendingPrompt)
+                let raw = response.content
+                var toolCalls = ToolCallParser.parse(raw)
+                if toolCalls.isEmpty {
+                    toolCalls = parseFoundationFallbackToolCalls(from: raw)
+                }
+                let nonToolText = ToolCallParser.extractNonToolText(ToolCallParser.stripThinking(raw))
+
+                if toolCalls.isEmpty {
+                    if !nonToolText.isEmpty {
+                        print(nonToolText)
+                    } else {
+                        print(raw)
+                    }
+                    return true
+                }
+
+                var toolResponses: [String] = []
+                toolResponses.reserveCapacity(toolCalls.count)
+
+                for rawCall in toolCalls {
+                    let call = normalizeFoundationToolCall(rawCall)
+                    renderer.printToolCall(name: call.name, arguments: call.arguments)
+
+                    let result: ToolResult
+                    if !foundationAllowedToolNames.contains(call.name) {
+                        result = .error("Tool '\(call.name)' is not available in Foundation mode. Allowed tools: glob, grep, list_dir, web_search, web_fetch.")
+                    } else if let tool = await registry.tool(named: call.name) {
+                        do {
+                            result = try await tool.execute(arguments: call.arguments)
+                        } catch {
+                            result = .error("Tool execution failed: \(error.localizedDescription)")
+                        }
+                    } else {
+                        result = .error("Tool '\(call.name)' is not registered.")
+                    }
+
+                    renderer.printToolResult(result)
+                    let boundedContent = String(result.content.prefix(8000))
+                    let jsonObject: [String: Any] = [
+                        "name": call.name,
+                        "is_error": result.isError,
+                        "content": boundedContent
+                    ]
+
+                    if let data = try? JSONSerialization.data(withJSONObject: jsonObject, options: [.sortedKeys]),
+                       let json = String(data: data, encoding: .utf8) {
+                        toolResponses.append("\(ToolCallPattern.toolResponseOpen)\n\(json)\n\(ToolCallPattern.toolResponseClose)")
+                    } else {
+                        toolResponses.append("\(ToolCallPattern.toolResponseOpen)\n{\"name\":\"\(call.name)\",\"is_error\":\(result.isError ? "true" : "false"),\"content\":\"serialization_failed\"}\n\(ToolCallPattern.toolResponseClose)")
+                    }
+                }
+
+                pendingPrompt = """
+                Continue the task using these tool results.
+                If another tool is required, emit only tool calls in the required format.
+                If you have enough information, provide the final answer directly.
+
+                \(toolResponses.joined(separator: "\n"))
+                """
+            }
+
+            renderer.printError("Foundation tool loop exceeded maximum tool iterations (\(maxIterations)).")
+            return false
+        } catch {
+            renderer.printError("Foundation fallback failed: \(error.localizedDescription)")
+            return false
+        }
+    }
+    return false
+    #else
+    _ = prompt
+    _ = registry
+    _ = renderer
+    return false
+    #endif
+}
+
+private func foundationSystemToolPrompt(userPrompt: String) -> String {
+    """
+    You are running in mlx-coder Foundation mode with restricted tools.
+
+    Available tools: glob, grep, list_dir, web_search, web_fetch.
+
+    When a tool is needed, respond with one or more tool calls only, each in this exact format:
+    <tool_call>
+    {"name":"tool_name","arguments":{...}}
+    </tool_call>
+
+    Rules:
+    - Do NOT call tools for greetings, acknowledgements, thanks, or casual chat. Reply directly.
+    - Do NOT explore files or web content unless the user explicitly asks for that information.
+    - Use only the five available tools listed above.
+    - Do NOT emit custom tags like <list_dir>...</list_dir> or wrapper calls like tool_call(...).
+    - Arguments must be valid JSON objects.
+    - Do not include markdown fences around tool call JSON.
+    - For list_dir, always provide a non-empty path. Use "." for current directory.
+    - If no tool is needed, answer normally.
+
+    User request:
+    \(userPrompt)
+    """
+}
+
+private func shouldBypassFoundationTools(for prompt: String) -> Bool {
+    let trimmed = prompt.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    if trimmed.isEmpty { return true }
+
+    let compact = trimmed.replacingOccurrences(of: "[^a-z0-9 ]", with: "", options: .regularExpression)
+    let words = compact.split(separator: " ")
+
+    let chatter: Set<String> = [
+        "hi", "hello", "hey", "yo", "sup", "howdy", "ola",
+        "thanks", "thank", "thx", "ok", "okay", "cool", "nice"
+    ]
+
+    // Single-token greetings/acknowledgements should never trigger tool usage.
+    if words.count == 1, let only = words.first, chatter.contains(String(only)) {
+        return true
+    }
+
+    // Very short social phrases should also bypass tools.
+    if words.count <= 3 {
+        let socialPhrases: Set<String> = [
+            "good morning", "good afternoon", "good evening", "how are you", "whats up"
+        ]
+        if socialPhrases.contains(words.joined(separator: " ")) {
+            return true
+        }
+    }
+
+    return false
+}
+
+private func parseFoundationFallbackToolCalls(from raw: String) -> [ToolCallParser.ParsedToolCall] {
+    var candidates: [String] = []
+
+    // Handle fenced JSON blocks like:
+    // ```json
+    // {"name":"list_dir","arguments":{...}}
+    // ```
+    if let regex = try? NSRegularExpression(pattern: "```(?:json)?\\s*([\\s\\S]*?)```", options: [.caseInsensitive]) {
+        let nsRaw = raw as NSString
+        let matches = regex.matches(in: raw, range: NSRange(location: 0, length: nsRaw.length))
+        for match in matches where match.numberOfRanges > 1 {
+            let block = nsRaw.substring(with: match.range(at: 1)).trimmingCharacters(in: .whitespacesAndNewlines)
+            if !block.isEmpty {
+                candidates.append(block)
+            }
+        }
+    }
+
+    // Also attempt parsing the full response as a raw JSON object.
+    let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+    if trimmed.hasPrefix("{") && trimmed.hasSuffix("}") {
+        candidates.append(trimmed)
+    }
+
+    var parsed: [ToolCallParser.ParsedToolCall] = []
+    for candidate in candidates {
+        if let call = parseSingleToolCallJSON(candidate) {
+            parsed.append(call)
+        }
+    }
+
+    // Handle custom XML-like tags such as:
+    // <list_dir>
+    // {"path":"."}
+    // </list_dir>
+    parsed.append(contentsOf: parseFoundationTagWrappedToolCalls(from: raw))
+
+    // Handle function-like wrappers such as:
+    // tool_call(tool: list_dir, path: .)
+    parsed.append(contentsOf: parseFoundationFunctionStyleToolCalls(from: raw))
+
+    return parsed
+}
+
+private func parseFoundationTagWrappedToolCalls(from raw: String) -> [ToolCallParser.ParsedToolCall] {
+    guard let regex = try? NSRegularExpression(
+        pattern: "<([a-zA-Z_][a-zA-Z0-9_]*)>\\s*([\\s\\S]*?)\\s*</\\1>",
+        options: []
+    ) else {
+        return []
+    }
+
+    let nsRaw = raw as NSString
+    let matches = regex.matches(in: raw, range: NSRange(location: 0, length: nsRaw.length))
+    var calls: [ToolCallParser.ParsedToolCall] = []
+
+    for match in matches where match.numberOfRanges >= 3 {
+        let tagName = nsRaw.substring(with: match.range(at: 1)).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard foundationAllowedToolNames.contains(tagName) else { continue }
+
+        let body = nsRaw.substring(with: match.range(at: 2)).trimmingCharacters(in: .whitespacesAndNewlines)
+        if let data = body.data(using: .utf8),
+           let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            calls.append(ToolCallParser.ParsedToolCall(name: tagName, arguments: object))
+        } else {
+            // If body is not JSON, pass an empty object so normalization can still run.
+            calls.append(ToolCallParser.ParsedToolCall(name: tagName, arguments: [:]))
+        }
+    }
+
+    return calls
+}
+
+private func parseFoundationFunctionStyleToolCalls(from raw: String) -> [ToolCallParser.ParsedToolCall] {
+    guard let regex = try? NSRegularExpression(
+        pattern: "tool_call\\s*\\(([^)]*)\\)",
+        options: [.caseInsensitive]
+    ) else {
+        return []
+    }
+
+    let nsRaw = raw as NSString
+    let matches = regex.matches(in: raw, range: NSRange(location: 0, length: nsRaw.length))
+    var calls: [ToolCallParser.ParsedToolCall] = []
+
+    for match in matches where match.numberOfRanges >= 2 {
+        let paramsText = nsRaw.substring(with: match.range(at: 1))
+        let pairs = paramsText
+            .split(separator: ",")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+
+        var toolName: String?
+        var args: [String: Any] = [:]
+
+        for pair in pairs {
+            guard let colonIndex = pair.firstIndex(of: ":") else { continue }
+            let rawKey = String(pair[..<colonIndex]).trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            var rawValue = String(pair[pair.index(after: colonIndex)...]).trimmingCharacters(in: .whitespacesAndNewlines)
+
+            // Strip optional surrounding quotes.
+            if (rawValue.hasPrefix("\"") && rawValue.hasSuffix("\"")) ||
+                (rawValue.hasPrefix("'") && rawValue.hasSuffix("'")) {
+                rawValue = String(rawValue.dropFirst().dropLast())
+            }
+
+            if rawKey == "tool" || rawKey == "name" {
+                toolName = rawValue
+                continue
+            }
+
+            if let intValue = Int(rawValue) {
+                args[rawKey] = intValue
+            } else if rawValue.lowercased() == "true" {
+                args[rawKey] = true
+            } else if rawValue.lowercased() == "false" {
+                args[rawKey] = false
+            } else {
+                args[rawKey] = rawValue
+            }
+        }
+
+        if let toolName, foundationAllowedToolNames.contains(toolName) {
+            calls.append(ToolCallParser.ParsedToolCall(name: toolName, arguments: args))
+        }
+    }
+
+    return calls
+}
+
+private func parseSingleToolCallJSON(_ jsonString: String) -> ToolCallParser.ParsedToolCall? {
+    guard let data = jsonString.data(using: .utf8),
+          let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+          let name = object["name"] as? String else {
+        return nil
+    }
+    let arguments = object["arguments"] as? [String: Any] ?? [:]
+    return ToolCallParser.ParsedToolCall(name: name, arguments: arguments)
+}
+
+private func normalizeFoundationToolCall(_ call: ToolCallParser.ParsedToolCall) -> ToolCallParser.ParsedToolCall {
+    var args = call.arguments
+
+    switch call.name {
+    case "list_dir":
+        let path = (args["path"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if path.isEmpty {
+            args["path"] = "."
+        }
+
+    case "grep":
+        if args["pattern"] == nil, let query = args["query"] as? String, !query.isEmpty {
+            args["pattern"] = query
+        }
+        if let path = args["path"] as? String, path.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            args["path"] = "."
+        }
+
+    case "glob":
+        if args["pattern"] == nil, let query = args["query"] as? String, !query.isEmpty {
+            args["pattern"] = query
+        }
+        if let path = args["path"] as? String, path.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            args["path"] = "."
+        }
+
+    case "web_search":
+        if args["query"] == nil, let q = args["q"] as? String, !q.isEmpty {
+            args["query"] = q
+        }
+
+    case "web_fetch":
+        if args["url"] == nil,
+           let urls = args["urls"] as? [String],
+           let first = urls.first,
+           !first.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            args["url"] = first
+        }
+
+    default:
+        break
+    }
+
+    return ToolCallParser.ParsedToolCall(name: call.name, arguments: args)
 }
 
 private func isAppleFoundationModelAvailable() -> Bool {

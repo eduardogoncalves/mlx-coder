@@ -61,6 +61,11 @@ public actor ToolRegistry {
         tools.count
     }
 
+    /// Remove all registered tools.
+    public func clear() {
+        tools.removeAll()
+    }
+
     /// Generate the <tools> XML block for the system prompt.
     /// This follows the Qwen3 format: tools are defined inside <tools></tools>
     /// using JSON Schema.

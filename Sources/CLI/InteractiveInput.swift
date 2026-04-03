@@ -343,6 +343,109 @@ public final class InteractiveInput: @unchecked Sendable {
         
         return input
     }
+
+    /// Displays a simple arrow-key picker and returns the selected option index.
+    /// Up/Down moves the selection; Enter confirms; Escape or Ctrl-C cancels.
+    public func selectOption(prompt: String, options: [String]) async -> Int? {
+        guard !options.isEmpty else { return nil }
+
+        guard isatty(STDIN_FILENO) == 1 else {
+            return 0
+        }
+
+        var originalTerm = termios()
+        tcgetattr(STDIN_FILENO, &originalTerm)
+
+        var rawTerm = originalTerm
+        rawTerm.c_lflag &= ~tcflag_t(ECHO | ICANON | ISIG)
+        rawTerm.c_cc.16 = 1
+        rawTerm.c_cc.17 = 0
+        tcsetattr(STDIN_FILENO, TCSANOW, &rawTerm)
+
+        defer {
+            tcsetattr(STDIN_FILENO, TCSANOW, &originalTerm)
+        }
+
+        let title = prompt.isEmpty ? "Select a model" : prompt
+        let footer = "Use Up/Down and Enter. Esc cancels."
+        var selectedIndex = 0
+        var isInitialDraw = true
+        var renderedLineCount = 0
+
+        func draw() {
+            if !isInitialDraw {
+                print("\u{1B}[\(renderedLineCount)A\r\u{1B}[J", terminator: "")
+            }
+            isInitialDraw = false
+
+            print("\n\(bold)\(title)\(reset)")
+            print("\(dim)\(footer)\(reset)")
+            print("")
+
+            for (index, option) in options.enumerated() {
+                if index == selectedIndex {
+                    print("\(bold)\u{001B}[32m>\(reset) \(option)")
+                } else {
+                    print("  \(option)")
+                }
+            }
+
+            renderedLineCount = options.count + 4
+            fflush(stdout)
+        }
+
+        draw()
+
+        while true {
+            var byte: UInt8 = 0
+            if read(STDIN_FILENO, &byte, 1) != 1 { continue }
+
+            if byte == 3 || byte == 4 {
+                if renderedLineCount > 0 {
+                    print("\r\u{1B}[\(renderedLineCount)A", terminator: "")
+                }
+                print("\r\u{1B}[J", terminator: "")
+                fflush(stdout)
+                return nil
+            } else if byte == 10 || byte == 13 {
+                break
+            } else if byte == 27 {
+                let sequence = TerminalKeyParser.readEscapeSequence(initialTimeoutMs: 80, extendedTimeoutMs: 120)
+                if sequence.isEmpty {
+                    if renderedLineCount > 0 {
+                        print("\r\u{1B}[\(renderedLineCount)A", terminator: "")
+                    }
+                    print("\r\u{1B}[J", terminator: "")
+                    fflush(stdout)
+                    return nil
+                }
+
+                if let direction = TerminalKeyParser.arrowDirection(for: sequence) {
+                    switch direction {
+                    case .up:
+                        if selectedIndex > 0 {
+                            selectedIndex -= 1
+                            draw()
+                        }
+                    case .down:
+                        if selectedIndex < options.count - 1 {
+                            selectedIndex += 1
+                            draw()
+                        }
+                    case .left, .right:
+                        break
+                    }
+                }
+            }
+        }
+
+        if renderedLineCount > 0 {
+            print("\r\u{1B}[\(renderedLineCount)A", terminator: "")
+        }
+        print("\r\u{1B}[J", terminator: "")
+        fflush(stdout)
+        return selectedIndex
+    }
     
     private func moveToPreviousWord(input: String, cursorPosition: inout Int) {
         if cursorPosition <= 0 { return }

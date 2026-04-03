@@ -10,7 +10,7 @@ import Darwin
 /// The main agent loop that orchestrates generation and tool execution.
 public actor AgentLoop {
 
-    private var modelContainer: ModelContainer
+    private var modelContainer: ModelContainer?
     private let registry: ToolRegistry
     private let permissions: PermissionEngine
     private let renderer: StreamRenderer
@@ -19,7 +19,7 @@ public actor AgentLoop {
     private let maxToolIterations: Int
     private var autoApproveAllTools: Bool = false
     private var useSandbox: Bool
-    private let modelPath: String
+    private var modelPath: String
     private let memoryLimit: Int?
     private let cacheLimit: Int?
     private let dryRun: Bool
@@ -863,8 +863,12 @@ public actor AgentLoop {
     /// Full model unload and reload to ensure fresh weights/cache.
     public func reloadModel() async throws {
         renderer.printStatus("Reloading model to ensure fresh state...")
-        
-        // Clear references
+
+        // Drop tool references first so old model-bound tools can be deallocated.
+        await registry.clear()
+        modelContainer = nil
+
+        // Clear any unreferenced MLX buffers before loading replacement weights.
         MLX.Memory.clearCache()
         
         // Load fresh container
@@ -884,8 +888,33 @@ public actor AgentLoop {
         
         // Re-register tools that depend on modelContainer
         await registerToolsInternal()
+
+        // Sweep again after rebinding to reclaim stale buffers from the old model.
+        MLX.Memory.clearCache()
         
         renderer.printStatus("Model reloaded successfully")
+    }
+
+    /// Switch to a different model path and immediately reload model and dependent tools.
+    public func switchModel(to newModelPath: String) async throws {
+        let trimmed = newModelPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            throw NSError(
+                domain: "AgentLoop",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "Model path cannot be empty."]
+            )
+        }
+
+        if trimmed == modelPath {
+            renderer.printStatus("Model is already active: \(trimmed)")
+            return
+        }
+
+        renderer.printStatus("Unloading current model...")
+        modelPath = trimmed
+        pendingReload = false
+        try await reloadModel()
     }
 
     private func updateGenerationConfig() {
@@ -1024,6 +1053,8 @@ public actor AgentLoop {
     }
 
     private func registerToolsInternal() async {
+        guard let modelContainer else { return }
+
         // Filesystem tools
         await registry.register(ReadFileTool(permissions: permissions))
         await registry.register(WriteFileTool(permissions: permissions))
@@ -1200,6 +1231,7 @@ public actor AgentLoop {
         \(ToolCallPattern.imStart)assistant
         """
 
+        let modelContainer = try requireLoadedModelContainer()
         let extracted = try await modelContainer.perform { context in
             if Task.isCancelled { throw CancellationError() }
 
@@ -1277,16 +1309,12 @@ public actor AgentLoop {
         // We snapshot message contents, compute counts inside perform (which is Sendable-safe),
         // then use a lookup table as the tokenCounter closure to avoid capturing non-Sendable state.
         let contentSnapshot = history.messages.map(\.content)
-        let tokenCounts: [Int]?
-        do {
-            tokenCounts = try await modelContainer.perform { context in
+        let tokenCounts: [Int]? = if let modelContainer {
+            await modelContainer.perform { context in
                 contentSnapshot.map { context.tokenizer.encode(text: $0).count }
             }
-        } catch {
-            if renderer.verbose {
-                renderer.printStatus("[debug] Compaction: tokenizer unavailable, falling back to char/4 estimate (\(error.localizedDescription))")
-            }
-            tokenCounts = nil
+        } else {
+            nil
         }
 
         let tokenCounter: ((String) -> Int)?
@@ -1316,15 +1344,12 @@ public actor AgentLoop {
         // Re-snapshot after compaction for the "after" count.
         let afterContentSnapshot = history.messages.map(\.content)
         let after: Int
-        do {
-            let afterCounts = try await modelContainer.perform { context in
+        if let modelContainer {
+            let afterCounts = await modelContainer.perform { context in
                 afterContentSnapshot.map { context.tokenizer.encode(text: $0).count }
             }
             after = afterCounts.reduce(0, +)
-        } catch {
-            if renderer.verbose {
-                renderer.printStatus("[debug] Compaction: post-compaction token count unavailable, using char/4 (\(error.localizedDescription))")
-            }
+        } else {
             after = history.estimatedTokenCount
         }
 
@@ -1353,6 +1378,7 @@ public actor AgentLoop {
         await spinner.start()
 
         // Use the model container to prepare input and generate
+        let modelContainer = try requireLoadedModelContainer()
         let result = try await modelContainer.perform { [currentGenerationConfig, renderer] context in
             if Task.isCancelled { throw CancellationError() }
             // Tokenize the ChatML prompt
@@ -1499,6 +1525,17 @@ public actor AgentLoop {
         Task { await spinner.stop(clearLine: true) }
 
         return result
+    }
+
+    private func requireLoadedModelContainer() throws -> ModelContainer {
+        guard let modelContainer else {
+            throw NSError(
+                domain: "AgentLoop",
+                code: 2,
+                userInfo: [NSLocalizedDescriptionKey: "Model is currently unloading or not loaded."]
+            )
+        }
+        return modelContainer
     }
 
     /// Prompt the user to approve a tool call using raw terminal mode.
