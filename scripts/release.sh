@@ -10,7 +10,7 @@
 #    -m, --message MSG       Release commit message.  Optional.
 #    -n, --dry-run           Print all steps but do not modify anything.
 #    -k, --no-push           Tag locally but skip git pull and git push.
-#    -b, --build-only        Build-only mode: still updates dependencies, skips tests and git/publish steps.
+#    -b, --build-only        Build-only mode: skips dependency updates, tests, and git/publish steps.
 #    -h, --help              Show this help.
 #
 #  What it does:
@@ -200,7 +200,7 @@ fi
 log_step "Step 2/5 – Update Swift Package dependencies"
 
 if $BUILD_ONLY; then
-  log_warn "Skipping dependency update in --build-only mode (uses pinned dependencies from Package.resolved)"
+  log_warn "Skipping dependency update in --build-only mode (fast path uses pinned dependencies from Package.resolved)"
 else
 
 # Capture the state before update
@@ -255,20 +255,42 @@ log_step "Step 3/5 – Build release binary (with Metal shader pre-warming)"
 
 if $BUILD_ONLY; then
   if $DRY_RUN; then
-    log_info "[dry-run] Would run: MLX_CODER_VERSION=${VERSION} ${REPO_ROOT}/build-and-release.sh arm64"
-    BINARY_PATH="${REPO_ROOT}/.build/release/mlx-coder"
+    log_info "[dry-run] Would inject version ${VERSION} into MLXCoderCLI.swift"
+    log_info "[dry-run] Would run: swift build --configuration release --arch arm64 -Xswiftc -DMLX_PREWARM_SHADERS"
+    BINARY_PATH="${REPO_ROOT}/.build/arm64-apple-macosx/release/mlx-coder"
     log_info "[dry-run] Would verify binary at: ${BINARY_PATH}"
   else
-    log_info "Delegating build-only pipeline to build-and-release.sh"
-    run env MLX_CODER_VERSION="${VERSION}" "${REPO_ROOT}/build-and-release.sh" arm64
+    log_info "Using fast build-only pipeline via swift build"
+    log_info "Injecting version ${VERSION} into MLXCoderCLI.swift"
+    cp "${REPO_ROOT}/Sources/MLXCoder/MLXCoderCLI.swift" "/tmp/MLXCoderCLI.swift.bak"
+    trap 'mv "/tmp/MLXCoderCLI.swift.bak" "${REPO_ROOT}/Sources/MLXCoder/MLXCoderCLI.swift"' EXIT
+    sed -i '' "s/version: \".*\"/version: \"${VERSION}\"/g" "${REPO_ROOT}/Sources/MLXCoder/MLXCoderCLI.swift"
 
-    BINARY_PATH="${REPO_ROOT}/.build/release/mlx-coder"
+    run env METAL_DEVICE_WRAPPER_TYPE=1 MTL_SHADER_VALIDATION=1 \
+      swift build \
+        --configuration release \
+        --arch arm64 \
+        -Xswiftc -DMLX_PREWARM_SHADERS
+
+    BINARY_PATH="$(swift build --configuration release --arch arm64 --show-bin-path 2>/dev/null)/mlx-coder"
     if [[ ! -f "$BINARY_PATH" ]]; then
       log_error "Expected build-only binary not found at: ${BINARY_PATH}"
       exit 1
     fi
 
     log_ok "Binary built: ${BINARY_PATH}"
+
+    METALLIB_SOURCE=$(find .build -name "default.metallib" | grep "Release" | head -n 1 || true)
+    if [[ -n "$METALLIB_SOURCE" ]]; then
+      BINARY_DIR=$(dirname "$BINARY_PATH")
+      log_info "Found Metal library at: ${METALLIB_SOURCE}"
+      run cp "$METALLIB_SOURCE" "${BINARY_DIR}/default.metallib"
+      run cp "$METALLIB_SOURCE" "${BINARY_DIR}/mlx.metallib"
+      log_ok "Colocated Metal libraries with binary (default.metallib and mlx.metallib)"
+    else
+      log_warn "Could not find default.metallib in .build directory. MLX may fail at runtime."
+    fi
+
     log_info "Smoke-testing binary (--help)…"
     "$BINARY_PATH" --help &>/dev/null || {
       log_error "Binary smoke test failed – check build output."
