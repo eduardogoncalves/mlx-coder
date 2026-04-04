@@ -296,12 +296,17 @@ public actor AgentLoop {
             await applyDeterministicContextCompactionIfNeeded(reason: "before_generation")
 
             // Generate response
-            let response = try await generateResponse()
+            let generationResult = try await generateResponse()
+            let response = generationResult.text
+            let writer = generationResult.writer
 
-            // Parse tool calls
+            // Get streamed tool calls from the writer
+            let streamedCalls = writer.drainCompletedCalls()
+
+            // Parse tool calls from text
             let toolCalls = ToolCallParser.parse(response)
 
-            if toolCalls.isEmpty {
+            if toolCalls.isEmpty && streamedCalls.isEmpty {
                 // No tool calls — this is the final response
                 history.addAssistant(response)
                 
@@ -317,14 +322,35 @@ public actor AgentLoop {
             // Add the assistant's response (including tool calls) to history
             history.addAssistant(response)
 
-            // Execute each tool call
+            // Handle streamed tool calls first (content already written to .tmp files)
+            for streamedCall in streamedCalls {
+                renderer.printToolCall(name: streamedCall.toolName, arguments: ["path": streamedCall.path, "content": "[streamed to tmp]"])
+                
+                let streamResult = await handleStreamedToolCall(streamedCall)
+                renderer.printToolResult(streamResult)
+                
+                // Track file modifications
+                if !streamResult.isError {
+                    fileModificationToolsExecuted = true
+                }
+                
+                let userGoal = history.latestUserMessage ?? ""
+                let toolResponse = try await makeToolResponseForHistory(
+                    toolName: streamedCall.toolName,
+                    result: streamResult,
+                    userGoal: userGoal
+                )
+                history.addToolResponse(toolResponse, toolCallId: streamedCall.toolName)
+            }
+
+            // Execute each tool call from text parsing
             for call in toolCalls {
                 renderer.printToolCall(name: call.name, arguments: call.arguments)
                 
                 // Track file modifications for build checking
                 let isFileModificationTool = (call.name == "write_file" || call.name == "edit_file" || call.name == "append_file" || call.name == "patch")
                 
-                let result: ToolResult
+                var result: ToolResult
 
                 let targetPath = extractPolicyTargetPath(from: call.arguments)
                 let policyDecision = permissions.evaluateToolPolicy(toolName: call.name, targetPath: targetPath)
@@ -370,8 +396,29 @@ public actor AgentLoop {
 
                 if approval.approved {
                     await hooks.emit(.preToolUse(toolName: call.name, argumentsPreview: serializedArgumentsPreview(call.arguments)))
+                    
+                    // Apply automatic parameter correction before execution
+                    let correctionResult = await ParameterCorrectionService.correct(
+                        toolName: call.name,
+                        arguments: call.arguments,
+                        workspaceRoot: workspace
+                    )
+                    
+                    // Log corrections if any were made
+                    if correctionResult.wasCorrected {
+                        for correction in correctionResult.corrections {
+                            renderer.printStatus("[auto-correct] \(call.name): \(correction)")
+                        }
+                        await auditLogger?.logParameterCorrection(
+                            toolName: call.name,
+                            originalArgumentsJSON: serializedArgumentsPreview(call.arguments),
+                            correctedArgumentsJSON: serializedArgumentsPreview(correctionResult.correctedArguments),
+                            corrections: correctionResult.corrections
+                        )
+                    }
+                    
                     if isDestructive && dryRun {
-                        result = .success("Dry-run mode: skipped execution of destructive tool '\(call.name)'. Arguments: \(call.arguments)")
+                        result = .success("Dry-run mode: skipped execution of destructive tool '\(call.name)'. Arguments: \(correctionResult.correctedArguments)")
                     } else if let tool = await registry.tool(named: call.name) {
                         let showToolSpinner = (call.name == "web_search" || call.name == "web_fetch")
                         let toolSpinner = Spinner(message: "Executing \(call.name)...")
@@ -386,16 +433,38 @@ public actor AgentLoop {
 
                         do {
                             if let progressTool = tool as? ProgressReportingTool {
-                                result = try await progressTool.execute(arguments: call.arguments) { phase in
+                                result = try await progressTool.execute(arguments: correctionResult.correctedArguments) { phase in
                                     if showToolSpinner {
                                         Task { await toolSpinner.updateMessage("\(call.name): \(phase)") }
-                                    }
-                                }
+        }
+        
+        // Clean up stale .tmp files from previous crashed/interrupted sessions
+        let tmpDir = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("mlx-coder-streaming")
+        try? FileManager.default.removeItem(at: tmpDir)
+    }
                             } else {
-                                result = try await tool.execute(arguments: call.arguments)
+                                result = try await tool.execute(arguments: correctionResult.correctedArguments)
                             }
                         } catch {
                             result = .error("Tool execution failed: \(error.localizedDescription)")
+                        }
+
+                        // Semantic correction: if edit_file failed due to old_text mismatch, use LLM to fix it
+                        if result.isError && call.name == "edit_file" {
+                            let currentArgs = correctionResult.correctedArguments
+                            let currentResult = result
+                            if let correction = await attemptSemanticCorrection(
+                                toolName: call.name,
+                                arguments: currentArgs,
+                                errorResult: currentResult
+                            ) {
+                                renderer.printStatus("[auto-correct] Retrying with corrected arguments...")
+                                do {
+                                    result = try await tool.execute(arguments: ["path": correction.path, "old_text": correction.oldText, "new_text": correction.newText])
+                                } catch {
+                                    result = .error("Tool execution failed after semantic correction: \(error.localizedDescription)")
+                                }
+                            }
                         }
                     } else {
                         result = .error("Unknown tool: \(call.name)")
@@ -1358,7 +1427,8 @@ public actor AgentLoop {
     }
 
     /// Generate a response from the model using the current conversation history.
-    private func generateResponse() async throws -> String {
+    /// Returns the response text and the streaming writer (for streamed tool calls).
+    private func generateResponse() async throws -> (text: String, writer: StreamingToolCallWriter) {
         let enableThinking = thinkingLevel != .fast
 
         // Apply context transforms (snapshot — does not mutate stored history)
@@ -1387,6 +1457,12 @@ public actor AgentLoop {
             let inputTokens = MLXArray(tokens)
             
             let input = LMInput(tokens: inputTokens)
+            
+            // Streaming writer: streams tool call content to .tmp files during generation
+            let writer = StreamingToolCallWriter(
+                toolCallOpen: ToolCallPattern.toolCallOpen,
+                toolCallClose: ToolCallPattern.toolCallClose
+            )
             
             var responseText = ""
             var pendingChunk = ""
@@ -1432,6 +1508,10 @@ public actor AgentLoop {
                     }
                     
                     let newText = String(newSegment.suffix(newSegment.count - segment.count))
+                    
+                    // Stream tool call content to .tmp files during generation
+                    let streamResult = writer.process(newText)
+                    responseText += streamResult.displayText
                     
                     if newText.hasSuffix("\n") {
                         if let lastToken = segmentTokens.last {
@@ -1518,7 +1598,7 @@ public actor AgentLoop {
             responseText = responseText.replacingOccurrences(of: ToolCallPattern.eosToken, with: "")
             responseText = responseText.trimmingCharacters(in: .whitespacesAndNewlines)
             
-            return responseText
+            return (text: responseText, writer: writer)
         }
 
         // Cleanup spinner if generation failed or returned nothing
@@ -1875,5 +1955,337 @@ public actor AgentLoop {
             renderer.printStatus("⚠️  Build has errors that need manual fixing")
             renderer.printStatus("Use build_check tool for detailed error information, then fix and commit.")
         }
+    }
+
+    // MARK: - Semantic Parameter Correction
+
+    /// Structured result from semantic correction — Sendable-safe.
+    private struct SemanticCorrection: Sendable {
+        let path: String
+        let oldText: String
+        let newText: String
+    }
+
+    /// Attempts to semantically correct a failed tool call using lightweight LLM inference.
+    ///
+    /// When `edit_file` fails because `old_text` doesn't match the file, this method:
+    /// 1. Reads the actual file content
+    /// 2. Sends a focused prompt to the LLM to find the correct `old_text`
+    /// 3. Returns corrected arguments (preserving the original `new_text`)
+    ///
+    /// This avoids wasting tokens on full regeneration — the LLM only provides the
+    /// corrected `old_text`, and the agent reuses the previously generated `new_text`.
+    private func attemptSemanticCorrection(
+        toolName: String,
+        arguments: [String: Any],
+        errorResult: ToolResult
+    ) async -> SemanticCorrection? {
+        guard toolName == "edit_file" else { return nil }
+        guard let path = arguments["path"] as? String else { return nil }
+        guard let oldText = arguments["old_text"] as? String else { return nil }
+        guard let newText = arguments["new_text"] as? String else { return nil }
+
+        // Only attempt correction for "old_text not found" type errors
+        let errorPreview = errorResult.content.prefix(100).lowercased()
+        guard errorPreview.contains("not found") || errorPreview.contains("doesn't match") || errorPreview.contains("make sure") else {
+            return nil
+        }
+
+        // Read the actual file content
+        let resolvedPath = (path as NSString).isAbsolutePath
+            ? path
+            : (workspace as NSString).appendingPathComponent(path)
+
+        guard FileManager.default.fileExists(atPath: resolvedPath),
+              let fileContent = try? String(contentsOfFile: resolvedPath, encoding: .utf8) else {
+            return nil
+        }
+
+        renderer.printStatus("[auto-correct] \(toolName): old_text not found — using LLM to find correct match...")
+
+        // Build a focused, token-efficient prompt
+        let maxFileChars = 8000
+        let truncatedFile = fileContent.count > maxFileChars
+            ? String(fileContent.prefix(maxFileChars)) + "\n... [file truncated]"
+            : fileContent
+
+        let correctionPrompt = """
+        You are a precise text matching assistant. Your ONLY task is to find the exact text in the file that corresponds to the user's intended old_text.
+
+        FILE CONTENT:
+        ```
+        \(truncatedFile)
+        ```
+
+        INTENDED OLD_TEXT (what the user tried to match):
+        ```
+        \(oldText)
+        ```
+
+        Return ONLY the exact text from the file that should be replaced. Do not explain, do not add markdown. Return the exact string as it appears in the file, preserving all whitespace and indentation.
+        """
+
+        // Generate correction with minimal tokens
+        let correctionConfig = GenerationEngine.Config(
+            maxTokens: 512,
+            temperature: 0.1,
+            topP: 0.9,
+            topK: 5,
+            minP: 0.0,
+            repetitionPenalty: 1.0,
+            repetitionContextSize: currentGenerationConfig.repetitionContextSize,
+            presencePenalty: 0.0,
+            presenceContextSize: currentGenerationConfig.presenceContextSize,
+            frequencyPenalty: currentGenerationConfig.frequencyPenalty,
+            frequencyContextSize: currentGenerationConfig.frequencyContextSize,
+            kvBits: currentGenerationConfig.kvBits,
+            kvGroupSize: currentGenerationConfig.kvGroupSize,
+            quantizedKVStart: currentGenerationConfig.quantizedKVStart,
+            longContextThreshold: currentGenerationConfig.longContextThreshold
+        )
+
+        guard let modelContainer else { return nil }
+
+        do {
+            let correctedOldText = try await modelContainer.perform { context in
+                if Task.isCancelled { throw CancellationError() }
+                let tokenizer = context.tokenizer
+                let tokens = tokenizer.encode(text: correctionPrompt)
+                let inputTokens = MLXArray(tokens)
+                let input = MLXLMCommon.LMInput(tokens: inputTokens)
+
+                var responseText = ""
+                for try await item in try MLXLMCommon.generateTokens(
+                    input: input,
+                    parameters: correctionConfig.generateParameters,
+                    context: context
+                ) {
+                    if Task.isCancelled { throw CancellationError() }
+                    if case .token(let id) = item {
+                        let decoded = tokenizer.decode(tokens: [id], skipSpecialTokens: false)
+                        responseText += decoded
+                        // Early exit if we have enough text
+                        if responseText.count > 2000 { break }
+                    }
+                }
+                return responseText.trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+
+            // Clean up the response — strip markdown code blocks if present
+            var cleanedOldText = correctedOldText
+            if cleanedOldText.hasPrefix("```") {
+                let lines = cleanedOldText.components(separatedBy: .newlines)
+                cleanedOldText = lines.filter { !$0.hasPrefix("```") }.joined(separator: "\n")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+
+            // Verify the corrected text actually exists in the file
+            guard fileContent.contains(cleanedOldText) else {
+                renderer.printStatus("[auto-correct] LLM suggestion didn't match file — skipping correction")
+                return nil
+            }
+
+            // Verify it's different from the original attempt
+            guard cleanedOldText != oldText else {
+                renderer.printStatus("[auto-correct] LLM returned same text — skipping correction")
+                return nil
+            }
+
+            renderer.printStatus("[auto-correct] Found correct old_text (\(cleanedOldText.count) chars vs original \(oldText.count) chars)")
+
+            await auditLogger?.logParameterCorrection(
+                toolName: toolName,
+                originalArgumentsJSON: serializedArgumentsPreview(arguments),
+                correctedArgumentsJSON: serializedArgumentsPreview(["path": path, "old_text": cleanedOldText, "new_text": newText]),
+                corrections: ["LLM semantic correction: old_text matched in file"]
+            )
+
+            return SemanticCorrection(path: path, oldText: cleanedOldText, newText: newText)
+
+        } catch is CancellationError {
+            return nil
+        } catch {
+            renderer.printStatus("[auto-correct] LLM correction failed: \(error.localizedDescription)")
+            return nil
+        }
+    }
+
+    // MARK: - Streamed Tool Call Handling
+
+    /// Handles a tool call whose content was streamed to a .tmp file during generation.
+    /// Shows a diff to the user and applies the change if approved.
+    private func handleStreamedToolCall(_ call: StreamedToolCall) async -> ToolResult {
+        let resolvedPath: String
+        do {
+            resolvedPath = try permissions.validatePath(call.path)
+        } catch {
+            try? FileManager.default.removeItem(at: call.contentFile)
+            return .error(error.localizedDescription)
+        }
+
+        // Read the tmp content
+        guard let tmpContent = try? String(contentsOf: call.contentFile, encoding: .utf8) else {
+            try? FileManager.default.removeItem(at: call.contentFile)
+            return .error("Failed to read streamed content for \(call.path)")
+        }
+
+        // Read the original file content (if exists)
+        let originalContent: String?
+        if FileManager.default.fileExists(atPath: resolvedPath) {
+            originalContent = try? String(contentsOfFile: resolvedPath, encoding: .utf8)
+        } else {
+            originalContent = nil
+        }
+
+        // Generate and display the diff
+        let diff = generateDiff(original: originalContent, new: tmpContent, path: call.path)
+        renderer.printStatus("\n\(diff)")
+
+        // Ask for approval
+        let approved: Bool
+        if permissions.approvalMode == .yolo {
+            approved = true
+        } else if permissions.approvalMode == .autoEdit && !["write_file", "edit_file", "append_file"].contains(call.toolName) {
+            // autoEdit only auto-approves edit tools
+            approved = await askForToolApproval(name: call.toolName, isPlanMode: mode == .plan).approved
+        } else if autoApproveAllTools {
+            approved = true
+        } else {
+            approved = await askForToolApproval(name: call.toolName, isPlanMode: mode == .plan).approved
+        }
+
+        if !approved {
+            try? FileManager.default.removeItem(at: call.contentFile)
+            return .error("User rejected the file change for \(call.path)")
+        }
+
+        // Apply the change
+        do {
+            switch call.toolName {
+            case "write_file":
+                // Atomic replace: move tmp to target
+                try FileManager.default.moveItem(at: call.contentFile, to: URL(fileURLWithPath: resolvedPath))
+                return .success("Wrote \(call.path) (\(tmpContent.count) bytes)")
+
+            case "edit_file":
+                // For edit_file, the tmp contains new_text; we need old_text from otherArgs
+                guard originalContent != nil else {
+                    try? FileManager.default.removeItem(at: call.contentFile)
+                    return .error("File not found: \(call.path)")
+                }
+                guard let oldText = call.otherArgs["old_text"] as? String else {
+                    try? FileManager.default.removeItem(at: call.contentFile)
+                    return .error("Missing old_text for edit_file")
+                }
+                var content = originalContent!
+                let occurrences = content.components(separatedBy: oldText).count - 1
+                guard occurrences == 1 else {
+                    try? FileManager.default.removeItem(at: call.contentFile)
+                    if occurrences == 0 {
+                        return .error("old_text not found in \(call.path)")
+                    } else {
+                        return .error("old_text found \(occurrences) times in \(call.path). Must be unique.")
+                    }
+                }
+                content = content.replacingOccurrences(of: oldText, with: tmpContent)
+                try content.write(toFile: resolvedPath, atomically: true, encoding: .utf8)
+                try? FileManager.default.removeItem(at: call.contentFile)
+                return .success("Applied edit to \(call.path)")
+
+            case "append_file":
+                // Append tmp content to original file
+                if let fh = try? FileHandle(forWritingTo: URL(fileURLWithPath: resolvedPath)) {
+                    try fh.seekToEnd()
+                    try fh.write(contentsOf: tmpContent.data(using: .utf8) ?? Data())
+                    fh.closeFile()
+                } else {
+                    try tmpContent.write(toFile: resolvedPath, atomically: true, encoding: .utf8)
+                }
+                try? FileManager.default.removeItem(at: call.contentFile)
+                return .success("Appended to \(call.path) (\(tmpContent.count) bytes)")
+
+            default:
+                try? FileManager.default.removeItem(at: call.contentFile)
+                return .error("Unsupported streamed tool: \(call.toolName)")
+            }
+        } catch {
+            try? FileManager.default.removeItem(at: call.contentFile)
+            return .error("Failed to apply change to \(call.path): \(error.localizedDescription)")
+        }
+    }
+
+    /// Generate a unified diff between original and new content.
+    private func generateDiff(original: String?, new: String, path: String) -> String {
+        guard let original = original else {
+            // New file — show the first few lines
+            let lines = new.components(separatedBy: .newlines)
+            let preview = lines.prefix(20).joined(separator: "\n")
+            let truncated = lines.count > 20 ? "\n... (\(lines.count - 20) more lines)" : ""
+            return "--- /dev/null\n+++ b/\(path)\n@@ -0,0 +1,\(lines.count) @@\n\(preview)\(truncated)"
+        }
+
+        let origLines = original.components(separatedBy: .newlines)
+        let newLines = new.components(separatedBy: .newlines)
+
+        // Simple unified diff implementation
+        var diff = "--- a/\(path)\n+++ b/\(path)\n"
+        var i = 0
+        var j = 0
+        var context: [String] = []
+        var changes: [String] = []
+        var origStart = 1
+        var origCount = 0
+        var newStart = 1
+        var newCount = 0
+
+        while i < origLines.count || j < newLines.count {
+            if i < origLines.count && j < newLines.count && origLines[i] == newLines[j] {
+                // Context line
+                if !changes.isEmpty {
+                    // Flush previous hunk
+                    diff += buildHunk(origStart: origStart, origCount: origCount, newStart: newStart, newCount: newCount, changes: changes)
+                    changes = []
+                    origCount = 0
+                    newCount = 0
+                }
+                context.append(origLines[i])
+                if context.count > 3 {
+                    context.removeFirst()
+                    origStart = i + 2
+                    newStart = j + 2
+                }
+                i += 1
+                j += 1
+            } else {
+                // Change
+                if context.isEmpty && changes.isEmpty {
+                    origStart = max(1, i)
+                    newStart = max(1, j)
+                }
+                if i < origLines.count {
+                    changes.append("-\(origLines[i])")
+                    origCount += 1
+                    i += 1
+                }
+                if j < newLines.count {
+                    changes.append("+\(newLines[j])")
+                    newCount += 1
+                    j += 1
+                }
+                context = []
+            }
+        }
+
+        if !changes.isEmpty {
+            diff += buildHunk(origStart: origStart, origCount: origCount, newStart: newStart, newCount: newCount, changes: changes)
+        }
+
+        return diff.isEmpty ? "(no changes)" : diff
+    }
+
+    private func buildHunk(origStart: Int, origCount: Int, newStart: Int, newCount: Int, changes: [String]) -> String {
+        let origRange = origCount > 0 ? "\(origStart),\(origCount)" : "\(origStart),0"
+        let newRange = newCount > 0 ? "\(newStart),\(newCount)" : "\(newStart),0"
+        return "@@ -\(origRange) +\(newRange) @@\n" + changes.joined(separator: "\n") + "\n"
     }
 }

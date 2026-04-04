@@ -100,10 +100,13 @@ public struct ToolCallParser: Sendable {
     // MARK: - Private
 
     private static func parseJSON(_ jsonString: String) -> ParsedToolCall? {
-        // Strict JSON parsing only - no fallback token insertion or quote replacement
-        // This prevents malformed JSON payloads from bypassing validation.
-        // LLMs are capable of generating valid JSON; accepting malformed JSON introduces security risks.
-        return tryParse(jsonString)
+        // Try strict JSON parsing first
+        if let call = tryParse(jsonString) {
+            return call
+        }
+
+        // If strict parsing fails, attempt common fixes for LLM-generated JSON
+        return tryParseWithFallbacks(jsonString)
     }
 
     private static func tryParse(_ jsonString: String) -> ParsedToolCall? {
@@ -115,5 +118,89 @@ public struct ToolCallParser: Sendable {
 
         let arguments = json["arguments"] as? [String: Any] ?? [:]
         return ParsedToolCall(name: name, arguments: arguments)
+    }
+
+    // MARK: - Fallback JSON parsing for malformed LLM output
+
+    private static func tryParseWithFallbacks(_ jsonString: String) -> ParsedToolCall? {
+        var fixed = jsonString
+
+        // Fix 1: Remove trailing commas before } or ]
+        fixed = fixed.replacingOccurrences(of: ",\\s*([}\\]])", with: "$1", options: .regularExpression)
+
+        // Fix 2: Add missing closing brace if JSON starts with { but doesn't end with }
+        if fixed.hasPrefix("{") && !fixed.hasSuffix("}") {
+            fixed += "}"
+        }
+
+        // Fix 3: Fix unescaped quotes inside string values by finding the "arguments" block
+        // and ensuring proper JSON structure
+        if let name = extractName(fixed) {
+            let args = extractArguments(fixed)
+            return ParsedToolCall(name: name, arguments: args)
+        }
+
+        // Fix 4: Try wrapping in braces if missing
+        if !fixed.hasPrefix("{") {
+            fixed = "{" + fixed
+        }
+        if !fixed.hasSuffix("}") {
+            fixed += "}"
+        }
+
+        if let data = fixed.data(using: .utf8),
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let name = json["name"] as? String {
+            let arguments = json["arguments"] as? [String: Any] ?? [:]
+            return ParsedToolCall(name: name, arguments: arguments)
+        }
+
+        return nil
+    }
+
+    private static func extractName(_ json: String) -> String? {
+        let pattern = "\"name\"\\s*:\\s*\"([^\"]+)\""
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
+        let range = NSRange(json.startIndex..., in: json)
+        guard let match = regex.firstMatch(in: json, range: range),
+              let nameRange = Range(match.range(at: 1), in: json) else { return nil }
+        return String(json[nameRange])
+    }
+
+    private static func extractArguments(_ json: String) -> [String: Any] {
+        // Find the arguments block and try to parse it
+        let pattern = "\"arguments\"\\s*:\\s*(\\{.*\\})"
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: .dotMatchesLineSeparators) else { return [:] }
+        let range = NSRange(json.startIndex..., in: json)
+        guard let match = regex.firstMatch(in: json, range: range),
+              let argsRange = Range(match.range(at: 1), in: json) else { return [:] }
+
+        let argsString = String(json[argsRange])
+        if let data = argsString.data(using: .utf8),
+           let args = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            return args
+        }
+
+        // Fallback: extract individual key-value pairs
+        var result: [String: Any] = [:]
+        let kvPattern = "\"([^\"]+)\"\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*)\""
+        guard let kvRegex = try? NSRegularExpression(pattern: kvPattern) else { return result }
+        let argsRangeFull = NSRange(argsString.startIndex..., in: argsString)
+        let matches = kvRegex.matches(in: argsString, range: argsRangeFull)
+        for match in matches {
+            if let keyRange = Range(match.range(at: 1), in: argsString),
+               let valRange = Range(match.range(at: 2), in: argsString) {
+                let key = String(argsString[keyRange])
+                var val = String(argsString[valRange])
+                // Unescape common sequences
+                val = val.replacingOccurrences(of: "\\n", with: "\n")
+                val = val.replacingOccurrences(of: "\\t", with: "\t")
+                val = val.replacingOccurrences(of: "\\\"", with: "\"")
+                val = val.replacingOccurrences(of: "\\\\", with: "\\")
+                result[key] = val
+            }
+        }
+
+        return result
     }
 }

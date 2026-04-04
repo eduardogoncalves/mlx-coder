@@ -87,6 +87,26 @@ public actor ToolAuditLogger {
         write(payload)
     }
 
+    public func logParameterCorrection(
+        toolName: String,
+        originalArgumentsJSON: String,
+        correctedArgumentsJSON: String,
+        corrections: [String]
+    ) {
+        let payload: [String: Any] = [
+            "event": "parameter_correction",
+            "timestamp": isoFormatter.string(from: Date()),
+            "workspace_root": workspaceRoot,
+            "approval_mode": approvalMode,
+            "tool": toolName,
+            "original_arguments": originalArgumentsJSON,
+            "corrected_arguments": correctedArgumentsJSON,
+            "corrections": corrections.joined(separator: "; ")
+        ]
+
+        write(payload)
+    }
+
     // MARK: - Private
 
     private func clamp(_ value: String?, limit: Int = 500) -> String {
