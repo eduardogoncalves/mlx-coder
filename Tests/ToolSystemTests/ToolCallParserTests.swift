@@ -75,5 +75,18 @@ final class ToolCallParserTests: XCTestCase {
         XCTAssertEqual(calls.count, 1)
         XCTAssertEqual(calls[0].name, "test_tool")
     }
+
+    func testParsesToolCallWithTrailingQuoteNoise() {
+        let text = """
+        <tool_call>
+        {"name": "write_file", "arguments": {"path": "index.html", "file_content": "<html>ok</html>"}}"
+        </tool_call>
+        """
+
+        let calls = ToolCallParser.parse(text)
+        XCTAssertEqual(calls.count, 1)
+        XCTAssertEqual(calls[0].name, "write_file")
+        XCTAssertEqual(calls[0].arguments["path"] as? String, "index.html")
+    }
 }
 

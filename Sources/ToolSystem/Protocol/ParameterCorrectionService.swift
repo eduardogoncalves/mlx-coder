@@ -98,6 +98,16 @@ public struct ParameterCorrectionService: Sendable {
             }
         }
 
+        // Canonicalize common content aliases used by some models.
+        if corrected["content"] == nil {
+            let contentAliases = ["file_content", "contents", "text", "body", "fileContent"]
+            if let matchedAlias = contentAliases.first(where: { corrected[$0] is String }),
+               let aliasedContent = corrected[matchedAlias] as? String {
+                corrected["content"] = aliasedContent
+                corrections.append("Mapped '\(matchedAlias)' to 'content'")
+            }
+        }
+
         // Ensure content is present (empty string is valid for write_file)
         if corrected["content"] == nil {
             corrections.append("Added missing 'content' parameter (empty string)")
@@ -231,24 +241,26 @@ public struct ParameterCorrectionService: Sendable {
         var bestMatch: (score: Double, text: String)?
 
         // Sliding window: try to match search lines against consecutive file lines
-        for startIdx in 0...(fileLines.count - searchLines.count) {
-            let endIdx = min(startIdx + searchLines.count, fileLines.count)
-            let candidateLines = Array(fileLines[startIdx..<endIdx])
-            
-            var matchScore: Double = 0
-            for (i, searchLine) in searchLines.enumerated() {
-                if i < candidateLines.count {
-                    let fileLine = candidateLines[i].trimmingCharacters(in: .whitespaces)
-                    let similarity = lineSimilarity(searchLine, fileLine)
-                    matchScore += similarity
-                }
-            }
-            let avgScore = matchScore / Double(searchLines.count)
+        if fileLines.count >= searchLines.count {
+            for startIdx in 0...(fileLines.count - searchLines.count) {
+                let endIdx = min(startIdx + searchLines.count, fileLines.count)
+                let candidateLines = Array(fileLines[startIdx..<endIdx])
 
-            if avgScore > 0.7 {
-                let candidateText = candidateLines.joined(separator: "\n")
-                if bestMatch == nil || avgScore > bestMatch!.score {
-                    bestMatch = (avgScore, candidateText)
+                var matchScore: Double = 0
+                for (i, searchLine) in searchLines.enumerated() {
+                    if i < candidateLines.count {
+                        let fileLine = candidateLines[i].trimmingCharacters(in: .whitespaces)
+                        let similarity = lineSimilarity(searchLine, fileLine)
+                        matchScore += similarity
+                    }
+                }
+                let avgScore = matchScore / Double(searchLines.count)
+
+                if avgScore > 0.7 {
+                    let candidateText = candidateLines.joined(separator: "\n")
+                    if bestMatch == nil || avgScore > bestMatch!.score {
+                        bestMatch = (avgScore, candidateText)
+                    }
                 }
             }
         }

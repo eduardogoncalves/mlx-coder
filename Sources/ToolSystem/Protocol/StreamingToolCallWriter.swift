@@ -59,6 +59,7 @@ public final class StreamingToolCallWriter: @unchecked Sendable {
     private var tmpDir: URL
     private let toolCallOpen: String
     private let toolCallClose: String
+    private let onStatusChange: (@Sendable (String) -> Void)?
 
     public var hasActiveStream: Bool {
         switch state {
@@ -67,10 +68,16 @@ public final class StreamingToolCallWriter: @unchecked Sendable {
         }
     }
 
-    public init(tmpDir: URL? = nil, toolCallOpen: String = "\u{ee7d4}\u{ee7d4}", toolCallClose: String = "\u{ee7d4}\u{ee7d4}\u{ee7d4}") {
+    public init(
+        tmpDir: URL? = nil,
+        toolCallOpen: String = "\u{ee7d4}\u{ee7d4}",
+        toolCallClose: String = "\u{ee7d4}\u{ee7d4}\u{ee7d4}",
+        onStatusChange: (@Sendable (String) -> Void)? = nil
+    ) {
         self.tmpDir = tmpDir ?? URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("mlx-coder-streaming")
         self.toolCallOpen = toolCallOpen
         self.toolCallClose = toolCallClose
+        self.onStatusChange = onStatusChange
         try? FileManager.default.createDirectory(at: self.tmpDir, withIntermediateDirectories: true)
     }
 
@@ -101,7 +108,7 @@ public final class StreamingToolCallWriter: @unchecked Sendable {
             case .idle:
                 if let openRange = remaining.range(of: toolCallOpen) {
                     displayText += String(remaining[..<openRange.lowerBound])
-                    displayText += toolCallOpen
+                    onStatusChange?("Generating tool call...")
                     remaining = String(remaining[openRange.upperBound...])
                     state = .accumulatingJSON(buffer: "")
                 } else {
@@ -113,15 +120,12 @@ public final class StreamingToolCallWriter: @unchecked Sendable {
                 // Check for closing tag first
                 if let closeRange = remaining.range(of: toolCallClose) {
                     buffer += String(remaining[..<closeRange.lowerBound])
-                    displayText += String(remaining[..<closeRange.lowerBound])
-                    displayText += toolCallClose
                     remaining = String(remaining[closeRange.upperBound...])
                     // Try to parse the JSON and handle
                     handleCompletedJSON(buffer)
                     state = .idle
                 } else {
                     buffer += remaining
-                    displayText += remaining
                     remaining = ""
 
                     // Check if this is a content-heavy tool call we should stream
@@ -130,6 +134,7 @@ public final class StreamingToolCallWriter: @unchecked Sendable {
                             let safeName = path.replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: ".", with: "_")
                             let tmpFile = tmpDir.appendingPathComponent(safeName + ".tmp")
                             FileManager.default.createFile(atPath: tmpFile.path, contents: nil)
+                            onStatusChange?("Writing to tmp file \(tmpFile.path)")
                             if let fh = try? FileHandle(forWritingTo: tmpFile) {
                                 try? fh.truncate(atOffset: 0)
                                 state = .streamingContent(
@@ -177,7 +182,6 @@ public final class StreamingToolCallWriter: @unchecked Sendable {
                             contentFile: tmpFile,
                             otherArgs: otherArgs
                         ))
-                        displayText += toolCallClose
                         remaining = String(chars[(i + toolCallClose.count)...])
                         state = .idle
                         break
@@ -187,33 +191,24 @@ public final class StreamingToolCallWriter: @unchecked Sendable {
 
                     // Track whether we're inside the content string value
                     if inContentString {
+                        // A non-escaped quote closes the JSON string; do not write it.
+                        if escapeState == .normal && char == "\"" {
+                            inContentString = false
+                            i += 1
+                            continue
+                        }
+
                         let (output, newState) = processEscapeChar(char, state: escapeState)
                         escapeState = newState
                         if let bytes = output {
                             try? fileHandle.write(contentsOf: bytes)
                         }
-                        // Check if this char closed the string (unescaped quote)
-                        if escapeState == .normal && char == "\"" {
-                            inContentString = false
-                        }
                     } else {
-                        // Check if we've entered the content string
-                        let checkBuffer = currentBuffer
-                        if let range = checkBuffer.range(of: "\"" + contentKey + "\":\"") {
-                            let contentStart = range.upperBound
-                            let distanceFromEnd = checkBuffer.distance(from: contentStart, to: checkBuffer.endIndex)
-                            if distanceFromEnd == 1 {
-                                // We just entered the content string
-                                inContentString = true
-                            }
-                        }
-                        // Also handle space after colon: "content": "
-                        if let range = checkBuffer.range(of: "\"" + contentKey + "\": \"") {
-                            let contentStart = range.upperBound
-                            let distanceFromEnd = checkBuffer.distance(from: contentStart, to: checkBuffer.endIndex)
-                            if distanceFromEnd == 1 {
-                                inContentString = true
-                            }
+                        // Check if we just consumed the opening quote of the content string.
+                        let noSpacePrefix = "\"" + contentKey + "\":\""
+                        let spacePrefix = "\"" + contentKey + "\": \""
+                        if currentBuffer.hasSuffix(noSpacePrefix) || currentBuffer.hasSuffix(spacePrefix) {
+                            inContentString = true
                         }
                     }
 
@@ -291,7 +286,7 @@ public final class StreamingToolCallWriter: @unchecked Sendable {
     // MARK: - Helpers
 
     private func detectContentField(_ buffer: String) -> (key: String, afterKey: String.Index)? {
-        let fields = ["content", "new_text"]
+        let fields = ["content", "file_content", "new_text"]
         for field in fields {
             let pattern = "\"" + field + "\":"
             if let range = buffer.range(of: pattern) {
@@ -356,7 +351,7 @@ public final class StreamingToolCallWriter: @unchecked Sendable {
             default: return (String(char).data(using: .utf8), .normal)
             }
         case .sawUnicode(let prefix):
-            var newPrefix = prefix + String(char)
+            let newPrefix = prefix + String(char)
             if newPrefix.count == 4 {
                 if let codePoint = Int(newPrefix, radix: 16),
                    let scalar = Unicode.Scalar(codePoint) {

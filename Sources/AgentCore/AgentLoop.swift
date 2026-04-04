@@ -303,8 +303,40 @@ public actor AgentLoop {
             // Get streamed tool calls from the writer
             let streamedCalls = writer.drainCompletedCalls()
 
-            // Parse tool calls from text
-            let toolCalls = ToolCallParser.parse(response)
+            // Parse tool calls from text and remove ones already captured via streaming.
+            let parsedToolCalls = ToolCallParser.parse(response)
+            func normalizedToolCallKey(name: String, path: String) -> String {
+                let normalizedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+                let normalizedPath = path.trimmingCharacters(in: .whitespacesAndNewlines)
+                return "\(normalizedName)|\(normalizedPath)"
+            }
+
+            var streamedCallCounts: [String: Int] = [:]
+            for streamedCall in streamedCalls {
+                let key = normalizedToolCallKey(name: streamedCall.toolName, path: streamedCall.path)
+                streamedCallCounts[key, default: 0] += 1
+            }
+
+            let toolCalls = parsedToolCalls.filter { call in
+                let path = (call.arguments["path"] as? String) ?? (call.arguments["file_path"] as? String)
+                let hasStreamablePayload = call.arguments["content"] != nil ||
+                    call.arguments["file_content"] != nil ||
+                    call.arguments["new_text"] != nil
+
+                guard hasStreamablePayload, let path else { return true }
+
+                guard !streamedCalls.isEmpty else { return true }
+
+                let key = normalizedToolCallKey(name: call.name, path: path)
+                if let count = streamedCallCounts[key], count > 0 {
+                    streamedCallCounts[key] = count - 1
+                    return false
+                }
+
+                // Safety net: if any streamed calls were captured this turn,
+                // suppress remaining parsed content-bearing calls to avoid duplicates.
+                return false
+            }
 
             if toolCalls.isEmpty && streamedCalls.isEmpty {
                 // No tool calls — this is the final response
@@ -436,12 +468,8 @@ public actor AgentLoop {
                                 result = try await progressTool.execute(arguments: correctionResult.correctedArguments) { phase in
                                     if showToolSpinner {
                                         Task { await toolSpinner.updateMessage("\(call.name): \(phase)") }
-        }
-        
-        // Clean up stale .tmp files from previous crashed/interrupted sessions
-        let tmpDir = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("mlx-coder-streaming")
-        try? FileManager.default.removeItem(at: tmpDir)
-    }
+                                    }
+                                }
                             } else {
                                 result = try await tool.execute(arguments: correctionResult.correctedArguments)
                             }
@@ -1457,14 +1485,24 @@ public actor AgentLoop {
             let inputTokens = MLXArray(tokens)
             
             let input = LMInput(tokens: inputTokens)
+
+            // Clean up stale .tmp files from previous crashed/interrupted sessions.
+            let tmpDir = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("mlx-coder-streaming")
+            try? FileManager.default.removeItem(at: tmpDir)
             
             // Streaming writer: streams tool call content to .tmp files during generation
             let writer = StreamingToolCallWriter(
                 toolCallOpen: ToolCallPattern.toolCallOpen,
-                toolCallClose: ToolCallPattern.toolCallClose
+                toolCallClose: ToolCallPattern.toolCallClose,
+                onStatusChange: { message in
+                    Task {
+                        await spinner.updateMessage(message)
+                        await spinner.start()
+                    }
+                }
             )
             
-            var responseText = ""
+            var rawResponseText = ""
             var pendingChunk = ""
             var isThinking = enableThinking
             if isThinking {
@@ -1508,10 +1546,12 @@ public actor AgentLoop {
                     }
                     
                     let newText = String(newSegment.suffix(newSegment.count - segment.count))
+                    rawResponseText += newText
                     
-                    // Stream tool call content to .tmp files during generation
+                    // Normalize streamed text (including tool-call content handling)
+                    // before adding to response/output buffers.
                     let streamResult = writer.process(newText)
-                    responseText += streamResult.displayText
+                    let displayText = streamResult.displayText
                     
                     if newText.hasSuffix("\n") {
                         if let lastToken = segmentTokens.last {
@@ -1522,8 +1562,7 @@ public actor AgentLoop {
                         segment = newSegment
                     }
                     
-                    responseText += newText
-                    pendingChunk += newText
+                    pendingChunk += displayText
                     
                     while !pendingChunk.isEmpty {
                         if !isThinking {
@@ -1595,10 +1634,10 @@ public actor AgentLoop {
             }
             
             // Strip EOS tokens if they leaked into the text
-            responseText = responseText.replacingOccurrences(of: ToolCallPattern.eosToken, with: "")
-            responseText = responseText.trimmingCharacters(in: .whitespacesAndNewlines)
+            rawResponseText = rawResponseText.replacingOccurrences(of: ToolCallPattern.eosToken, with: "")
+            rawResponseText = rawResponseText.trimmingCharacters(in: .whitespacesAndNewlines)
             
-            return (text: responseText, writer: writer)
+            return (text: rawResponseText, writer: writer)
         }
 
         // Cleanup spinner if generation failed or returned nothing
@@ -2163,8 +2202,16 @@ public actor AgentLoop {
         do {
             switch call.toolName {
             case "write_file":
-                // Atomic replace: move tmp to target
-                try FileManager.default.moveItem(at: call.contentFile, to: URL(fileURLWithPath: resolvedPath))
+                // Replace existing file content if present; otherwise move into place.
+                let targetURL = URL(fileURLWithPath: resolvedPath)
+                let parentDir = targetURL.deletingLastPathComponent()
+                try FileManager.default.createDirectory(at: parentDir, withIntermediateDirectories: true)
+
+                if FileManager.default.fileExists(atPath: targetURL.path) {
+                    _ = try FileManager.default.replaceItemAt(targetURL, withItemAt: call.contentFile)
+                } else {
+                    try FileManager.default.moveItem(at: call.contentFile, to: targetURL)
+                }
                 return .success("Wrote \(call.path) (\(tmpContent.count) bytes)")
 
             case "edit_file":
