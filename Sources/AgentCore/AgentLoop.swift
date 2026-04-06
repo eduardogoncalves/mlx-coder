@@ -5,6 +5,7 @@ import Foundation
 import MLX
 import MLXLLM
 import MLXLMCommon
+import MLXVLM
 import Darwin
 
 /// The main agent loop that orchestrates generation and tool execution.
@@ -38,6 +39,7 @@ public actor AgentLoop {
     private var loadedCacheLimit: Int?
     private var loadedKVBits: Int?
     private var pendingReload: Bool = false
+    private var pendingImages: [URL] = []
     
     public enum WorkingMode: String, Codable, Sendable {
         case agent
@@ -231,12 +233,29 @@ public actor AgentLoop {
     /// - Parameter message: The user's input message to process
     /// - Throws: On model loading errors, generation timeouts, or permission denials
     public func processUserMessage(_ message: String) async throws {
+        try await processUserMessage(message, images: [])
+    }
+
+    /// Process a user message, optionally with image attachments.
+    ///
+    /// When `images` is non-empty the request is routed through the VLM code path:
+    /// the conversation history and images are packaged as a `UserInput`, passed to
+    /// `modelContainer.prepare(input:)`, and the resulting `LMInput` (which contains
+    /// encoded pixel data) is forwarded to `generateTokens`.  Text-only calls
+    /// (`images` is empty) use the existing `LMInput(tokens:)` path unchanged.
+    ///
+    /// - Parameters:
+    ///   - message: The user's input message (with `@path` tokens already stripped).
+    ///   - images: Resolved image file URLs parsed from `@path` tokens.
+    /// - Throws: On model loading errors, generation timeouts, or permission denials.
+    public func processUserMessage(_ message: String, images: [URL] = []) async throws {
         // 1. Handle any pending reloads from previous mode changes
         if pendingReload {
             try await reloadModel()
             pendingReload = false
         }
         
+        pendingImages = images
         history.addUser(message)
         await applyDeterministicContextCompactionIfNeeded(reason: "after_user_message")
         
@@ -1476,25 +1495,55 @@ public actor AgentLoop {
         }
         let chatML = history.formatChatML(messages: transformedMessages, enableThinking: enableThinking)
 
+        // Consume pending images (cleared here so they apply to this turn only).
+        let imageURLs = pendingImages
+        pendingImages = []
+
+        // For the VLM path, capture the Sendable message data to rebuild Chat.Message inside perform.
+        // Chat.Message contains CIImage and is not Sendable, so we reconstruct it in the closure.
+        let vlmMessageData: [(role: String, content: String)]? = imageURLs.isEmpty ? nil :
+            transformedMessages.map { ($0.role.rawValue, $0.content) }
+        let vlmLastUserContent: String? = imageURLs.isEmpty ? nil :
+            transformedMessages.last(where: { $0.role == .user })?.content
+
         // Start processing spinner before inference begins
         let spinner = Spinner(message: "Processing...")
         await spinner.start()
 
         // Use the model container to prepare input and generate
         let modelContainer = try requireLoadedModelContainer()
-        let result = try await modelContainer.perform { [currentGenerationConfig, renderer] context in
+
+        let result = try await modelContainer.perform { [currentGenerationConfig, renderer, chatML, imageURLs, vlmMessageData, vlmLastUserContent] context in
             if Task.isCancelled { throw CancellationError() }
-            // Tokenize the ChatML prompt
-            let tokenizer = context.tokenizer
-            let tokens = tokenizer.encode(text: chatML)
-            let inputTokens = MLXArray(tokens)
-            
-            let input = LMInput(tokens: inputTokens)
+
+            // VLM path: when images were attached, use UserInput + processor.prepare so
+            // the VLM processor can encode pixel data and expand image placeholder tokens.
+            // Text-only path: tokenize the ChatML string directly into LMInput(tokens:).
+            let input: LMInput
+            if let messageData = vlmMessageData {
+                // Reconstruct Chat.Message inside the closure (Chat.Message is not Sendable).
+                let chatMessages: [Chat.Message] = messageData.map { role, content in
+                    switch role {
+                    case "system":    return .system(content)
+                    case "assistant": return .assistant(content)
+                    case "tool":      return .tool(content)
+                    default:          // user
+                        let isLast = (content == vlmLastUserContent)
+                        let userImages: [UserInput.Image] = isLast ? imageURLs.map { .url($0) } : []
+                        return .user(content, images: userImages)
+                    }
+                }
+                let userInput = UserInput(chat: chatMessages)
+                input = try await context.processor.prepare(input: userInput)
+            } else {
+                let tokenizer = context.tokenizer
+                let tokens = tokenizer.encode(text: chatML)
+                input = LMInput(tokens: MLXArray(tokens))
+            }
 
             // Clean up stale .tmp files from previous crashed/interrupted sessions.
             let tmpDir = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("mlx-coder-streaming")
             try? FileManager.default.removeItem(at: tmpDir)
-            
             // Streaming writer: streams tool call content to .tmp files during generation
             let writer = StreamingToolCallWriter(
                 toolCallOpen: ToolCallPattern.toolCallOpen,
