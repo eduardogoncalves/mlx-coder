@@ -17,7 +17,7 @@ public class ProportionalRoPE: Module, OffsetLayer, ArrayOffsetLayer {
     let dims: Int
     let traditional: Bool
     let rotatedDims: Int
-    let _freqs: MLXArray?
+    let base: Float
 
     init(
         dims: Int,
@@ -27,25 +27,19 @@ public class ProportionalRoPE: Module, OffsetLayer, ArrayOffsetLayer {
     ) {
         self.dims = dims
         self.traditional = traditional
+        self.base = base
 
-        let factor = scalingConfig?["factor"]?.asFloat() ?? 1.0
-        let partialRotaryFactor = scalingConfig?["partial_rotary_factor"]?.asFloat() ?? 1.0
+        // Compatibility fallback: current MLX runtime can fail on Gemma4 partial
+        // rotary factors; force full rotary dimensions to keep inference stable.
+        let partialRotaryFactor: Float = 1.0
         let ropeAngles = Int(partialRotaryFactor * Float(dims) / 2.0)
         self.rotatedDims = 2 * ropeAngles
-
-        if rotatedDims > 0 {
-            let exponents =
-                MLXArray(stride(from: 0, to: rotatedDims, by: 2)).asType(.float32) / Float(dims)
-            self._freqs = factor * MLX.pow(base, exponents)
-        } else {
-            self._freqs = nil
-        }
 
         super.init()
     }
 
     public func callAsFunction(_ x: MLXArray, offset: Int = 0) -> MLXArray {
-        guard rotatedDims > 0, let _freqs else {
+        guard rotatedDims > 0 else {
             return x
         }
 
@@ -74,10 +68,9 @@ public class ProportionalRoPE: Module, OffsetLayer, ArrayOffsetLayer {
             rotated,
             dimensions: rotatedDims,
             traditional: traditional,
-            base: nil,
+            base: base,
             scale: 1.0,
-            offset: offset,
-            freqs: _freqs
+            offset: offset
         )
 
         let rotatedParts = split(rotated, indices: [rotatedHalf], axis: -1)
@@ -93,7 +86,7 @@ public class ProportionalRoPE: Module, OffsetLayer, ArrayOffsetLayer {
     }
 
     public func callAsFunction(_ x: MLXArray, offset: MLXArray) -> MLXArray {
-        guard rotatedDims > 0, let _freqs else {
+        guard rotatedDims > 0 else {
             return x
         }
 
@@ -122,10 +115,9 @@ public class ProportionalRoPE: Module, OffsetLayer, ArrayOffsetLayer {
             rotated,
             dimensions: rotatedDims,
             traditional: traditional,
-            base: nil,
+            base: base,
             scale: 1.0,
-            offset: offset,
-            freqs: _freqs
+            offset: offset
         )
 
         let rotatedParts = split(rotated, indices: [rotatedHalf], axis: -1)

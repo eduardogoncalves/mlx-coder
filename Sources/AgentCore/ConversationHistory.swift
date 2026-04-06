@@ -238,12 +238,9 @@ public struct ConversationHistory: Sendable {
         guard allTurns.count > keepCount else { return false }
 
         let recentTurns  = Array(allTurns.suffix(keepCount))
-        var candidateTurns = Array(allTurns.dropLast(keepCount))
+        let candidateTurns = Array(allTurns.dropLast(keepCount))
 
         // Drop turns from least-important to most-important (stable: preserves order among ties).
-        let systemTokens = count(systemMessage.content)
-        let recentTokens = recentTurns.flatMap(\.allMessages).reduce(0) { $0 + count($1.content) }
-
         // Sort candidates by importance ascending so we drop least-important first.
         let sortedIndices = candidateTurns.indices.sorted {
             candidateTurns[$0].importanceScore < candidateTurns[$1].importanceScore

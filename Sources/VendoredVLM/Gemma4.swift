@@ -641,6 +641,11 @@ private final class Gemma4TextAttention: Module {
         let offset: Int
         var keys: MLXArray
         var values: MLXArray
+        let cacheForAttention: KVCache?
+        var sharedQuantizedGroupSize: Int?
+        var sharedQuantizedBits: Int?
+        var sharedQuantizedMode: QuantizationMode?
+        var sharedQuantizedState: ((MLXArray, MLXArray, MLXArray?), (MLXArray, MLXArray, MLXArray?))?
 
         if isKVSharedLayer, let cache {
             let state = cache.state
@@ -648,6 +653,22 @@ private final class Gemma4TextAttention: Module {
                 keys = state[0]
                 values = state[1]
                 offset = cache.offset
+                cacheForAttention = nil
+                if let quantizedCache = cache as? any QuantizedKVCacheProtocol,
+                    let quantizedState = quantizedCache.getQuantizedState()
+                {
+                    sharedQuantizedGroupSize = quantizedCache.groupSize
+                    sharedQuantizedBits = quantizedCache.bits
+                    sharedQuantizedMode = quantizedCache.mode
+                    sharedQuantizedState = quantizedState
+                } else if let quantizedCache = cache as? QuantizedKVCache,
+                    let quantizedState = quantizedCache.getQuantizedState()
+                {
+                    sharedQuantizedGroupSize = quantizedCache.groupSize
+                    sharedQuantizedBits = quantizedCache.bits
+                    sharedQuantizedMode = quantizedCache.mode
+                    sharedQuantizedState = quantizedState
+                }
             } else {
                 offset = cache.offset
                 keys = kProj(x).reshaped(batch, length, numKVHeads, headDim)
@@ -660,7 +681,7 @@ private final class Gemma4TextAttention: Module {
                 keys = kNorm(keys).transposed(0, 2, 1, 3)
                 values = vNorm(values).transposed(0, 2, 1, 3)
                 keys = rope(keys, offset: offset)
-                (keys, values) = cache.update(keys: keys, values: values)
+                cacheForAttention = cache
             }
         } else {
             offset = cache?.offset ?? 0
@@ -674,9 +695,7 @@ private final class Gemma4TextAttention: Module {
             keys = kNorm(keys).transposed(0, 2, 1, 3)
             values = vNorm(values).transposed(0, 2, 1, 3)
             keys = rope(keys, offset: offset)
-            if let cache {
-                (keys, values) = cache.update(keys: keys, values: values)
-            }
+            cacheForAttention = cache
         }
 
         queries = queries.transposed(0, 2, 1, 3)
@@ -688,14 +707,34 @@ private final class Gemma4TextAttention: Module {
             localMask = .array(maskArray[.ellipsis, start...])
         }
 
-        let output = attentionWithCacheUpdate(
-            queries: queries,
-            keys: keys,
-            values: values,
-            cache: nil,
-            scale: scale,
-            mask: localMask
-        )
+        let attended: MLXArray
+        if let quantizedState = sharedQuantizedState,
+            let groupSize = sharedQuantizedGroupSize,
+            let bits = sharedQuantizedBits,
+            let mode = sharedQuantizedMode
+        {
+            attended = quantizedScaledDotProductAttention(
+                queries: queries,
+                quantizedKeys: quantizedState.0,
+                quantizedValues: quantizedState.1,
+                scale: scale,
+                mask: localMask,
+                groupSize: groupSize,
+                bits: bits,
+                mode: mode
+            )
+        } else {
+            attended = attentionWithCacheUpdate(
+                queries: queries,
+                keys: keys,
+                values: values,
+                cache: cacheForAttention,
+                scale: scale,
+                mask: localMask
+            )
+        }
+
+        let output = attended
         .transposed(0, 2, 1, 3)
         .reshaped(batch, length, -1)
 
@@ -916,6 +955,14 @@ private final class Gemma4TextBackbone: Module {
             return perLayerProjection
         }
 
+        if perLayerProjection.shape != perLayerInputs.shape {
+            let targetLayers = min(
+                config.hiddenLayers, perLayerInputs.shape[perLayerInputs.shape.count - 2])
+            let adjustedPerLayerInputs = perLayerInputs[.ellipsis, ..<targetLayers, 0...]
+            return (perLayerProjection[.ellipsis, ..<targetLayers, 0...] + adjustedPerLayerInputs)
+                * _perLayerInputScale.asType(inputsEmbeds.dtype)
+        }
+
         return (perLayerProjection + perLayerInputs)
             * _perLayerInputScale.asType(inputsEmbeds.dtype)
     }
@@ -1000,8 +1047,9 @@ private final class Gemma4TextLanguageModel: Module, KVCacheDimensionProvider {
     @ModuleInfo(key: "lm_head") var lmHead: Linear?
 
     var kvHeads: [Int] {
-        (0 ..< config.hiddenLayers).map { idx in
-            let layerType = config.layerTypes[idx]
+        // MLXLMCommon expects one KV-head entry per transformer layer, even when some
+        // later layers share cache entries internally via `layerIdxToCacheIdx`.
+        return config.layerTypes.map { layerType in
             if config.attentionKEqV && layerType == "full_attention" {
                 return config.globalKVHeads ?? config.kvHeads
             } else {
@@ -1023,8 +1071,8 @@ private final class Gemma4TextLanguageModel: Module, KVCacheDimensionProvider {
 
     func newCache(parameters: GenerateParameters?) -> [any KVCache] {
         let slidingWindow = config.slidingWindow > 0 ? config.slidingWindow : 4096
-        return config.layerTypes.prefix(config.hiddenLayers - config.numKVSharedLayers).map {
-            layerType in
+        let firstKVSharedLayerIdx = max(config.hiddenLayers - config.numKVSharedLayers, 0)
+        return config.layerTypes.prefix(firstKVSharedLayerIdx).map { layerType in
             if layerType == "full_attention" {
                 StandardKVCache()
             } else {

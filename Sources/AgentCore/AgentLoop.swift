@@ -276,7 +276,10 @@ public actor AgentLoop {
 
         // 2. Check for long context and trigger KV quantization if needed
         let currentTokens = history.estimatedTokenCount
-        if currentTokens > currentGenerationConfig.longContextThreshold && (currentGenerationConfig.kvBits == nil || currentGenerationConfig.kvBits! > 4) {
+        if currentTokens > currentGenerationConfig.longContextThreshold
+            && (currentGenerationConfig.kvBits == nil || currentGenerationConfig.kvBits! > 4)
+            && !modelPath.lowercased().contains("gemma-4")
+        {
             renderer.printStatus("\u{001B}[33m[Warning]\u{001B}[0m Long context detected (\(currentTokens) tokens).")
             renderer.printStatus("Switching to 4-bit KV cache to save VRAM...")
             
@@ -1352,12 +1355,21 @@ public actor AgentLoop {
         \(ToolCallPattern.imStart)assistant
         """
 
+        let shouldUseProcessorPath = modelPath.lowercased().contains("gemma-4")
         let modelContainer = try requireLoadedModelContainer()
-        let extracted = try await modelContainer.perform { context in
+        let extracted = try await modelContainer.perform { [shouldUseProcessorPath] context in
             if Task.isCancelled { throw CancellationError() }
 
-            let tokens = context.tokenizer.encode(text: chatML)
-            let input = LMInput(tokens: MLXArray(tokens))
+            let input: LMInput
+            if shouldUseProcessorPath {
+                let userInput = UserInput(chat: [.system(systemPrompt), .user(userPrompt)])
+                input = try await context.processor.prepare(input: userInput)
+            } else {
+                let tokens = context.tokenizer.encode(text: chatML)
+                let tokenArray = MLXArray(tokens).expandedDimensions(axis: 0)
+                let mask = ones(like: tokenArray).asType(.int8)
+                input = LMInput(text: .init(tokens: tokenArray, mask: mask), image: nil)
+            }
             var responseText = ""
 
             for try await item in try MLXLMCommon.generateTokens(
@@ -1500,14 +1512,17 @@ public actor AgentLoop {
         let imageURLs = pendingImages
         pendingImages = []
 
-        // For the VLM path, capture the Sendable message data to rebuild Chat.Message inside perform.
+        // For the processor path, capture the Sendable message data to rebuild Chat.Message inside perform.
         // Chat.Message contains CIImage and is not Sendable, so we reconstruct it in the closure.
         // We use the last user-message index rather than content equality to robustly identify which
         // message should receive the image attachments.
-        let vlmMessageData: [(role: String, content: String)]? = imageURLs.isEmpty ? nil :
+        let shouldUseProcessorPath = !imageURLs.isEmpty || modelPath.lowercased().contains("gemma-4")
+        let vlmMessageData: [(role: String, content: String)]? = shouldUseProcessorPath ?
             transformedMessages.map { ($0.role.rawValue, $0.content) }
-        let vlmLastUserIndex: Int? = imageURLs.isEmpty ? nil :
+            : nil
+        let vlmLastUserIndex: Int? = shouldUseProcessorPath ?
             transformedMessages.indices.last(where: { transformedMessages[$0].role == .user })
+            : nil
 
         // Start processing spinner before inference begins
         let spinner = Spinner(message: "Processing...")
@@ -1516,12 +1531,13 @@ public actor AgentLoop {
         // Use the model container to prepare input and generate
         let modelContainer = try requireLoadedModelContainer()
 
-        let result = try await modelContainer.perform { [currentGenerationConfig, renderer, chatML, imageURLs, vlmMessageData, vlmLastUserIndex] context in
+        let result = try await modelContainer.perform { [currentGenerationConfig, renderer, chatML, imageURLs, vlmMessageData, vlmLastUserIndex, shouldUseProcessorPath] context in
             if Task.isCancelled { throw CancellationError() }
 
-            // VLM path: when images were attached, use UserInput + processor.prepare so
-            // the VLM processor can encode pixel data and expand image placeholder tokens.
-            // Text-only path: tokenize the ChatML string directly into LMInput(tokens:).
+            // Processor path: for image turns and Gemma4 text-only turns, use UserInput +
+            // processor.prepare so model-specific prompt formatting and tensor shapes are respected.
+            // Fallback text-only path tokenizes ChatML directly.
+            let tokenizer = context.tokenizer
             let input: LMInput
             if let messageData = vlmMessageData {
                 // Reconstruct Chat.Message inside the closure (Chat.Message is not Sendable).
@@ -1540,9 +1556,10 @@ public actor AgentLoop {
                 let userInput = UserInput(chat: chatMessages)
                 input = try await context.processor.prepare(input: userInput)
             } else {
-                let tokenizer = context.tokenizer
                 let tokens = tokenizer.encode(text: chatML)
-                input = LMInput(tokens: MLXArray(tokens))
+                let tokenArray = MLXArray(tokens).expandedDimensions(axis: 0)
+                let mask = ones(like: tokenArray).asType(.int8)
+                input = LMInput(text: .init(tokens: tokenArray, mask: mask), image: nil)
             }
 
             // Clean up stale .tmp files from previous crashed/interrupted sessions.
@@ -1578,6 +1595,13 @@ public actor AgentLoop {
                 }
                 semaphore.wait()
             }
+
+            var generationParameters = currentGenerationConfig.generateParameters
+            if shouldUseProcessorPath {
+                generationParameters.repetitionPenalty = nil
+                generationParameters.presencePenalty = nil
+                generationParameters.frequencyPenalty = nil
+            }
             
             // For correct streaming detokenization
             var segmentTokens = [Int]()
@@ -1585,7 +1609,7 @@ public actor AgentLoop {
             
             for try await item in try MLXLMCommon.generateTokens(
                 input: input,
-                parameters: currentGenerationConfig.generateParameters,
+                parameters: generationParameters,
                 context: context
             ) {
                 if Task.isCancelled {
