@@ -35,16 +35,21 @@ private func makeProcessorCreator<C: Codable>(
 
 /// Registers Gemma4 with the official MLXVLM type and model registries.
 ///
-/// Call `await Gemma4Registration.register()` once — before any model is loaded — to enable
-/// loading `gemma4` models (e.g. `mlx-community/gemma-4-e4b-it-4bit`) via `VLMModelFactory`.
-public enum Gemma4Registration {
+/// Call `await Gemma4Registration.shared.register()` once — before any model is loaded —
+/// to enable loading `gemma4` models (e.g. `mlx-community/gemma-4-e4b-it-4bit`) via
+/// `VLMModelFactory`.
+public actor Gemma4Registration {
 
-    private static var _registered = false
+    public static let shared = Gemma4Registration()
+
+    private var registered = false
+
+    private init() {}
 
     /// Idempotent: safe to call multiple times; only the first call registers types.
-    public static func register() async {
-        guard !_registered else { return }
-        _registered = true
+    public func register() async {
+        guard !registered else { return }
+        registered = true
 
         await VLMTypeRegistry.shared.registerModelType(
             "gemma4",

@@ -28,6 +28,10 @@ public enum ImageAttachmentParser {
     /// Scan `prompt` for `@path` tokens, extract image paths, and return the cleaned
     /// prompt text together with the resolved image URLs.
     ///
+    /// A token starting with `@` is treated as an image attachment if the path's
+    /// file-extension (after stripping any trailing punctuation) matches
+    /// ``imageExtensions``.  The `@` token is removed from the returned cleaned prompt.
+    ///
     /// - Parameter prompt: The raw user prompt, possibly containing `@/path/to/image.png`
     ///   or `@~/path/to/image.jpg` tokens.
     /// - Returns: A ``ParseResult`` with the cleaned prompt and resolved image URLs.
@@ -40,7 +44,13 @@ public enum ImageAttachmentParser {
 
         for token in tokens {
             if token.hasPrefix("@") {
-                let rawPath = String(token.dropFirst())
+                // Strip the leading '@' then strip any trailing punctuation characters
+                // (e.g. sentence-ending '.', ',', '!', '?') so that "describe @img.jpg."
+                // is handled correctly.
+                var rawPath = String(token.dropFirst())
+                while let last = rawPath.last, last.isPunctuation, ![".", "-", "_"].contains(last) {
+                    rawPath = String(rawPath.dropLast())
+                }
                 let expandedPath = NSString(string: rawPath).expandingTildeInPath
                 let ext = URL(fileURLWithPath: expandedPath).pathExtension.lowercased()
                 if imageExtensions.contains(ext) {

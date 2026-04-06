@@ -1496,15 +1496,18 @@ public actor AgentLoop {
         let chatML = history.formatChatML(messages: transformedMessages, enableThinking: enableThinking)
 
         // Consume pending images (cleared here so they apply to this turn only).
+        // AgentLoop is an actor so there is no concurrent access risk on pendingImages.
         let imageURLs = pendingImages
         pendingImages = []
 
         // For the VLM path, capture the Sendable message data to rebuild Chat.Message inside perform.
         // Chat.Message contains CIImage and is not Sendable, so we reconstruct it in the closure.
+        // We use the last user-message index rather than content equality to robustly identify which
+        // message should receive the image attachments.
         let vlmMessageData: [(role: String, content: String)]? = imageURLs.isEmpty ? nil :
             transformedMessages.map { ($0.role.rawValue, $0.content) }
-        let vlmLastUserContent: String? = imageURLs.isEmpty ? nil :
-            transformedMessages.last(where: { $0.role == .user })?.content
+        let vlmLastUserIndex: Int? = imageURLs.isEmpty ? nil :
+            transformedMessages.indices.last(where: { transformedMessages[$0].role == .user })
 
         // Start processing spinner before inference begins
         let spinner = Spinner(message: "Processing...")
@@ -1513,7 +1516,7 @@ public actor AgentLoop {
         // Use the model container to prepare input and generate
         let modelContainer = try requireLoadedModelContainer()
 
-        let result = try await modelContainer.perform { [currentGenerationConfig, renderer, chatML, imageURLs, vlmMessageData, vlmLastUserContent] context in
+        let result = try await modelContainer.perform { [currentGenerationConfig, renderer, chatML, imageURLs, vlmMessageData, vlmLastUserIndex] context in
             if Task.isCancelled { throw CancellationError() }
 
             // VLM path: when images were attached, use UserInput + processor.prepare so
@@ -1522,14 +1525,15 @@ public actor AgentLoop {
             let input: LMInput
             if let messageData = vlmMessageData {
                 // Reconstruct Chat.Message inside the closure (Chat.Message is not Sendable).
-                let chatMessages: [Chat.Message] = messageData.map { role, content in
+                let chatMessages: [Chat.Message] = messageData.enumerated().map { idx, msg in
+                    let (role, content) = msg
                     switch role {
                     case "system":    return .system(content)
                     case "assistant": return .assistant(content)
                     case "tool":      return .tool(content)
                     default:          // user
-                        let isLast = (content == vlmLastUserContent)
-                        let userImages: [UserInput.Image] = isLast ? imageURLs.map { .url($0) } : []
+                        // Use index-based identification to robustly find the last user message.
+                        let userImages: [UserInput.Image] = (idx == vlmLastUserIndex) ? imageURLs.map { .url($0) } : []
                         return .user(content, images: userImages)
                     }
                 }

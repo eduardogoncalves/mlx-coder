@@ -77,7 +77,7 @@ public final class ModelLoader: Sendable {
         }
 
         // Ensure Gemma4 (and any other vendored model types) are registered before loading.
-        await Gemma4Registration.register()
+        await Gemma4Registration.shared.register()
 
         // Load using MLX-Swift-LM. If a Hub ID is passed, MLX downloads as needed.
         let configuration: ModelConfiguration
