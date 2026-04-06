@@ -2,6 +2,7 @@
 // Vendored from adrgrondin/mlx-swift-lm@67b5729e3d47d8709e03417129a1ea9ed4f19ada
 // Modifications vs. upstream:
 //   - Added `import MLXVLM` (previously in the same module).
+//   - Added `import Tokenizers` (needed when compiled as a separate module with explicit imports).
 //   - Changed `initializeRope(...)` → `gemma4InitializeRope(...)` to support
 //     the "proportional" RoPE type not yet in mlx-swift-lm 2.31.3.
 
@@ -11,6 +12,7 @@ import MLX
 import MLXLMCommon
 import MLXNN
 import MLXVLM
+import Tokenizers
 
 // Based on https://github.com/Blaizzy/mlx-vlm/tree/main/mlx_vlm/models/gemma4
 
@@ -1724,11 +1726,6 @@ public struct Gemma4Processor: UserInputProcessor {
 
         var processedImage: LMInput.ProcessedImage?
         if !input.images.isEmpty {
-            let imagePlaceholderCount = promptTokens.filter { $0 == config.imageTokenId }.count
-            let boiCount = promptTokens.filter { $0 == config.boiTokenId }.count
-            let eoiCount = promptTokens.filter { $0 == config.eoiTokenId }.count
-            _ = (imagePlaceholderCount, boiCount, eoiCount) // suppress unused-variable warnings
-
             let imagePixelsAndFrames = try input.images.map {
                 try preprocess(images: [$0.asCIImage()], processing: input.processing)
             }
@@ -1753,11 +1750,6 @@ public struct Gemma4Processor: UserInputProcessor {
                 }
             }
             promptTokens = expandedTokens
-
-            let expandedImageTokenCount = promptTokens.filter { $0 == config.imageTokenId }.count
-            let expandedBoiCount = promptTokens.filter { $0 == config.boiTokenId }.count
-            let expandedEoiCount = promptTokens.filter { $0 == config.eoiTokenId }.count
-            _ = (expandedImageTokenCount, expandedBoiCount, expandedEoiCount) // suppress unused-variable warnings
         }
 
         let promptArray = MLXArray(promptTokens).expandedDimensions(axis: 0)
