@@ -75,10 +75,17 @@ final class QuantizedAttentionTests: XCTestCase {
     // MARK: - TurboQuant configurations
 
     func testTurboQuantFractionalBitsConfig() {
-        // Fractional bit widths automatically select TurboQuant
+        // Fractional bit widths (e.g. 2.5) trigger TurboQuant automatically in
+        // mlx-swift-lm via `turboquantEnabled(bits:scheme:)`, regardless of the
+        // `kvQuantizationScheme` property value. The scheme property defaults to
+        // `.uniform` and only needs to be set to `.turboQuant` when forcing
+        // TurboQuant for integer bit widths.
         let config = GenerationEngine.Config(kvBits: 2.5, kvGroupSize: 64, quantizedKVStart: 0)
         XCTAssertEqual(config.kvBits, 2.5)
-        XCTAssertEqual(config.kvQuantizationScheme, .uniform) // default, but TurboQuant activates automatically
+        XCTAssertEqual(config.kvQuantizationScheme, .uniform)
+        // Verify the cache config correctly reports TurboQuant activation
+        let cacheConfig = KVCacheManager.CacheConfig(kvBits: 2.5, kvQuantizationScheme: .uniform)
+        XCTAssertTrue(cacheConfig.usesTurboQuant)
     }
 
     func testExplicitTurboQuantScheme() {
