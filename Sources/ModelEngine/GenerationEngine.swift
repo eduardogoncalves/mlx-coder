@@ -21,8 +21,13 @@ public struct GenerationEngine: Sendable {
         public let presenceContextSize: Int
         public let frequencyPenalty: Float?
         public let frequencyContextSize: Int
-        public let kvBits: Int?
+        /// Bits for KV cache quantization. Supports integer (4, 8) and fractional
+        /// values (2.5, 3.5); fractional widths automatically select TurboQuant.
+        public let kvBits: Float?
         public let kvGroupSize: Int
+        /// Explicit quantization scheme. `.turboQuant` forces TurboQuant even for
+        /// integer bit widths; `.uniform` uses standard uniform quantization.
+        public let kvQuantizationScheme: KVQuantizationScheme
         public let quantizedKVStart: Int
         public let longContextThreshold: Int
 
@@ -38,8 +43,9 @@ public struct GenerationEngine: Sendable {
             presenceContextSize: Int = 20,
             frequencyPenalty: Float? = nil,
             frequencyContextSize: Int = 20,
-            kvBits: Int? = nil,
+            kvBits: Float? = nil,
             kvGroupSize: Int = 64,
+            kvQuantizationScheme: KVQuantizationScheme = .uniform,
             quantizedKVStart: Int = 0,
             longContextThreshold: Int = 8192
         ) {
@@ -56,6 +62,7 @@ public struct GenerationEngine: Sendable {
             self.frequencyContextSize = frequencyContextSize
             self.kvBits = kvBits
             self.kvGroupSize = kvGroupSize
+            self.kvQuantizationScheme = kvQuantizationScheme
             self.quantizedKVStart = quantizedKVStart
             self.longContextThreshold = longContextThreshold
         }
@@ -66,6 +73,7 @@ public struct GenerationEngine: Sendable {
                 maxTokens: maxTokens,
                 kvBits: kvBits,
                 kvGroupSize: kvGroupSize,
+                kvQuantizationScheme: kvQuantizationScheme,
                 quantizedKVStart: quantizedKVStart,
                 temperature: temperature,
                 topP: topP,

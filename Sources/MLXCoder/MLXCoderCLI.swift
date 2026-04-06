@@ -63,14 +63,17 @@ struct ModelArguments: ParsableArguments, Sendable {
     @Option(name: .long, help: "Top-p sampling")
     var topP: Float = 1.0
 
-    @Option(name: .long, help: "KV cache quantization bits (nil = no quantization)")
-    var kvBits: Int?
+    @Option(name: .long, help: "KV cache quantization bits (nil = no quantization; fractional values like 2.5 automatically use TurboQuant)")
+    var kvBits: Float?
 
     @Option(name: .long, help: "KV cache quantization group size (default: chip profile value, typically 64)")
     var kvGroupSize: Int?
 
     @Option(name: .long, help: "First transformer layer to apply KV cache quantization (0 = all layers)")
     var quantizedKVStart: Int?
+
+    @Flag(name: .long, help: "Force TurboQuant KV cache backend (enables TurboQuant for integer bit widths too)")
+    var turboQuant: Bool = false
 
     @Flag(name: .long, inversion: .prefixedNo, help: "Enable macOS seatbelt sandboxing for shell commands")
     var sandbox: Bool = true
@@ -206,6 +209,7 @@ struct ChatCommand: AsyncParsableCommand {
             topP: args.topP,
             kvBits: args.kvBits ?? profile.kvBits,
             kvGroupSize: args.kvGroupSize ?? profile.kvGroupSize,
+            kvQuantizationScheme: args.turboQuant ? .turboQuant : profile.kvQuantizationScheme,
             quantizedKVStart: args.quantizedKVStart ?? profile.quantizedKVStart,
             longContextThreshold: profile.longContextThreshold
         )
@@ -716,6 +720,7 @@ struct RunCommand: AsyncParsableCommand {
             topP: args.topP,
             kvBits: args.kvBits ?? profile.kvBits,
             kvGroupSize: args.kvGroupSize ?? profile.kvGroupSize,
+            kvQuantizationScheme: args.turboQuant ? .turboQuant : profile.kvQuantizationScheme,
             quantizedKVStart: args.quantizedKVStart ?? profile.quantizedKVStart,
             longContextThreshold: profile.longContextThreshold
         )
