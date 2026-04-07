@@ -1425,9 +1425,9 @@ public actor AgentLoop {
             return true
         }
 
-        // Qwen VLM variants can require processor-based input preparation,
+        // Some VLM families can require processor-based input preparation,
         // even for text-only turns.
-        if lowerModelPath.contains("qwen") {
+        if lowerModelPath.contains("qwen") || lowerModelPath.contains("omnicoder") {
             return true
         }
 
