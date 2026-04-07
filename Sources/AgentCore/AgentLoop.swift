@@ -512,15 +512,19 @@ public actor AgentLoop {
                             renderer.printStatus("[auto-correct] edit_file: reusing preserved new_text for \(path)")
                         }
 
+                        // [String: Any] is not Sendable; take an explicit unsafe snapshot
+                        // before crossing isolation boundaries into tool execution.
+                        nonisolated(unsafe) let isolatedExecutionArguments = executionArguments
+
                         do {
                             if let progressTool = tool as? ProgressReportingTool {
-                                result = try await progressTool.execute(arguments: executionArguments) { phase in
+                                result = try await progressTool.execute(arguments: isolatedExecutionArguments) { phase in
                                     if showToolSpinner {
                                         Task { await toolSpinner.updateMessage("\(call.name): \(phase)") }
                                     }
                                 }
                             } else {
-                                result = try await tool.execute(arguments: executionArguments)
+                                result = try await tool.execute(arguments: isolatedExecutionArguments)
                             }
                         } catch {
                             result = .error("Tool execution failed: \(error.localizedDescription)")
