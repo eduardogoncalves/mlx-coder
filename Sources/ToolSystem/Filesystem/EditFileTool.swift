@@ -46,10 +46,10 @@ public struct EditFileTool: Tool {
         }
 
         do {
-            var content = try String(contentsOfFile: resolvedPath, encoding: .utf8)
+            let originalContent = try String(contentsOfFile: resolvedPath, encoding: .utf8)
 
             // Count occurrences
-            let occurrences = content.components(separatedBy: oldText).count - 1
+            let occurrences = originalContent.components(separatedBy: oldText).count - 1
 
             guard occurrences > 0 else {
                 return .error("old_text not found in file. Make sure the text matches exactly, including whitespace.")
@@ -60,12 +60,61 @@ public struct EditFileTool: Tool {
             }
 
             // Apply the replacement
-            content = content.replacingOccurrences(of: oldText, with: newText)
-            try content.write(toFile: resolvedPath, atomically: true, encoding: .utf8)
+            let newContent = originalContent.replacingOccurrences(of: oldText, with: newText)
+            try newContent.write(toFile: resolvedPath, atomically: true, encoding: .utf8)
 
-            return .success("Applied edit to \(path)")
+            let diff = generateUnifiedDiff(original: originalContent, updated: newContent, path: path)
+            return .success("Applied edit to \(path)\n\(diff)")
         } catch {
             return .error("Failed to edit file: \(error.localizedDescription)")
         }
+    }
+
+    // MARK: - Diff generation
+
+    /// Produces a unified diff between `original` and `updated` content.
+    /// Because `edit_file` always replaces exactly one occurrence, the changed
+    /// region is always a single contiguous block, which keeps the implementation simple.
+    func generateUnifiedDiff(original: String, updated: String, path: String) -> String {
+        let origLines = original.components(separatedBy: "\n")
+        let newLines  = updated.components(separatedBy: "\n")
+
+        // Find the first line that differs (lo) and trim the common suffix so that
+        // origHi / newHi are one-past the last differing line in each array.
+        var lo = 0
+        while lo < origLines.count && lo < newLines.count && origLines[lo] == newLines[lo] {
+            lo += 1
+        }
+
+        var origHi = origLines.count
+        var newHi  = newLines.count
+        while origHi > lo && newHi > lo && origLines[origHi - 1] == newLines[newHi - 1] {
+            origHi -= 1
+            newHi  -= 1
+        }
+
+        guard lo < origHi || lo < newHi else { return "(no changes)" }
+
+        // Expand the hunk window by up to 3 lines of context on each side.
+        let ctx = 3
+        let hunkStart    = max(0, lo - ctx)
+        let hunkOrigEnd  = min(origLines.count, origHi + ctx)
+
+        let leadingCtx   = lo - hunkStart
+        let deletedCount = origHi - lo
+        let addedCount   = newHi - lo
+        let trailingCtx  = hunkOrigEnd - origHi
+
+        let totalOrig = leadingCtx + deletedCount + trailingCtx
+        let totalNew  = leadingCtx + addedCount   + trailingCtx
+
+        var hunk = "@@ -\(hunkStart + 1),\(totalOrig) +\(hunkStart + 1),\(totalNew) @@\n"
+
+        for l in hunkStart..<lo       { hunk += " \(origLines[l])\n" }
+        for l in lo..<origHi          { hunk += "-\(origLines[l])\n" }
+        for l in lo..<newHi           { hunk += "+\(newLines[l])\n"  }
+        for l in origHi..<hunkOrigEnd { hunk += " \(origLines[l])\n" }
+
+        return "--- a/\(path)\n+++ b/\(path)\n\(hunk)"
     }
 }
