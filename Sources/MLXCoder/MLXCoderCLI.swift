@@ -584,7 +584,11 @@ struct ChatCommand: AsyncParsableCommand {
 
                 renderer.printStatus("[Key mode] Generation active. Press Esc to cancel.")
                 let task = Task {
-                    try await agentLoop.processUserMessage(trimmed)
+                    let parsed = ImageAttachmentParser.parse(prompt: trimmed)
+                    if !parsed.imageURLs.isEmpty {
+                        renderer.printStatus("Attaching \(parsed.imageURLs.count) image(s): \(parsed.imageURLs.map(\.lastPathComponent).joined(separator: ", "))")
+                    }
+                    try await agentLoop.processUserMessage(parsed.cleanedPrompt, images: parsed.imageURLs)
                 }
                 await CancelController.shared.setTask(task)
                 try await task.value
@@ -794,7 +798,11 @@ struct RunCommand: AsyncParsableCommand {
             cacheLimit: budget.cacheBytes
         )
 
-        try await agentLoop.processUserMessage(prompt)
+        let parsedPrompt = ImageAttachmentParser.parse(prompt: prompt)
+        if !parsedPrompt.imageURLs.isEmpty {
+            renderer.printStatus("Attaching \(parsedPrompt.imageURLs.count) image(s): \(parsedPrompt.imageURLs.map(\.lastPathComponent).joined(separator: ", "))")
+        }
+        try await agentLoop.processUserMessage(parsedPrompt.cleanedPrompt, images: parsedPrompt.imageURLs)
 
         if let output = saveHistory?.trimmingCharacters(in: .whitespacesAndNewlines), !output.isEmpty {
             _ = try await agentLoop.exportHistory(to: output)

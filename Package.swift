@@ -11,9 +11,21 @@ let package = Package(
         .package(url: "https://github.com/jpsim/Yams", from: "6.2.1"),
     ],
     targets: [
+        .target(
+            name: "VendoredVLM",
+            dependencies: [
+                .product(name: "MLX",         package: "mlx-swift"),
+                .product(name: "MLXNN",       package: "mlx-swift"),
+                .product(name: "MLXVLM",      package: "mlx-swift-lm"),
+                .product(name: "MLXLMCommon", package: "mlx-swift-lm"),
+            ],
+            path: "Sources/VendoredVLM",
+            exclude: ["README.md"]
+        ),
         .executableTarget(
             name: "MLXCoder",
             dependencies: [
+                "VendoredVLM",
                 .product(name: "MLX",           package: "mlx-swift"),
                 .product(name: "MLXLLM",        package: "mlx-swift-lm"),
                 .product(name: "MLXVLM",        package: "mlx-swift-lm"),
@@ -21,7 +33,8 @@ let package = Package(
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
                 .product(name: "Yams",          package: "Yams"),
             ],
-            path: "Sources"
+            path: "Sources",
+            exclude: ["VendoredVLM"]
         ),
         .executableTarget(
             name: "TestGenerable",

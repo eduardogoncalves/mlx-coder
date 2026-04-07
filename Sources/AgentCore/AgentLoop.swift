@@ -5,6 +5,7 @@ import Foundation
 import MLX
 import MLXLLM
 import MLXLMCommon
+import MLXVLM
 import Darwin
 
 /// The main agent loop that orchestrates generation and tool execution.
@@ -38,6 +39,7 @@ public actor AgentLoop {
     private var loadedCacheLimit: Int?
     private var loadedKVBits: Int?
     private var pendingReload: Bool = false
+    private var pendingImages: [URL] = []
     
     public enum WorkingMode: String, Codable, Sendable {
         case agent
@@ -231,12 +233,29 @@ public actor AgentLoop {
     /// - Parameter message: The user's input message to process
     /// - Throws: On model loading errors, generation timeouts, or permission denials
     public func processUserMessage(_ message: String) async throws {
+        try await processUserMessage(message, images: [])
+    }
+
+    /// Process a user message, optionally with image attachments.
+    ///
+    /// When `images` is non-empty the request is routed through the VLM code path:
+    /// the conversation history and images are packaged as a `UserInput`, passed to
+    /// `modelContainer.prepare(input:)`, and the resulting `LMInput` (which contains
+    /// encoded pixel data) is forwarded to `generateTokens`.  Text-only calls
+    /// (`images` is empty) use the existing `LMInput(tokens:)` path unchanged.
+    ///
+    /// - Parameters:
+    ///   - message: The user's input message (with `@path` tokens already stripped).
+    ///   - images: Resolved image file URLs parsed from `@path` tokens.
+    /// - Throws: On model loading errors, generation timeouts, or permission denials.
+    public func processUserMessage(_ message: String, images: [URL] = []) async throws {
         // 1. Handle any pending reloads from previous mode changes
         if pendingReload {
             try await reloadModel()
             pendingReload = false
         }
         
+        pendingImages = images
         history.addUser(message)
         await applyDeterministicContextCompactionIfNeeded(reason: "after_user_message")
         
@@ -257,7 +276,10 @@ public actor AgentLoop {
 
         // 2. Check for long context and trigger KV quantization if needed
         let currentTokens = history.estimatedTokenCount
-        if currentTokens > currentGenerationConfig.longContextThreshold && (currentGenerationConfig.kvBits == nil || currentGenerationConfig.kvBits! > 4) {
+        if currentTokens > currentGenerationConfig.longContextThreshold
+            && (currentGenerationConfig.kvBits == nil || currentGenerationConfig.kvBits! > 4)
+            && !modelPath.lowercased().contains("gemma-4")
+        {
             renderer.printStatus("\u{001B}[33m[Warning]\u{001B}[0m Long context detected (\(currentTokens) tokens).")
             renderer.printStatus("Switching to 4-bit KV cache to save VRAM...")
             
@@ -1333,12 +1355,21 @@ public actor AgentLoop {
         \(ToolCallPattern.imStart)assistant
         """
 
+        let shouldUseProcessorPath = shouldUseProcessorPath(hasImages: false)
         let modelContainer = try requireLoadedModelContainer()
-        let extracted = try await modelContainer.perform { context in
+        let extracted = try await modelContainer.perform { [shouldUseProcessorPath] context in
             if Task.isCancelled { throw CancellationError() }
 
-            let tokens = context.tokenizer.encode(text: chatML)
-            let input = LMInput(tokens: MLXArray(tokens))
+            let input: LMInput
+            if shouldUseProcessorPath {
+                let userInput = UserInput(chat: [.system(systemPrompt), .user(userPrompt)])
+                input = try await context.processor.prepare(input: userInput)
+            } else {
+                let tokens = context.tokenizer.encode(text: chatML)
+                let tokenArray = MLXArray(tokens).expandedDimensions(axis: 0)
+                let mask = ones(like: tokenArray).asType(.int8)
+                input = LMInput(text: .init(tokens: tokenArray, mask: mask), image: nil)
+            }
             var responseText = ""
 
             for try await item in try MLXLMCommon.generateTokens(
@@ -1382,6 +1413,25 @@ public actor AgentLoop {
 
             """
         return factOnlyPreamble + toolResponse
+    }
+
+    private func shouldUseProcessorPath(hasImages: Bool) -> Bool {
+        if hasImages {
+            return true
+        }
+
+        let lowerModelPath = modelPath.lowercased()
+        if lowerModelPath.contains("gemma-4") {
+            return true
+        }
+
+        // Qwen VLM variants can require processor-based input preparation,
+        // even for text-only turns.
+        if lowerModelPath.contains("qwen") {
+            return true
+        }
+
+        return false
     }
 
     private func serializedArgumentsPreview(_ arguments: [String: Any]) -> String {
@@ -1462,8 +1512,6 @@ public actor AgentLoop {
     /// Generate a response from the model using the current conversation history.
     /// Returns the response text and the streaming writer (for streamed tool calls).
     private func generateResponse() async throws -> (text: String, writer: StreamingToolCallWriter) {
-        let enableThinking = thinkingLevel != .fast
-
         // Apply context transforms (snapshot — does not mutate stored history)
         var transformedMessages = history.messages
         for (index, transform) in contextTransforms.enumerated() {
@@ -1474,7 +1522,26 @@ public actor AgentLoop {
                 await hooks.emit(.contextTransformApplied(transformIndex: index, messagesBefore: before, messagesAfter: after))
             }
         }
+        // Consume pending images (cleared here so they apply to this turn only).
+        // AgentLoop is an actor so there is no concurrent access risk on pendingImages.
+        let imageURLs = pendingImages
+        pendingImages = []
+
+        let isGemma4Model = modelPath.lowercased().contains("gemma-4")
+        let shouldUseProcessorPath = shouldUseProcessorPath(hasImages: !imageURLs.isEmpty)
+        let enableThinking = thinkingLevel != .fast && !isGemma4Model
         let chatML = history.formatChatML(messages: transformedMessages, enableThinking: enableThinking)
+
+        // For the processor path, capture the Sendable message data to rebuild Chat.Message inside perform.
+        // Chat.Message contains CIImage and is not Sendable, so we reconstruct it in the closure.
+        // We use the last user-message index rather than content equality to robustly identify which
+        // message should receive the image attachments.
+        let vlmMessageData: [(role: String, content: String)]? = shouldUseProcessorPath ?
+            transformedMessages.map { ($0.role.rawValue, $0.content) }
+            : nil
+        let vlmLastUserIndex: Int? = shouldUseProcessorPath ?
+            transformedMessages.indices.last(where: { transformedMessages[$0].role == .user })
+            : nil
 
         // Start processing spinner before inference begins
         let spinner = Spinner(message: "Processing...")
@@ -1482,19 +1549,42 @@ public actor AgentLoop {
 
         // Use the model container to prepare input and generate
         let modelContainer = try requireLoadedModelContainer()
-        let result = try await modelContainer.perform { [currentGenerationConfig, renderer] context in
+
+        let result = try await modelContainer.perform { [currentGenerationConfig, renderer, chatML, imageURLs, vlmMessageData, vlmLastUserIndex, shouldUseProcessorPath] context in
             if Task.isCancelled { throw CancellationError() }
-            // Tokenize the ChatML prompt
+
+            // Processor path: for image turns and model families that require processor-driven
+            // prompt preparation, use UserInput +
+            // processor.prepare so model-specific prompt formatting and tensor shapes are respected.
+            // Fallback text-only path tokenizes ChatML directly.
             let tokenizer = context.tokenizer
-            let tokens = tokenizer.encode(text: chatML)
-            let inputTokens = MLXArray(tokens)
-            
-            let input = LMInput(tokens: inputTokens)
+            let input: LMInput
+            if let messageData = vlmMessageData {
+                // Reconstruct Chat.Message inside the closure (Chat.Message is not Sendable).
+                let chatMessages: [Chat.Message] = messageData.enumerated().map { idx, msg in
+                    let (role, content) = msg
+                    switch role {
+                    case "system":    return .system(content)
+                    case "assistant": return .assistant(content)
+                    case "tool":      return .tool(content)
+                    default:          // user
+                        // Use index-based identification to robustly find the last user message.
+                        let userImages: [UserInput.Image] = (idx == vlmLastUserIndex) ? imageURLs.map { .url($0) } : []
+                        return .user(content, images: userImages)
+                    }
+                }
+                let userInput = UserInput(chat: chatMessages)
+                input = try await context.processor.prepare(input: userInput)
+            } else {
+                let tokens = tokenizer.encode(text: chatML)
+                let tokenArray = MLXArray(tokens).expandedDimensions(axis: 0)
+                let mask = ones(like: tokenArray).asType(.int8)
+                input = LMInput(text: .init(tokens: tokenArray, mask: mask), image: nil)
+            }
 
             // Clean up stale .tmp files from previous crashed/interrupted sessions.
             let tmpDir = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("mlx-coder-streaming")
             try? FileManager.default.removeItem(at: tmpDir)
-            
             // Streaming writer: streams tool call content to .tmp files during generation
             let writer = StreamingToolCallWriter(
                 toolCallOpen: ToolCallPattern.toolCallOpen,
@@ -1525,6 +1615,13 @@ public actor AgentLoop {
                 }
                 semaphore.wait()
             }
+
+            var generationParameters = currentGenerationConfig.generateParameters
+            if shouldUseProcessorPath {
+                generationParameters.repetitionPenalty = nil
+                generationParameters.presencePenalty = nil
+                generationParameters.frequencyPenalty = nil
+            }
             
             // For correct streaming detokenization
             var segmentTokens = [Int]()
@@ -1532,7 +1629,7 @@ public actor AgentLoop {
             
             for try await item in try MLXLMCommon.generateTokens(
                 input: input,
-                parameters: currentGenerationConfig.generateParameters,
+                parameters: generationParameters,
                 context: context
             ) {
                 if Task.isCancelled {

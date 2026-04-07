@@ -6,6 +6,7 @@ import MLX
 import MLXLLM
 import MLXLMCommon
 import MLXVLM
+import VendoredVLM
 
 /// Loads a model from a local filesystem path.
 /// The model runs in-process — no HTTP server, no external API.
@@ -74,6 +75,9 @@ public final class ModelLoader: Sendable {
         defer {
             Task { await spinner.stop() }
         }
+
+        // Ensure Gemma4 (and any other vendored model types) are registered before loading.
+        await Gemma4Registration.shared.register()
 
         // Load using MLX-Swift-LM. If a Hub ID is passed, MLX downloads as needed.
         let configuration: ModelConfiguration
