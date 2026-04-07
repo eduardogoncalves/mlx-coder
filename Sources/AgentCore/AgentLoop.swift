@@ -40,6 +40,7 @@ public actor AgentLoop {
     private var loadedKVBits: Int?
     private var pendingReload: Bool = false
     private var pendingImages: [URL] = []
+    private var tokenizerImageSupportCache: [String: Bool] = [:]
     
     public enum WorkingMode: String, Codable, Sendable {
         case agent
@@ -1420,18 +1421,22 @@ public actor AgentLoop {
             return true
         }
 
-        let lowerModelPath = modelPath.lowercased()
-        if lowerModelPath.contains("gemma-4") {
-            return true
+        if let cached = tokenizerImageSupportCache[modelPath] {
+            return cached
         }
 
-        // Some VLM families can require processor-based input preparation,
-        // even for text-only turns.
-        if lowerModelPath.contains("qwen") || lowerModelPath.contains("omnicoder") {
-            return true
+        let expanded = NSString(string: modelPath).expandingTildeInPath
+        let tokenizerConfigPath = URL(fileURLWithPath: expanded).appendingPathComponent("tokenizer_config.json").path
+
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: tokenizerConfigPath)),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            tokenizerImageSupportCache[modelPath] = false
+            return false
         }
 
-        return false
+        let supportsImages = object["image_token"] != nil
+        tokenizerImageSupportCache[modelPath] = supportsImages
+        return supportsImages
     }
 
     private func serializedArgumentsPreview(_ arguments: [String: Any]) -> String {
