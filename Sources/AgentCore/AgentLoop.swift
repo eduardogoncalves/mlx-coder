@@ -122,6 +122,11 @@ public actor AgentLoop {
 
     private var contextTransforms: [ContextTransform] = []
 
+    /// Tmp files whose `new_text` was preserved after a failed streamed `edit_file` call,
+    /// keyed by the target file path. Injected automatically on the next retry so the LLM
+    /// never has to regenerate the unchanged content.
+    private var preservedEditTmpFiles: [String: URL] = [:]
+
     public init(
         modelContainer: ModelContainer,
         registry: ToolRegistry,
@@ -254,6 +259,13 @@ public actor AgentLoop {
             try await reloadModel()
             pendingReload = false
         }
+
+        // Discard preserved new_text buffers from previous turns — they are stale once
+        // the user sends a new message.
+        for url in preservedEditTmpFiles.values {
+            try? FileManager.default.removeItem(at: url)
+        }
+        preservedEditTmpFiles.removeAll()
         
         pendingImages = images
         history.addUser(message)
@@ -487,15 +499,28 @@ public actor AgentLoop {
                             }
                         }
 
+                        // Reuse preserved new_text from a previous failed streamed edit_file
+                        // so the LLM doesn't waste tokens regenerating unchanged content.
+                        var executionArguments = correctionResult.correctedArguments
+                        if call.name == "edit_file",
+                           let path = executionArguments["path"] as? String,
+                           let tmpURL = preservedEditTmpFiles[path],
+                           let savedNewText = try? String(contentsOf: tmpURL, encoding: .utf8) {
+                            executionArguments["new_text"] = savedNewText
+                            preservedEditTmpFiles.removeValue(forKey: path)
+                            try? FileManager.default.removeItem(at: tmpURL)
+                            renderer.printStatus("[auto-correct] edit_file: reusing preserved new_text for \(path)")
+                        }
+
                         do {
                             if let progressTool = tool as? ProgressReportingTool {
-                                result = try await progressTool.execute(arguments: correctionResult.correctedArguments) { phase in
+                                result = try await progressTool.execute(arguments: executionArguments) { phase in
                                     if showToolSpinner {
                                         Task { await toolSpinner.updateMessage("\(call.name): \(phase)") }
                                     }
                                 }
                             } else {
-                                result = try await tool.execute(arguments: correctionResult.correctedArguments)
+                                result = try await tool.execute(arguments: executionArguments)
                             }
                         } catch {
                             result = .error("Tool execution failed: \(error.localizedDescription)")
@@ -503,7 +528,7 @@ public actor AgentLoop {
 
                         // Semantic correction: if edit_file failed due to old_text mismatch, use LLM to fix it
                         if result.isError && call.name == "edit_file" {
-                            let currentArgs = correctionResult.correctedArguments
+                            let currentArgs = executionArguments
                             let currentResult = result
                             if let correction = await attemptSemanticCorrection(
                                 toolName: call.name,
@@ -2379,26 +2404,51 @@ public actor AgentLoop {
 
             case "edit_file":
                 // For edit_file, the tmp contains new_text; we need old_text from otherArgs
-                guard originalContent != nil else {
-                    try? FileManager.default.removeItem(at: call.contentFile)
-                    return .error("File not found: \(call.path)")
+                guard let fileContent = originalContent else {
+                    // Path not found — preserve new_text so the LLM only needs to fix the path.
+                    preservedEditTmpFiles[call.path] = call.contentFile
+                    return .error("File not found: \(call.path). new_text is preserved and will be reused automatically; only correct the path.")
                 }
                 guard let oldText = call.otherArgs["old_text"] as? String else {
                     try? FileManager.default.removeItem(at: call.contentFile)
                     return .error("Missing old_text for edit_file")
                 }
-                var content = originalContent!
-                let occurrences = content.components(separatedBy: oldText).count - 1
-                guard occurrences == 1 else {
-                    try? FileManager.default.removeItem(at: call.contentFile)
+                let occurrences = fileContent.components(separatedBy: oldText).count - 1
+                if occurrences != 1 {
                     if occurrences == 0 {
-                        return .error("old_text not found in \(call.path)")
+                        // Try semantic correction before giving up, passing tmpContent as new_text.
+                        let fakeArgs: [String: Any] = ["path": call.path, "old_text": oldText, "new_text": tmpContent]
+                        let fakeError = ToolResult.error("old_text not found in \(call.path). Make sure the text matches exactly.")
+                        if let correction = await attemptSemanticCorrection(toolName: "edit_file", arguments: fakeArgs, errorResult: fakeError) {
+                            renderer.printStatus("[auto-correct] Retrying streamed edit_file with corrected old_text...")
+                            let corrected = fileContent.replacingOccurrences(of: correction.oldText, with: tmpContent)
+                            do {
+                                try corrected.write(toFile: resolvedPath, atomically: true, encoding: .utf8)
+                                try? FileManager.default.removeItem(at: call.contentFile)
+                                return .success("Applied edit to \(call.path) (old_text auto-corrected)")
+                            } catch {
+                                // Write failed even after correction — preserve tmp.
+                                preservedEditTmpFiles[call.path] = call.contentFile
+                                return .error("Failed to write \(call.path) after auto-correction: \(error.localizedDescription). new_text is preserved and will be reused automatically.")
+                            }
+                        }
+                        // Semantic correction unavailable or unsuccessful — preserve tmp.
+                        preservedEditTmpFiles[call.path] = call.contentFile
+                        return .error("old_text not found in \(call.path). Make sure the text matches exactly, including whitespace. new_text is preserved and will be reused automatically; only correct old_text.")
                     } else {
-                        return .error("old_text found \(occurrences) times in \(call.path). Must be unique.")
+                        // Duplicate match — preserve tmp and ask for more context.
+                        preservedEditTmpFiles[call.path] = call.contentFile
+                        return .error("old_text found \(occurrences) times in \(call.path). Must be unique — add more surrounding context to old_text. new_text is preserved and will be reused automatically.")
                     }
                 }
-                content = content.replacingOccurrences(of: oldText, with: tmpContent)
-                try content.write(toFile: resolvedPath, atomically: true, encoding: .utf8)
+                let updatedContent = fileContent.replacingOccurrences(of: oldText, with: tmpContent)
+                do {
+                    try updatedContent.write(toFile: resolvedPath, atomically: true, encoding: .utf8)
+                } catch {
+                    // Write failed — preserve tmp for retry.
+                    preservedEditTmpFiles[call.path] = call.contentFile
+                    return .error("Failed to write \(call.path): \(error.localizedDescription). new_text is preserved and will be reused automatically; only correct the path or permissions.")
+                }
                 try? FileManager.default.removeItem(at: call.contentFile)
                 return .success("Applied edit to \(call.path)")
 
