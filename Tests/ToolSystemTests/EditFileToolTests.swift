@@ -97,8 +97,8 @@ final class EditFileToolTests: XCTestCase {
 
         XCTAssertTrue(result.isError)
         XCTAssertTrue(result.content.contains("2"), "error should mention occurrence count")
-        XCTAssertTrue(result.content.lowercased().contains("unique") || result.content.lowercased().contains("context"),
-                      "error should ask for more context")
+        XCTAssertTrue(result.content.contains("unique"),
+                      "error should say old_text must be unique")
     }
 
     // MARK: - generateUnifiedDiff unit tests
