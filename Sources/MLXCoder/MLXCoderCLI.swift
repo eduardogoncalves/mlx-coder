@@ -72,6 +72,9 @@ struct ModelArguments: ParsableArguments, Sendable {
     @Option(name: .long, help: "First transformer layer to apply KV cache quantization (0 = all layers)")
     var quantizedKVStart: Int?
 
+    @Option(name: .long, help: "Enable TurboQuant KV cache compression. Specify bits per element (e.g. 3). Mutually exclusive with --kv-bits.")
+    var turboQuantBits: Int?
+
     @Flag(name: .long, inversion: .prefixedNo, help: "Enable macOS seatbelt sandboxing for shell commands")
     var sandbox: Bool = true
 
@@ -207,7 +210,8 @@ struct ChatCommand: AsyncParsableCommand {
             kvBits: args.kvBits ?? profile.kvBits,
             kvGroupSize: args.kvGroupSize ?? profile.kvGroupSize,
             quantizedKVStart: args.quantizedKVStart ?? profile.quantizedKVStart,
-            longContextThreshold: profile.longContextThreshold
+            longContextThreshold: profile.longContextThreshold,
+            turboQuantBits: args.turboQuantBits
         )
 
         // Set up tool registry
@@ -721,7 +725,8 @@ struct RunCommand: AsyncParsableCommand {
             kvBits: args.kvBits ?? profile.kvBits,
             kvGroupSize: args.kvGroupSize ?? profile.kvGroupSize,
             quantizedKVStart: args.quantizedKVStart ?? profile.quantizedKVStart,
-            longContextThreshold: profile.longContextThreshold
+            longContextThreshold: profile.longContextThreshold,
+            turboQuantBits: args.turboQuantBits
         )
         
         // Set up tools

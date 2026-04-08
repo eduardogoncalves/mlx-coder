@@ -25,6 +25,11 @@ public struct GenerationEngine: Sendable {
         public let kvGroupSize: Int
         public let quantizedKVStart: Int
         public let longContextThreshold: Int
+        /// When non-nil, enables TurboQuant KV cache compression.
+        /// Specifies the bit width per element (e.g., 3 means 2-bit codebook + 1-bit QJL for
+        /// keys; 3-bit codebook for values). Requires at least 32 prefill tokens before
+        /// compression kicks in. Incompatible with standard `kvBits` quantization.
+        public let turboQuantBits: Int?
 
         public init(
             maxTokens: Int = 4096,
@@ -41,7 +46,8 @@ public struct GenerationEngine: Sendable {
             kvBits: Int? = nil,
             kvGroupSize: Int = 64,
             quantizedKVStart: Int = 0,
-            longContextThreshold: Int = 8192
+            longContextThreshold: Int = 8192,
+            turboQuantBits: Int? = nil
         ) {
             self.maxTokens = maxTokens
             self.temperature = temperature
@@ -58,6 +64,7 @@ public struct GenerationEngine: Sendable {
             self.kvGroupSize = kvGroupSize
             self.quantizedKVStart = quantizedKVStart
             self.longContextThreshold = longContextThreshold
+            self.turboQuantBits = turboQuantBits
         }
 
         /// Convert to MLXLMCommon's GenerateParameters

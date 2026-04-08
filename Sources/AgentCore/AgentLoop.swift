@@ -311,7 +311,8 @@ public actor AgentLoop {
                 kvBits: 4, 
                 kvGroupSize: currentGenerationConfig.kvGroupSize,
                 quantizedKVStart: currentGenerationConfig.quantizedKVStart,
-                longContextThreshold: currentGenerationConfig.longContextThreshold
+                longContextThreshold: currentGenerationConfig.longContextThreshold,
+                turboQuantBits: currentGenerationConfig.turboQuantBits
             )
             self.pendingReload = true
         }
@@ -1416,8 +1417,8 @@ public actor AgentLoop {
         \(ToolCallPattern.imStart)assistant
         """
 
-        let shouldUseProcessorPath = shouldUseProcessorPath(hasImages: false)
         let modelContainer = try requireLoadedModelContainer()
+        let shouldUseProcessorPath = await modelContainer.isVLM
         let extracted = try await modelContainer.perform { [shouldUseProcessorPath] context in
             if Task.isCancelled { throw CancellationError() }
 
@@ -1474,25 +1475,6 @@ public actor AgentLoop {
 
             """
         return factOnlyPreamble + toolResponse
-    }
-
-    private func shouldUseProcessorPath(hasImages: Bool) -> Bool {
-        if hasImages {
-            return true
-        }
-
-        let lowerModelPath = modelPath.lowercased()
-        if lowerModelPath.contains("gemma-4") {
-            return true
-        }
-
-        // Qwen VLM variants can require processor-based input preparation,
-        // even for text-only turns.
-        if lowerModelPath.contains("qwen") {
-            return true
-        }
-
-        return false
     }
 
     private func serializedArgumentsPreview(_ arguments: [String: Any]) -> String {
@@ -1644,7 +1626,11 @@ public actor AgentLoop {
         pendingImages = []
 
         let isGemma4Model = modelPath.lowercased().contains("gemma-4")
-        let shouldUseProcessorPath = shouldUseProcessorPath(hasImages: !imageURLs.isEmpty)
+        // Use the model container to prepare input and generate.
+        // Fetch it here so we can query isVLM for the processor-path decision.
+        let modelContainer = try requireLoadedModelContainer()
+        let isVLM = await modelContainer.isVLM
+        let shouldUseProcessorPath = !imageURLs.isEmpty || isVLM
         let enableThinking = thinkingLevel != .fast && !isGemma4Model
         let chatML = history.formatChatML(messages: transformedMessages, enableThinking: enableThinking)
 
@@ -1662,9 +1648,6 @@ public actor AgentLoop {
         // Start processing spinner before inference begins
         let spinner = Spinner(message: "Processing...")
         await spinner.start()
-
-        // Use the model container to prepare input and generate
-        let modelContainer = try requireLoadedModelContainer()
 
         let result = try await modelContainer.perform { [currentGenerationConfig, renderer, chatML, imageURLs, vlmMessageData, vlmLastUserIndex, shouldUseProcessorPath] context in
             if Task.isCancelled { throw CancellationError() }
@@ -1738,6 +1721,20 @@ public actor AgentLoop {
                 generationParameters.presencePenalty = nil
                 generationParameters.frequencyPenalty = nil
             }
+
+            // Build TurboQuant KV cache when enabled.
+            // KVCacheSimple layers are replaced with TurboQuantKVCache (fill phase);
+            // sliding-window (RotatingKVCache) and other layers are preserved.
+            // TurboQuantKVCache auto-compresses on the first single-token update
+            // after prefill, so no upstream changes are required.
+            let tqCache: [KVCache]? = currentGenerationConfig.turboQuantBits.map { bits in
+                makeTurboQuantCaches(
+                    model: context.model,
+                    parameters: generationParameters,
+                    keyBits: bits,
+                    valueBits: bits
+                )
+            }
             
             // For correct streaming detokenization
             var segmentTokens = [Int]()
@@ -1745,6 +1742,7 @@ public actor AgentLoop {
             
             for try await item in try MLXLMCommon.generateTokens(
                 input: input,
+                cache: tqCache,
                 parameters: generationParameters,
                 context: context
             ) {
