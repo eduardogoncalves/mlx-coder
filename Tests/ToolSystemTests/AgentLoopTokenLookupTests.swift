@@ -29,4 +29,65 @@ final class AgentLoopTokenLookupTests: XCTestCase {
         XCTAssertEqual(lookup["b"], 20)
         XCTAssertNil(lookup["c"])
     }
+
+    func testEvaluateReadFileLoopBlocksThirdConsecutiveReadOfSameFile() {
+        var previousPath: String?
+        var previousStreak = 0
+
+        let first = AgentLoop.evaluateReadFileLoop(
+            callName: "read_file",
+            arguments: ["path": "hello-template.html"],
+            previousPath: previousPath,
+            previousStreak: previousStreak
+        )
+        previousPath = first.nextPath
+        previousStreak = first.nextStreak
+
+        let second = AgentLoop.evaluateReadFileLoop(
+            callName: "read_file",
+            arguments: ["path": "./hello-template.html"],
+            previousPath: previousPath,
+            previousStreak: previousStreak
+        )
+        previousPath = second.nextPath
+        previousStreak = second.nextStreak
+
+        let third = AgentLoop.evaluateReadFileLoop(
+            callName: "read_file",
+            arguments: ["path": "hello-template.html"],
+            previousPath: previousPath,
+            previousStreak: previousStreak
+        )
+
+        XCTAssertFalse(first.shouldBlock)
+        XCTAssertFalse(second.shouldBlock)
+        XCTAssertTrue(third.shouldBlock)
+        XCTAssertEqual(third.nextStreak, 3)
+    }
+
+    func testEvaluateReadFileLoopResetsAfterDifferentCall() {
+        let first = AgentLoop.evaluateReadFileLoop(
+            callName: "read_file",
+            arguments: ["path": "a.swift"],
+            previousPath: nil,
+            previousStreak: 0
+        )
+
+        let nonRead = AgentLoop.evaluateReadFileLoop(
+            callName: "grep",
+            arguments: ["pattern": "foo"],
+            previousPath: first.nextPath,
+            previousStreak: first.nextStreak
+        )
+
+        let second = AgentLoop.evaluateReadFileLoop(
+            callName: "read_file",
+            arguments: ["path": "a.swift"],
+            previousPath: nonRead.nextPath,
+            previousStreak: nonRead.nextStreak
+        )
+
+        XCTAssertFalse(second.shouldBlock)
+        XCTAssertEqual(second.nextStreak, 1)
+    }
 }
