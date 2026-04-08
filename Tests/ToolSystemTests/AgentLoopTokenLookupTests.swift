@@ -31,31 +31,31 @@ final class AgentLoopTokenLookupTests: XCTestCase {
     }
 
     func testEvaluateReadFileLoopBlocksThirdConsecutiveReadOfSameFile() {
-        var previousPath: String?
+        var previousSignature: String?
         var previousStreak = 0
 
         let first = AgentLoop.evaluateReadFileLoop(
             callName: "read_file",
-            arguments: ["path": "hello-template.html"],
-            previousPath: previousPath,
+            arguments: ["path": "hello-template.html", "start_line": 1, "end_line": 10],
+            previousSignature: previousSignature,
             previousStreak: previousStreak
         )
-        previousPath = first.nextPath
+        previousSignature = first.nextSignature
         previousStreak = first.nextStreak
 
         let second = AgentLoop.evaluateReadFileLoop(
             callName: "read_file",
-            arguments: ["path": "./hello-template.html"],
-            previousPath: previousPath,
+            arguments: ["path": "./hello-template.html", "start_line": 1, "end_line": 10],
+            previousSignature: previousSignature,
             previousStreak: previousStreak
         )
-        previousPath = second.nextPath
+        previousSignature = second.nextSignature
         previousStreak = second.nextStreak
 
         let third = AgentLoop.evaluateReadFileLoop(
             callName: "read_file",
-            arguments: ["path": "hello-template.html"],
-            previousPath: previousPath,
+            arguments: ["path": "hello-template.html", "start_line": 1, "end_line": 10],
+            previousSignature: previousSignature,
             previousStreak: previousStreak
         )
 
@@ -68,23 +68,42 @@ final class AgentLoopTokenLookupTests: XCTestCase {
     func testEvaluateReadFileLoopResetsAfterDifferentCall() {
         let first = AgentLoop.evaluateReadFileLoop(
             callName: "read_file",
-            arguments: ["path": "a.swift"],
-            previousPath: nil,
+            arguments: ["path": "a.swift", "start_line": 1, "end_line": 5],
+            previousSignature: nil,
             previousStreak: 0
         )
 
         let nonRead = AgentLoop.evaluateReadFileLoop(
             callName: "grep",
             arguments: ["pattern": "foo"],
-            previousPath: first.nextPath,
+            previousSignature: first.nextSignature,
             previousStreak: first.nextStreak
         )
 
         let second = AgentLoop.evaluateReadFileLoop(
             callName: "read_file",
-            arguments: ["path": "a.swift"],
-            previousPath: nonRead.nextPath,
+            arguments: ["path": "a.swift", "start_line": 1, "end_line": 5],
+            previousSignature: nonRead.nextSignature,
             previousStreak: nonRead.nextStreak
+        )
+
+        XCTAssertFalse(second.shouldBlock)
+        XCTAssertEqual(second.nextStreak, 1)
+    }
+
+    func testEvaluateReadFileLoopAllowsDifferentLineRangesForSameFile() {
+        let first = AgentLoop.evaluateReadFileLoop(
+            callName: "read_file",
+            arguments: ["path": "hello-template.html", "start_line": 1, "end_line": 10],
+            previousSignature: nil,
+            previousStreak: 0
+        )
+
+        let second = AgentLoop.evaluateReadFileLoop(
+            callName: "read_file",
+            arguments: ["path": "hello-template.html", "start_line": 11, "end_line": 20],
+            previousSignature: first.nextSignature,
+            previousStreak: first.nextStreak
         )
 
         XCTAssertFalse(second.shouldBlock)

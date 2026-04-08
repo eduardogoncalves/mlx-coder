@@ -325,7 +325,7 @@ public actor AgentLoop {
         var iterations = 0
         var fileModificationToolsExecuted = false
         var modifiedFilePaths = Set<String>()
-        var lastReadFilePath: String?
+        var lastReadFileSignature: String?
         var sameReadFileStreak = 0
         var readLoopSteeredPaths = Set<String>()
 
@@ -421,10 +421,10 @@ public actor AgentLoop {
                 let readLoopState = Self.evaluateReadFileLoop(
                     callName: call.name,
                     arguments: call.arguments,
-                    previousPath: lastReadFilePath,
+                    previousSignature: lastReadFileSignature,
                     previousStreak: sameReadFileStreak
                 )
-                lastReadFilePath = readLoopState.nextPath
+                lastReadFileSignature = readLoopState.nextSignature
                 sameReadFileStreak = readLoopState.nextStreak
                 let blockedRepeatedReadPath = readLoopState.shouldBlock ? readLoopState.rawPath : nil
                 let blockedRepeatedReadNormalizedPath = readLoopState.shouldBlock ? readLoopState.normalizedPath : nil
@@ -1519,10 +1519,10 @@ public actor AgentLoop {
     static func evaluateReadFileLoop(
         callName: String,
         arguments: [String: Any],
-        previousPath: String?,
+        previousSignature: String?,
         previousStreak: Int,
         limit: Int = AgentLoop.repeatedReadFileStreakLimit
-    ) -> (nextPath: String?, nextStreak: Int, shouldBlock: Bool, normalizedPath: String?, rawPath: String?) {
+    ) -> (nextSignature: String?, nextStreak: Int, shouldBlock: Bool, normalizedPath: String?, rawPath: String?) {
         guard callName == "read_file" else {
             return (nil, 0, false, nil, nil)
         }
@@ -1534,9 +1534,25 @@ public actor AgentLoop {
         }
 
         let normalizedPath = NSString(string: rawPath).standardizingPath
-        let nextStreak = (normalizedPath == previousPath) ? (previousStreak + 1) : 1
+        let startLineSignature = Self.readFileLoopSignatureValue(arguments["start_line"])
+        let endLineSignature = Self.readFileLoopSignatureValue(arguments["end_line"])
+        let currentSignature = "\(normalizedPath)|start:\(startLineSignature)|end:\(endLineSignature)"
+        let nextStreak = (currentSignature == previousSignature) ? (previousStreak + 1) : 1
         let shouldBlock = nextStreak > limit
-        return (normalizedPath, nextStreak, shouldBlock, normalizedPath, rawPath)
+        return (currentSignature, nextStreak, shouldBlock, normalizedPath, rawPath)
+    }
+
+    private static func readFileLoopSignatureValue(_ value: Any?) -> String {
+        switch value {
+        case let stringValue as String:
+            return stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        case let intValue as Int:
+            return String(intValue)
+        case nil:
+            return "nil"
+        default:
+            return String(describing: value!)
+        }
     }
 
     static func missingRequiredArgumentNames(required: [String]?, arguments: [String: Any]) -> [String] {
