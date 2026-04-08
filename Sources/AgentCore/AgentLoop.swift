@@ -2484,7 +2484,25 @@ public actor AgentLoop {
                     preservedEditTmpFiles[call.path] = call.contentFile
                     return .error("File not found: \(call.path). new_text is preserved and will be reused automatically; only correct the path.")
                 }
-                guard let oldText = call.otherArgs["old_text"] as? String else {
+
+                // Streamed calls bypass normal execution-time correction, so run the same
+                // deterministic correction pipeline here for aliases and fuzzy old_text fixes.
+                var streamedArguments = call.otherArgs
+                streamedArguments["path"] = call.path
+                streamedArguments["new_text"] = tmpContent
+                let correctionResult = await ParameterCorrectionService.correct(
+                    toolName: "edit_file",
+                    arguments: streamedArguments,
+                    workspaceRoot: workspace
+                )
+                if correctionResult.wasCorrected {
+                    for correction in correctionResult.corrections {
+                        renderer.printStatus("[auto-correct] edit_file (streamed): \(correction)")
+                    }
+                }
+
+                guard let oldText = correctionResult.correctedArguments["old_text"] as? String,
+                      !oldText.isEmpty else {
                     try? FileManager.default.removeItem(at: call.contentFile)
                     return .error("Missing old_text for edit_file")
                 }
