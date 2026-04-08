@@ -506,10 +506,19 @@ public actor AgentLoop {
                                 corrections: correctionResult.corrections
                             )
                         }
-                        
-                        if isDestructive && dryRun {
+
+                        let resolvedTool = await registry.tool(named: call.name)
+                        let missingRequiredArgs = Self.missingRequiredArgumentNames(
+                            required: resolvedTool?.parameters.required,
+                            arguments: correctionResult.correctedArguments
+                        )
+                        if !missingRequiredArgs.isEmpty {
+                            let joined = missingRequiredArgs.joined(separator: ", ")
+                            result = .error("Missing required argument(s) for \(call.name): \(joined)")
+                            steeringQueue.append("Your last \(call.name) call was invalid. Include required argument(s): \(joined).")
+                        } else if isDestructive && dryRun {
                             result = .success("Dry-run mode: skipped execution of destructive tool '\(call.name)'. Arguments: \(correctionResult.correctedArguments)")
-                        } else if let tool = await registry.tool(named: call.name) {
+                        } else if let tool = resolvedTool {
                             let showToolSpinner = (call.name == "web_search" || call.name == "web_fetch")
                             let toolSpinner = Spinner(message: "Executing \(call.name)...")
                             if showToolSpinner {
@@ -1528,6 +1537,20 @@ public actor AgentLoop {
         let nextStreak = (normalizedPath == previousPath) ? (previousStreak + 1) : 1
         let shouldBlock = nextStreak > limit
         return (normalizedPath, nextStreak, shouldBlock, normalizedPath, rawPath)
+    }
+
+    static func missingRequiredArgumentNames(required: [String]?, arguments: [String: Any]) -> [String] {
+        guard let required, !required.isEmpty else { return [] }
+        return required.filter { key in
+            guard let value = arguments[key] else { return true }
+            if let stringValue = value as? String {
+                return stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            }
+            if let arrayValue = value as? [Any] {
+                return arrayValue.isEmpty
+            }
+            return false
+        }
     }
 
     private func applyDeterministicContextCompactionIfNeeded(reason: String) async {

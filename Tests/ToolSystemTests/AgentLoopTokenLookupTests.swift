@@ -90,4 +90,30 @@ final class AgentLoopTokenLookupTests: XCTestCase {
         XCTAssertFalse(second.shouldBlock)
         XCTAssertEqual(second.nextStreak, 1)
     }
+
+    func testMissingRequiredArgumentNamesDetectsAbsentAndEmptyValues() {
+        let missing = AgentLoop.missingRequiredArgumentNames(
+            required: ["path", "old_text", "new_text", "paths"],
+            arguments: [
+                "path": "file.txt",
+                "old_text": " ",
+                "paths": []
+            ]
+        )
+
+        XCTAssertEqual(Set(missing), Set(["old_text", "new_text", "paths"]))
+    }
+
+    func testMissingRequiredArgumentNamesReturnsEmptyWhenAllPresent() {
+        let missing = AgentLoop.missingRequiredArgumentNames(
+            required: ["path", "old_text", "new_text"],
+            arguments: [
+                "path": "f.txt",
+                "old_text": "before",
+                "new_text": "after"
+            ]
+        )
+
+        XCTAssertTrue(missing.isEmpty)
+    }
 }
