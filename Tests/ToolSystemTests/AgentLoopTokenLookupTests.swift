@@ -29,4 +29,110 @@ final class AgentLoopTokenLookupTests: XCTestCase {
         XCTAssertEqual(lookup["b"], 20)
         XCTAssertNil(lookup["c"])
     }
+
+    func testEvaluateReadFileLoopBlocksThirdConsecutiveReadOfSameFile() {
+        var previousSignature: String?
+        var previousStreak = 0
+
+        let first = AgentLoop.evaluateReadFileLoop(
+            callName: "read_file",
+            arguments: ["path": "hello-template.html", "start_line": 1, "end_line": 10],
+            previousSignature: previousSignature,
+            previousStreak: previousStreak
+        )
+        previousSignature = first.nextSignature
+        previousStreak = first.nextStreak
+
+        let second = AgentLoop.evaluateReadFileLoop(
+            callName: "read_file",
+            arguments: ["path": "./hello-template.html", "start_line": 1, "end_line": 10],
+            previousSignature: previousSignature,
+            previousStreak: previousStreak
+        )
+        previousSignature = second.nextSignature
+        previousStreak = second.nextStreak
+
+        let third = AgentLoop.evaluateReadFileLoop(
+            callName: "read_file",
+            arguments: ["path": "hello-template.html", "start_line": 1, "end_line": 10],
+            previousSignature: previousSignature,
+            previousStreak: previousStreak
+        )
+
+        XCTAssertFalse(first.shouldBlock)
+        XCTAssertFalse(second.shouldBlock)
+        XCTAssertTrue(third.shouldBlock)
+        XCTAssertEqual(third.nextStreak, 3)
+    }
+
+    func testEvaluateReadFileLoopResetsAfterDifferentCall() {
+        let first = AgentLoop.evaluateReadFileLoop(
+            callName: "read_file",
+            arguments: ["path": "a.swift", "start_line": 1, "end_line": 5],
+            previousSignature: nil,
+            previousStreak: 0
+        )
+
+        let nonRead = AgentLoop.evaluateReadFileLoop(
+            callName: "grep",
+            arguments: ["pattern": "foo"],
+            previousSignature: first.nextSignature,
+            previousStreak: first.nextStreak
+        )
+
+        let second = AgentLoop.evaluateReadFileLoop(
+            callName: "read_file",
+            arguments: ["path": "a.swift", "start_line": 1, "end_line": 5],
+            previousSignature: nonRead.nextSignature,
+            previousStreak: nonRead.nextStreak
+        )
+
+        XCTAssertFalse(second.shouldBlock)
+        XCTAssertEqual(second.nextStreak, 1)
+    }
+
+    func testEvaluateReadFileLoopAllowsDifferentLineRangesForSameFile() {
+        let first = AgentLoop.evaluateReadFileLoop(
+            callName: "read_file",
+            arguments: ["path": "hello-template.html", "start_line": 1, "end_line": 10],
+            previousSignature: nil,
+            previousStreak: 0
+        )
+
+        let second = AgentLoop.evaluateReadFileLoop(
+            callName: "read_file",
+            arguments: ["path": "hello-template.html", "start_line": 11, "end_line": 20],
+            previousSignature: first.nextSignature,
+            previousStreak: first.nextStreak
+        )
+
+        XCTAssertFalse(second.shouldBlock)
+        XCTAssertEqual(second.nextStreak, 1)
+    }
+
+    func testMissingRequiredArgumentNamesDetectsAbsentAndEmptyValues() {
+        let missing = AgentLoop.missingRequiredArgumentNames(
+            required: ["path", "old_text", "new_text", "paths"],
+            arguments: [
+                "path": "file.txt",
+                "old_text": " ",
+                "paths": []
+            ]
+        )
+
+        XCTAssertEqual(Set(missing), Set(["old_text", "new_text", "paths"]))
+    }
+
+    func testMissingRequiredArgumentNamesReturnsEmptyWhenAllPresent() {
+        let missing = AgentLoop.missingRequiredArgumentNames(
+            required: ["path", "old_text", "new_text"],
+            arguments: [
+                "path": "f.txt",
+                "old_text": "before",
+                "new_text": "after"
+            ]
+        )
+
+        XCTAssertTrue(missing.isEmpty)
+    }
 }

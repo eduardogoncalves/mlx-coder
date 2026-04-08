@@ -271,16 +271,33 @@ public final class StreamingToolCallWriter: @unchecked Sendable {
     }
 
     private func extractOtherArgs(_ buffer: String, contentKey: String, path: String) -> [String: Any] {
-        // Parse the JSON buffer to extract non-content arguments
-        guard let data = buffer.data(using: .utf8),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let arguments = json["arguments"] as? [String: Any] else {
-            return [:]
+        // Parse the JSON buffer to extract non-content arguments.
+        // During streaming, models may emit slightly malformed JSON; we try
+        // strict parsing first, then bounded repairs, then key recovery.
+        if let arguments = extractArgumentsDict(from: buffer) {
+            var otherArgs = arguments
+            otherArgs.removeValue(forKey: contentKey)
+            return otherArgs
         }
 
-        var otherArgs = arguments
-        otherArgs.removeValue(forKey: contentKey)
-        return otherArgs
+        // Fallback: recover key string fields that appear before the streamed content.
+        // This is primarily to preserve edit_file.old_text for retry loops.
+        var recovered: [String: Any] = [:]
+        let beforeContent = bufferBeforeContentField(buffer, contentKey: contentKey)
+
+        if let oldText = extractJSONStringValue(forKey: "old_text", in: beforeContent) {
+            recovered["old_text"] = oldText
+        } else if let oldTextAlias = ["oldText", "old", "search_text", "searchText"].compactMap({ extractJSONStringValue(forKey: $0, in: beforeContent) }).first {
+            recovered["old_text"] = oldTextAlias
+        }
+
+        if let parsedPath = extractJSONStringValue(forKey: "path", in: beforeContent), !parsedPath.isEmpty {
+            recovered["path"] = parsedPath
+        } else {
+            recovered["path"] = path
+        }
+
+        return recovered
     }
 
     // MARK: - Helpers
@@ -297,14 +314,7 @@ public final class StreamingToolCallWriter: @unchecked Sendable {
     }
 
     private func extractPathAndArgs(_ buffer: String, contentKey: String) -> (path: String, toolName: String)? {
-        let beforeContent: String
-        if let range = buffer.range(of: "\"" + contentKey + "\":\"") {
-            beforeContent = String(buffer[..<range.lowerBound])
-        } else if let range = buffer.range(of: "\"" + contentKey + "\": \"") {
-            beforeContent = String(buffer[..<range.lowerBound])
-        } else {
-            beforeContent = buffer
-        }
+        let beforeContent = bufferBeforeContentField(buffer, contentKey: contentKey)
 
         var toolName: String?
         var path: String?
@@ -329,6 +339,90 @@ public final class StreamingToolCallWriter: @unchecked Sendable {
 
         guard let name = toolName, let p = path else { return nil }
         return (p, name)
+    }
+
+    private func extractArgumentsDict(from buffer: String) -> [String: Any]? {
+        if let parsed = parseJSONObject(buffer),
+           let arguments = parsed["arguments"] as? [String: Any] {
+            return arguments
+        }
+
+        if let extracted = extractLikelyJSONObject(buffer),
+           let parsed = parseJSONObject(extracted),
+           let arguments = parsed["arguments"] as? [String: Any] {
+            return arguments
+        }
+
+        // Try bounded repair for common malformed outputs.
+        var repaired = buffer
+        if let extracted = extractLikelyJSONObject(repaired) {
+            repaired = extracted
+        }
+        repaired = repaired.replacingOccurrences(of: ",\\s*([}\\]])", with: "$1", options: .regularExpression)
+        if repaired.hasPrefix("{") && !repaired.hasSuffix("}") {
+            repaired += "}"
+        }
+        if !repaired.hasPrefix("{") {
+            repaired = "{" + repaired
+        }
+        if !repaired.hasSuffix("}") {
+            repaired += "}"
+        }
+
+        if let parsed = parseJSONObject(repaired),
+           let arguments = parsed["arguments"] as? [String: Any] {
+            return arguments
+        }
+
+        return nil
+    }
+
+    private func parseJSONObject(_ jsonString: String) -> [String: Any]? {
+        guard let data = jsonString.data(using: .utf8) else { return nil }
+        return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+    }
+
+    private func extractLikelyJSONObject(_ text: String) -> String? {
+        guard let first = text.firstIndex(of: "{"),
+              let last = text.lastIndex(of: "}"),
+              first <= last else {
+            return nil
+        }
+
+        return String(text[first...last]).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func bufferBeforeContentField(_ buffer: String, contentKey: String) -> String {
+        if let range = buffer.range(of: "\"" + contentKey + "\":\"") {
+            return String(buffer[..<range.lowerBound])
+        }
+        if let range = buffer.range(of: "\"" + contentKey + "\": \"") {
+            return String(buffer[..<range.lowerBound])
+        }
+        return buffer
+    }
+
+    private func extractJSONStringValue(forKey key: String, in text: String) -> String? {
+        let pattern = "\"" + NSRegularExpression.escapedPattern(for: key) + "\"\\s*:\\s*\"((?:\\\\.|[^\"\\\\])*)\""
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
+        let range = NSRange(text.startIndex..<text.endIndex, in: text)
+        guard let match = regex.firstMatch(in: text, range: range),
+              let valueRange = Range(match.range(at: 1), in: text) else {
+            return nil
+        }
+
+        let encoded = String(text[valueRange])
+        return decodeJSONString(encoded)
+    }
+
+    private func decodeJSONString(_ encoded: String) -> String? {
+        let wrapped = "{\"v\":\"" + encoded + "\"}"
+        guard let data = wrapped.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let value = object["v"] as? String else {
+            return nil
+        }
+        return value
     }
 
     private func processEscapeChar(_ char: Character, state: EscapeState) -> (Data?, EscapeState) {

@@ -130,6 +130,34 @@ public struct ParameterCorrectionService: Sendable {
         var corrected = arguments
         var corrections: [String] = []
 
+        // Canonicalize common argument aliases produced by models.
+        if corrected["path"] == nil {
+            let pathAliases = ["file_path", "filePath", "filepath", "target_path"]
+            if let matchedAlias = pathAliases.first(where: { corrected[$0] is String }),
+               let aliasedPath = corrected[matchedAlias] as? String {
+                corrected["path"] = aliasedPath
+                corrections.append("Mapped '\(matchedAlias)' to 'path'")
+            }
+        }
+
+        if corrected["old_text"] == nil {
+            let oldTextAliases = ["oldText", "old", "search_text", "searchText", "target_text", "text_to_replace"]
+            if let matchedAlias = oldTextAliases.first(where: { corrected[$0] is String }),
+               let aliasedOldText = corrected[matchedAlias] as? String {
+                corrected["old_text"] = aliasedOldText
+                corrections.append("Mapped '\(matchedAlias)' to 'old_text'")
+            }
+        }
+
+        if corrected["new_text"] == nil {
+            let newTextAliases = ["newText", "replacement", "replacement_text", "replace_with", "text"]
+            if let matchedAlias = newTextAliases.first(where: { corrected[$0] is String }),
+               let aliasedNewText = corrected[matchedAlias] as? String {
+                corrected["new_text"] = aliasedNewText
+                corrections.append("Mapped '\(matchedAlias)' to 'new_text'")
+            }
+        }
+
         // Normalize path separators
         guard var path = corrected["path"] as? String else {
             if corrected["old_text"] == nil {

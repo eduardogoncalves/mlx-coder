@@ -122,6 +122,11 @@ public actor AgentLoop {
 
     private var contextTransforms: [ContextTransform] = []
 
+    /// Tmp files whose `new_text` was preserved after a failed streamed `edit_file` call,
+    /// keyed by the target file path. Injected automatically on the next retry so the LLM
+    /// never has to regenerate the unchanged content.
+    private var preservedEditTmpFiles: [String: URL] = [:]
+
     public init(
         modelContainer: ModelContainer,
         registry: ToolRegistry,
@@ -254,6 +259,13 @@ public actor AgentLoop {
             try await reloadModel()
             pendingReload = false
         }
+
+        // Discard preserved new_text buffers from previous turns — they are stale once
+        // the user sends a new message.
+        for url in preservedEditTmpFiles.values {
+            try? FileManager.default.removeItem(at: url)
+        }
+        preservedEditTmpFiles.removeAll()
         
         pendingImages = images
         history.addUser(message)
@@ -313,6 +325,9 @@ public actor AgentLoop {
         var iterations = 0
         var fileModificationToolsExecuted = false
         var modifiedFilePaths = Set<String>()
+        var lastReadFileSignature: String?
+        var sameReadFileStreak = 0
+        var readLoopSteeredPaths = Set<String>()
 
         while iterations < maxToolIterations {
             iterations += 1
@@ -402,6 +417,17 @@ public actor AgentLoop {
             // Execute each tool call from text parsing
             for call in toolCalls {
                 renderer.printToolCall(name: call.name, arguments: call.arguments)
+
+                let readLoopState = Self.evaluateReadFileLoop(
+                    callName: call.name,
+                    arguments: call.arguments,
+                    previousSignature: lastReadFileSignature,
+                    previousStreak: sameReadFileStreak
+                )
+                lastReadFileSignature = readLoopState.nextSignature
+                sameReadFileStreak = readLoopState.nextStreak
+                let blockedRepeatedReadPath = readLoopState.shouldBlock ? readLoopState.rawPath : nil
+                let blockedRepeatedReadNormalizedPath = readLoopState.shouldBlock ? readLoopState.normalizedPath : nil
                 
                 // Track file modifications for build checking
                 let isFileModificationTool = (call.name == "write_file" || call.name == "edit_file" || call.name == "append_file" || call.name == "patch")
@@ -452,74 +478,109 @@ public actor AgentLoop {
 
                 if approval.approved {
                     await hooks.emit(.preToolUse(toolName: call.name, argumentsPreview: serializedArgumentsPreview(call.arguments)))
-                    
-                    // Apply automatic parameter correction before execution
-                    let correctionResult = await ParameterCorrectionService.correct(
-                        toolName: call.name,
-                        arguments: call.arguments,
-                        workspaceRoot: workspace
-                    )
-                    
-                    // Log corrections if any were made
-                    if correctionResult.wasCorrected {
-                        for correction in correctionResult.corrections {
-                            renderer.printStatus("[auto-correct] \(call.name): \(correction)")
-                        }
-                        await auditLogger?.logParameterCorrection(
-                            toolName: call.name,
-                            originalArgumentsJSON: serializedArgumentsPreview(call.arguments),
-                            correctedArgumentsJSON: serializedArgumentsPreview(correctionResult.correctedArguments),
-                            corrections: correctionResult.corrections
-                        )
-                    }
-                    
-                    if isDestructive && dryRun {
-                        result = .success("Dry-run mode: skipped execution of destructive tool '\(call.name)'. Arguments: \(correctionResult.correctedArguments)")
-                    } else if let tool = await registry.tool(named: call.name) {
-                        let showToolSpinner = (call.name == "web_search" || call.name == "web_fetch")
-                        let toolSpinner = Spinner(message: "Executing \(call.name)...")
-                        if showToolSpinner {
-                            await toolSpinner.start()
-                        }
-                        defer {
-                            if showToolSpinner {
-                                Task { await toolSpinner.stop(clearLine: true) }
-                            }
-                        }
 
-                        do {
-                            if let progressTool = tool as? ProgressReportingTool {
-                                result = try await progressTool.execute(arguments: correctionResult.correctedArguments) { phase in
-                                    if showToolSpinner {
-                                        Task { await toolSpinner.updateMessage("\(call.name): \(phase)") }
-                                    }
-                                }
-                            } else {
-                                result = try await tool.execute(arguments: correctionResult.correctedArguments)
-                            }
-                        } catch {
-                            result = .error("Tool execution failed: \(error.localizedDescription)")
-                        }
-
-                        // Semantic correction: if edit_file failed due to old_text mismatch, use LLM to fix it
-                        if result.isError && call.name == "edit_file" {
-                            let currentArgs = correctionResult.correctedArguments
-                            let currentResult = result
-                            if let correction = await attemptSemanticCorrection(
-                                toolName: call.name,
-                                arguments: currentArgs,
-                                errorResult: currentResult
-                            ) {
-                                renderer.printStatus("[auto-correct] Retrying with corrected arguments...")
-                                do {
-                                    result = try await tool.execute(arguments: ["path": correction.path, "old_text": correction.oldText, "new_text": correction.newText])
-                                } catch {
-                                    result = .error("Tool execution failed after semantic correction: \(error.localizedDescription)")
-                                }
-                            }
+                    if let blockedPath = blockedRepeatedReadPath {
+                        result = .error("Detected repeated read loop for '\(blockedPath)'. Stop re-reading the same file and use the existing tool output in history.")
+                        if let normalizedPath = blockedRepeatedReadNormalizedPath,
+                           !readLoopSteeredPaths.contains(normalizedPath) {
+                            readLoopSteeredPaths.insert(normalizedPath)
+                            steeringQueue.append("You are repeatedly calling read_file for '\(blockedPath)'. Reuse prior read output from history, or read a different file/line range only if needed.")
                         }
                     } else {
-                        result = .error("Unknown tool: \(call.name)")
+                        // Apply automatic parameter correction before execution
+                        let correctionResult = await ParameterCorrectionService.correct(
+                            toolName: call.name,
+                            arguments: call.arguments,
+                            workspaceRoot: workspace
+                        )
+                        
+                        // Log corrections if any were made
+                        if correctionResult.wasCorrected {
+                            for correction in correctionResult.corrections {
+                                renderer.printStatus("[auto-correct] \(call.name): \(correction)")
+                            }
+                            await auditLogger?.logParameterCorrection(
+                                toolName: call.name,
+                                originalArgumentsJSON: serializedArgumentsPreview(call.arguments),
+                                correctedArgumentsJSON: serializedArgumentsPreview(correctionResult.correctedArguments),
+                                corrections: correctionResult.corrections
+                            )
+                        }
+
+                        let resolvedTool = await registry.tool(named: call.name)
+                        let missingRequiredArgs = Self.missingRequiredArgumentNames(
+                            required: resolvedTool?.parameters.required,
+                            arguments: correctionResult.correctedArguments
+                        )
+                        if !missingRequiredArgs.isEmpty {
+                            let joined = missingRequiredArgs.joined(separator: ", ")
+                            result = .error("Missing required argument(s) for \(call.name): \(joined)")
+                            steeringQueue.append("Your last \(call.name) call was invalid. Include required argument(s): \(joined).")
+                        } else if isDestructive && dryRun {
+                            result = .success("Dry-run mode: skipped execution of destructive tool '\(call.name)'. Arguments: \(correctionResult.correctedArguments)")
+                        } else if let tool = resolvedTool {
+                            let showToolSpinner = (call.name == "web_search" || call.name == "web_fetch")
+                            let toolSpinner = Spinner(message: "Executing \(call.name)...")
+                            if showToolSpinner {
+                                await toolSpinner.start()
+                            }
+                            defer {
+                                if showToolSpinner {
+                                    Task { await toolSpinner.stop(clearLine: true) }
+                                }
+                            }
+
+                            // Reuse preserved new_text from a previous failed streamed edit_file
+                            // so the LLM doesn't waste tokens regenerating unchanged content.
+                            var executionArguments = correctionResult.correctedArguments
+                            if call.name == "edit_file",
+                               let path = executionArguments["path"] as? String,
+                               let tmpURL = preservedEditTmpFiles[path],
+                               let savedNewText = try? String(contentsOf: tmpURL, encoding: .utf8) {
+                                executionArguments["new_text"] = savedNewText
+                                preservedEditTmpFiles.removeValue(forKey: path)
+                                try? FileManager.default.removeItem(at: tmpURL)
+                                renderer.printStatus("[auto-correct] edit_file: reusing preserved new_text for \(path)")
+                            }
+
+                            // [String: Any] is not Sendable; take an explicit unsafe snapshot
+                            // before crossing isolation boundaries into tool execution.
+                            nonisolated(unsafe) let isolatedExecutionArguments = executionArguments
+
+                            do {
+                                if let progressTool = tool as? ProgressReportingTool {
+                                    result = try await progressTool.execute(arguments: isolatedExecutionArguments) { phase in
+                                        if showToolSpinner {
+                                            Task { await toolSpinner.updateMessage("\(call.name): \(phase)") }
+                                        }
+                                    }
+                                } else {
+                                    result = try await tool.execute(arguments: isolatedExecutionArguments)
+                                }
+                            } catch {
+                                result = .error("Tool execution failed: \(error.localizedDescription)")
+                            }
+
+                            // Semantic correction: if edit_file failed due to old_text mismatch, use LLM to fix it
+                            if result.isError && call.name == "edit_file" {
+                                let currentArgs = executionArguments
+                                let currentResult = result
+                                if let correction = await attemptSemanticCorrection(
+                                    toolName: call.name,
+                                    arguments: currentArgs,
+                                    errorResult: currentResult
+                                ) {
+                                    renderer.printStatus("[auto-correct] Retrying with corrected arguments...")
+                                    do {
+                                        result = try await tool.execute(arguments: ["path": correction.path, "old_text": correction.oldText, "new_text": correction.newText])
+                                    } catch {
+                                        result = .error("Tool execution failed after semantic correction: \(error.localizedDescription)")
+                                    }
+                                }
+                            }
+                        } else {
+                            result = .error("Unknown tool: \(call.name)")
+                        }
                     }
                 } else {
                     if let suggestion = approval.suggestion {
@@ -1453,6 +1514,61 @@ public actor AgentLoop {
         return lookup
     }
 
+    private static let repeatedReadFileStreakLimit = 2
+
+    static func evaluateReadFileLoop(
+        callName: String,
+        arguments: [String: Any],
+        previousSignature: String?,
+        previousStreak: Int,
+        limit: Int = AgentLoop.repeatedReadFileStreakLimit
+    ) -> (nextSignature: String?, nextStreak: Int, shouldBlock: Bool, normalizedPath: String?, rawPath: String?) {
+        guard callName == "read_file" else {
+            return (nil, 0, false, nil, nil)
+        }
+
+        let rawPath = ((arguments["path"] as? String) ?? (arguments["file_path"] as? String) ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !rawPath.isEmpty else {
+            return (nil, 0, false, nil, nil)
+        }
+
+        let normalizedPath = NSString(string: rawPath).standardizingPath
+        let startLineSignature = Self.readFileLoopSignatureValue(arguments["start_line"])
+        let endLineSignature = Self.readFileLoopSignatureValue(arguments["end_line"])
+        let currentSignature = "\(normalizedPath)|start:\(startLineSignature)|end:\(endLineSignature)"
+        let nextStreak = (currentSignature == previousSignature) ? (previousStreak + 1) : 1
+        let shouldBlock = nextStreak > limit
+        return (currentSignature, nextStreak, shouldBlock, normalizedPath, rawPath)
+    }
+
+    private static func readFileLoopSignatureValue(_ value: Any?) -> String {
+        switch value {
+        case let stringValue as String:
+            return stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        case let intValue as Int:
+            return String(intValue)
+        case nil:
+            return "nil"
+        default:
+            return String(describing: value!)
+        }
+    }
+
+    static func missingRequiredArgumentNames(required: [String]?, arguments: [String: Any]) -> [String] {
+        guard let required, !required.isEmpty else { return [] }
+        return required.filter { key in
+            guard let value = arguments[key] else { return true }
+            if let stringValue = value as? String {
+                return stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            }
+            if let arrayValue = value as? [Any] {
+                return arrayValue.isEmpty
+            }
+            return false
+        }
+    }
+
     private func applyDeterministicContextCompactionIfNeeded(reason: String) async {
         let threshold = max(currentGenerationConfig.longContextThreshold, contextReserveTokens + 1)
         let target = max(256, threshold - contextReserveTokens)
@@ -2379,26 +2495,69 @@ public actor AgentLoop {
 
             case "edit_file":
                 // For edit_file, the tmp contains new_text; we need old_text from otherArgs
-                guard originalContent != nil else {
-                    try? FileManager.default.removeItem(at: call.contentFile)
-                    return .error("File not found: \(call.path)")
+                guard let fileContent = originalContent else {
+                    // Path not found — preserve new_text so the LLM only needs to fix the path.
+                    preservedEditTmpFiles[call.path] = call.contentFile
+                    return .error("File not found: \(call.path). new_text is preserved and will be reused automatically; only correct the path.")
                 }
-                guard let oldText = call.otherArgs["old_text"] as? String else {
+
+                // Streamed calls bypass normal execution-time correction, so run the same
+                // deterministic correction pipeline here for aliases and fuzzy old_text fixes.
+                var streamedArguments = call.otherArgs
+                streamedArguments["path"] = call.path
+                streamedArguments["new_text"] = tmpContent
+                let correctionResult = await ParameterCorrectionService.correct(
+                    toolName: "edit_file",
+                    arguments: streamedArguments,
+                    workspaceRoot: workspace
+                )
+                if correctionResult.wasCorrected {
+                    for correction in correctionResult.corrections {
+                        renderer.printStatus("[auto-correct] edit_file (streamed): \(correction)")
+                    }
+                }
+
+                guard let oldText = correctionResult.correctedArguments["old_text"] as? String,
+                      !oldText.isEmpty else {
                     try? FileManager.default.removeItem(at: call.contentFile)
                     return .error("Missing old_text for edit_file")
                 }
-                var content = originalContent!
-                let occurrences = content.components(separatedBy: oldText).count - 1
-                guard occurrences == 1 else {
-                    try? FileManager.default.removeItem(at: call.contentFile)
+                let occurrences = fileContent.components(separatedBy: oldText).count - 1
+                if occurrences != 1 {
                     if occurrences == 0 {
-                        return .error("old_text not found in \(call.path)")
+                        // Try semantic correction before giving up, passing tmpContent as new_text.
+                        let fakeArgs: [String: Any] = ["path": call.path, "old_text": oldText, "new_text": tmpContent]
+                        let fakeError = ToolResult.error("old_text not found in \(call.path). Make sure the text matches exactly.")
+                        if let correction = await attemptSemanticCorrection(toolName: "edit_file", arguments: fakeArgs, errorResult: fakeError) {
+                            renderer.printStatus("[auto-correct] Retrying streamed edit_file with corrected old_text...")
+                            let corrected = fileContent.replacingOccurrences(of: correction.oldText, with: tmpContent)
+                            do {
+                                try corrected.write(toFile: resolvedPath, atomically: true, encoding: .utf8)
+                                try? FileManager.default.removeItem(at: call.contentFile)
+                                return .success("Applied edit to \(call.path) (old_text auto-corrected)")
+                            } catch {
+                                // Write failed even after correction — preserve tmp.
+                                preservedEditTmpFiles[call.path] = call.contentFile
+                                return .error("Failed to write \(call.path) after auto-correction: \(error.localizedDescription). new_text is preserved and will be reused automatically.")
+                            }
+                        }
+                        // Semantic correction unavailable or unsuccessful — preserve tmp.
+                        preservedEditTmpFiles[call.path] = call.contentFile
+                        return .error("old_text not found in \(call.path). Make sure the text matches exactly, including whitespace. new_text is preserved and will be reused automatically; only correct old_text.")
                     } else {
-                        return .error("old_text found \(occurrences) times in \(call.path). Must be unique.")
+                        // Duplicate match — preserve tmp and ask for more context.
+                        preservedEditTmpFiles[call.path] = call.contentFile
+                        return .error("old_text found \(occurrences) times in \(call.path). Must be unique — add more surrounding context to old_text. new_text is preserved and will be reused automatically.")
                     }
                 }
-                content = content.replacingOccurrences(of: oldText, with: tmpContent)
-                try content.write(toFile: resolvedPath, atomically: true, encoding: .utf8)
+                let updatedContent = fileContent.replacingOccurrences(of: oldText, with: tmpContent)
+                do {
+                    try updatedContent.write(toFile: resolvedPath, atomically: true, encoding: .utf8)
+                } catch {
+                    // Write failed — preserve tmp for retry.
+                    preservedEditTmpFiles[call.path] = call.contentFile
+                    return .error("Failed to write \(call.path): \(error.localizedDescription). new_text is preserved and will be reused automatically; only correct the path or permissions.")
+                }
                 try? FileManager.default.removeItem(at: call.contentFile)
                 return .success("Applied edit to \(call.path)")
 
