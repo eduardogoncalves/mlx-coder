@@ -44,12 +44,15 @@ public struct TQCodebook: Sendable {
     // MARK: - Beta PDF
 
     /// Evaluate the marginal density of a single component of a unit vector on S^{d-1}.
-    static func betaPDF(_ x: Float, d: Int) -> Float {
-        let df = Double(d)
-        let logConst = lgamma(df / 2.0) - 0.5 * Darwin.log(Double.pi) - lgamma((df - 1.0) / 2.0)
+    static func betaPDF(_ x: Float, d: Int, logConst: Double) -> Float {
         let xd = Double(x)
         let safe = Swift.max(1.0 - xd * xd, 1e-30)
-        return Float(Darwin.exp(logConst + (df - 3.0) / 2.0 * Darwin.log(safe)))
+        return Float(Darwin.exp(logConst + (Double(d) - 3.0) / 2.0 * Darwin.log(safe)))
+    }
+
+    static func betaLogConst(d: Int) -> Double {
+        let df = Double(d)
+        return lgamma(df / 2.0) - 0.5 * Darwin.log(Double.pi) - lgamma((df - 1.0) / 2.0)
     }
 
     // MARK: - Trapezoidal Integration
@@ -87,7 +90,8 @@ public struct TQCodebook: Sendable {
             grid[i] = -1.0 + 2.0 * Float(i) / Float(nGrid - 1)
         }
 
-        var pdf = grid.map { betaPDF($0, d: dim) }
+        let logConst = betaLogConst(d: dim)
+        var pdf = grid.map { betaPDF($0, d: dim, logConst: logConst) }
         let totalMass = trapezoid(pdf, grid)
         if totalMass > 0 {
             for i in 0..<pdf.count { pdf[i] /= totalMass }

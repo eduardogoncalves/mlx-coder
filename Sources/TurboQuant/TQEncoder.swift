@@ -74,6 +74,8 @@ public struct TQEncoder: Sendable {
         public let valueCodebook: [Float]
         public let valueIndexBits: Int
         public let qjlS: MLXArray
+        /// Precomputed QJL decode scale: sqrt(π/2) / dim
+        public let qjlDecodeScale: Float
 
         public init(dim: Int, keyBits: Int = 3, valueBits: Int = 3, seed: Int = 42) {
             self.dim = dim
@@ -91,6 +93,7 @@ public struct TQEncoder: Sendable {
             self.valueIndexBits = valueBits
 
             self.qjlS = TQQJL.generateProjection(dim: dim, seed: seed + 1000)
+            self.qjlDecodeScale = Float(Foundation.sqrt(Double.pi / 2.0)) / Float(dim)
         }
     }
 
@@ -173,8 +176,7 @@ public struct TQEncoder: Sendable {
         let mseDequant = TQCodebook.dequantizeScalar(flatIndices, codebook: state.keyCodebook)
 
         // QJL correction: r_hat = sqrt(pi/2) / d * ||r|| * (signs @ S)
-        let qjlScale = Float(Foundation.sqrt(Double.pi / 2.0)) / Float(dim)
-        let qjlDequant = MLXArray(qjlScale) * flatResNorms * matmul(flatQJL, state.qjlS)
+        let qjlDequant = MLXArray(state.qjlDecodeScale) * flatResNorms * matmul(flatQJL, state.qjlS)
 
         let reconstructedRotated = (mseDequant + qjlDequant).reshaped(origShape)
         let reconstructedUnit = TQHadamard.hadamardInverse(

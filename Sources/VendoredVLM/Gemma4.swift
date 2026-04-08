@@ -485,7 +485,7 @@ private final class Gemma4TextMLP: Module, UnaryLayer {
         // Upcast to bfloat16 for the gate × up product when running float16 weights.
         // Float16 loses precision in the elementwise product, accumulating
         // noticeably in deep FFN layers of quantized or float16 models.
-        let product = g.dtype == .float16
+        let product = (g.dtype == .float16 || u.dtype == .float16)
             ? g.asType(.bfloat16) * u.asType(.bfloat16)
             : g * u
         return downProj(product)
