@@ -807,7 +807,22 @@ struct RunCommand: AsyncParsableCommand {
         if !parsedPrompt.imageURLs.isEmpty {
             renderer.printStatus("Attaching \(parsedPrompt.imageURLs.count) image(s): \(parsedPrompt.imageURLs.map(\.lastPathComponent).joined(separator: ", "))")
         }
-        try await agentLoop.processUserMessage(parsedPrompt.cleanedPrompt, images: parsedPrompt.imageURLs)
+        renderer.printStatus("Generation active. Press Esc or Ctrl+C to cancel.")
+        let runTask = Task {
+            try await agentLoop.processUserMessage(parsedPrompt.cleanedPrompt, images: parsedPrompt.imageURLs)
+        }
+        await CancelController.shared.setTask(runTask, forceExitOnEscape: true)
+        do {
+            try await runTask.value
+            await CancelController.shared.setTask(nil)
+        } catch is CancellationError {
+            await CancelController.shared.setTask(nil)
+            renderer.printError("Generation cancelled by user.")
+            return
+        } catch {
+            await CancelController.shared.setTask(nil)
+            throw error
+        }
 
         if let output = saveHistory?.trimmingCharacters(in: .whitespacesAndNewlines), !output.isEmpty {
             _ = try await agentLoop.exportHistory(to: output)

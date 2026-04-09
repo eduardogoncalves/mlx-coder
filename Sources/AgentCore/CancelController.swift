@@ -10,33 +10,35 @@ public actor CancelController {
     // Stores a cancellation closure for the current async operation.
     private var cancelCurrentTask: (@Sendable () -> Void)?
     private var listeningTask: Task<Void, Never>?
+    private var forceExitOnEscape = false
     
     private init() {}
     
     /// Set the current operation task and start listening for ESC/Ctrl+C.
-    public func setTask(_ task: Task<Void, Error>?) async {
+    public func setTask(_ task: Task<Void, Error>?, forceExitOnEscape: Bool = false) async {
         let canceler: (@Sendable () -> Void)?
         if let task {
             canceler = { task.cancel() }
         } else {
             canceler = nil
         }
-        await updateTrackedCancellation(canceler)
+        await updateTrackedCancellation(canceler, forceExitOnEscape: forceExitOnEscape)
     }
 
     /// Set any typed task as the current cancellable operation.
-    public func setTask<T>(_ task: Task<T, Error>?) async {
+    public func setTask<T>(_ task: Task<T, Error>?, forceExitOnEscape: Bool = false) async {
         let canceler: (@Sendable () -> Void)?
         if let task {
             canceler = { task.cancel() }
         } else {
             canceler = nil
         }
-        await updateTrackedCancellation(canceler)
+        await updateTrackedCancellation(canceler, forceExitOnEscape: forceExitOnEscape)
     }
 
-    private func updateTrackedCancellation(_ canceler: (@Sendable () -> Void)?) async {
+    private func updateTrackedCancellation(_ canceler: (@Sendable () -> Void)?, forceExitOnEscape: Bool) async {
         self.cancelCurrentTask = canceler
+        self.forceExitOnEscape = (canceler != nil) ? forceExitOnEscape : false
 
         // Always cancel any previous listener first.
         // When starting a new task, do not block listener startup on teardown;
@@ -105,7 +107,13 @@ public actor CancelController {
                         // Consume only the ESC sequence tail so the next prompt can keep
                         // legitimate follow-up keypresses (e.g. quick numeric selections).
                         _ = TerminalKeyParser.readEscapeSequence(initialTimeoutMs: 10, extendedTimeoutMs: 40)
+                        let shouldForceExit = await self.forceExitOnEscape
                         await self.cancel()
+                        if shouldForceExit {
+                            print("\nInterrupted by Esc. Exiting...")
+                            fflush(stdout)
+                            exit(130)
+                        }
                         break
                     } else if byte == 3 { // Ctrl+C
                         // User wants 'Esc' for cancellation, so Ctrl+C should exit the app
