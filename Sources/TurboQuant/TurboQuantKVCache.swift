@@ -53,7 +53,10 @@ public enum TQPhase: Sendable {
 ///
 /// For b=3 bits at head_dim=128: ~4.9× compression over float16.
 /// Enables multi-turn sessions at 4× longer context for the same VRAM.
-public final class TurboQuantKVCache: BaseKVCache, @unchecked Sendable {
+public final class TurboQuantKVCache: KVCache, @unchecked Sendable {
+
+    public private(set) var offset: Int = 0
+    public var maxSize: Int? { nil }
 
     public private(set) var phase: TQPhase = .fill
 
@@ -116,7 +119,6 @@ public final class TurboQuantKVCache: BaseKVCache, @unchecked Sendable {
         self.valueBits = valueBits
         self.sinkTokens = sinkTokens
         self.minTokensForAutoCompress = minTokensForAutoCompress
-        super.init()
     }
 
     // MARK: - Create from KVCacheSimple
@@ -193,7 +195,7 @@ public final class TurboQuantKVCache: BaseKVCache, @unchecked Sendable {
 
     // MARK: - KVCache Protocol
 
-    public override func update(keys: MLXArray, values: MLXArray) -> (MLXArray, MLXArray) {
+    public func update(keys: MLXArray, values: MLXArray) -> (MLXArray, MLXArray) {
         switch phase {
         case .fill:
             return appendFloat(keys: keys, values: values)
@@ -276,7 +278,7 @@ public final class TurboQuantKVCache: BaseKVCache, @unchecked Sendable {
 
     // MARK: - State
 
-    public override var state: [MLXArray] {
+    public var state: [MLXArray] {
         get {
             switch phase {
             case .fill:
@@ -312,17 +314,17 @@ public final class TurboQuantKVCache: BaseKVCache, @unchecked Sendable {
         }
     }
 
-    public override var metaState: [String] {
+    public var metaState: [String] {
         get { [""] }
         set { }
     }
 
     // MARK: - Trim
 
-    public override var isTrimmable: Bool { true }
+    public var isTrimmable: Bool { true }
 
     @discardableResult
-    public override func trim(_ n: Int) -> Int {
+    public func trim(_ n: Int) -> Int {
         let trimmed = min(offset, n)
         guard trimmed > 0 else { return 0 }
 
@@ -368,7 +370,7 @@ public final class TurboQuantKVCache: BaseKVCache, @unchecked Sendable {
 
     // MARK: - Copy
 
-    public override func copy() -> any KVCache {
+    public func copy() -> any KVCache {
         let new = TurboQuantKVCache(
             keyBits: keyBits, valueBits: valueBits, sinkTokens: sinkTokens,
             minTokensForAutoCompress: minTokensForAutoCompress)
@@ -407,6 +409,37 @@ public final class TurboQuantKVCache: BaseKVCache, @unchecked Sendable {
         prefixTokenCount = 0
         offset = 0
         encoderState = nil
+    }
+
+    public func innerState() -> [MLXArray] {
+        switch phase {
+        case .fill:
+            var arrays: [MLXArray] = []
+            if let floatKeys { arrays.append(floatKeys) }
+            if let floatValues { arrays.append(floatValues) }
+            return arrays
+        case .compressed:
+            var arrays: [MLXArray] = []
+            if let unifiedKeys { arrays.append(unifiedKeys) }
+            if let unifiedValues { arrays.append(unifiedValues) }
+            return arrays
+        }
+    }
+
+    public func makeMask(
+        n: Int,
+        windowSize: Int?,
+        returnArray: Bool
+    ) -> MLXFast.ScaledDotProductAttentionMaskMode {
+        if n == 1 {
+            return .none
+        }
+
+        if returnArray || (windowSize != nil && n > windowSize!) {
+            return .array(createCausalMask(n: n, offset: offset, windowSize: windowSize))
+        }
+
+        return .causal
     }
 }
 

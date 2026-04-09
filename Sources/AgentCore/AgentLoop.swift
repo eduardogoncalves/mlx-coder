@@ -1418,16 +1418,33 @@ public actor AgentLoop {
         """
 
         let modelContainer = try requireLoadedModelContainer()
-        let shouldUseProcessorPath = await modelContainer.isVLM
+        let isVLM = await modelContainer.isVLM
+        let shouldUseProcessorPath = isVLM
         let extracted = try await modelContainer.perform { [shouldUseProcessorPath] context in
             if Task.isCancelled { throw CancellationError() }
 
             let input: LMInput
             if shouldUseProcessorPath {
                 let userInput = UserInput(chat: [.system(systemPrompt), .user(userPrompt)])
-                input = try await context.processor.prepare(input: userInput)
+                let prepared = try await context.processor.prepare(input: userInput)
+                if prepared.text.tokens.size > 0 {
+                    input = prepared
+                } else {
+                    let tokens = try AgentLoop.encodeNonEmptyTokens(
+                        primaryText: chatML,
+                        fallbackTexts: [userPrompt, "hi", "a"],
+                        using: context.tokenizer.encode(text:)
+                    )
+                    let tokenArray = MLXArray(tokens).expandedDimensions(axis: 0)
+                    let mask = ones(like: tokenArray).asType(.int8)
+                    input = LMInput(text: .init(tokens: tokenArray, mask: mask), image: nil)
+                }
             } else {
-                let tokens = context.tokenizer.encode(text: chatML)
+                let tokens = try AgentLoop.encodeNonEmptyTokens(
+                    primaryText: chatML,
+                    fallbackTexts: [userPrompt, "hi", "a"],
+                    using: context.tokenizer.encode(text:)
+                )
                 let tokenArray = MLXArray(tokens).expandedDimensions(axis: 0)
                 let mask = ones(like: tokenArray).asType(.int8)
                 input = LMInput(text: .init(tokens: tokenArray, mask: mask), image: nil)
@@ -1627,7 +1644,7 @@ public actor AgentLoop {
 
         let isGemma4Model = modelPath.lowercased().contains("gemma-4")
         // Use the model container to prepare input and generate.
-        // Fetch it here so we can query isVLM for the processor-path decision.
+        // Only image turns need the processor path; plain text stays on the direct ChatML path.
         let modelContainer = try requireLoadedModelContainer()
         let isVLM = await modelContainer.isVLM
         let shouldUseProcessorPath = !imageURLs.isEmpty || isVLM
@@ -1673,9 +1690,31 @@ public actor AgentLoop {
                     }
                 }
                 let userInput = UserInput(chat: chatMessages)
-                input = try await context.processor.prepare(input: userInput)
+                let prepared = try await context.processor.prepare(input: userInput)
+                if prepared.text.tokens.size > 0 {
+                    input = prepared
+                } else if imageURLs.isEmpty {
+                    let tokens = try AgentLoop.encodeNonEmptyTokens(
+                        primaryText: chatML,
+                        fallbackTexts: ["hi", "a"],
+                        using: tokenizer.encode(text:)
+                    )
+                    let tokenArray = MLXArray(tokens).expandedDimensions(axis: 0)
+                    let mask = ones(like: tokenArray).asType(.int8)
+                    input = LMInput(text: .init(tokens: tokenArray, mask: mask), image: nil)
+                } else {
+                    throw NSError(
+                        domain: "AgentLoop",
+                        code: 5,
+                        userInfo: [NSLocalizedDescriptionKey: "Processor produced empty prompt tokens for an image input."]
+                    )
+                }
             } else {
-                let tokens = tokenizer.encode(text: chatML)
+                let tokens = try AgentLoop.encodeNonEmptyTokens(
+                    primaryText: chatML,
+                    fallbackTexts: ["hi", "a"],
+                    using: tokenizer.encode(text:)
+                )
                 let tokenArray = MLXArray(tokens).expandedDimensions(axis: 0)
                 let mask = ones(like: tokenArray).asType(.int8)
                 input = LMInput(text: .init(tokens: tokenArray, mask: mask), image: nil)
@@ -1871,6 +1910,33 @@ public actor AgentLoop {
             )
         }
         return modelContainer
+    }
+
+    private static func encodeNonEmptyTokens(
+        primaryText: String,
+        fallbackTexts: [String],
+        using encode: (String) -> [Int]
+    ) throws -> [Int] {
+        let primaryTokens = encode(primaryText)
+        if !primaryTokens.isEmpty {
+            return primaryTokens
+        }
+
+        for fallback in fallbackTexts {
+            let candidate = encode(fallback)
+            if !candidate.isEmpty {
+                return candidate
+            }
+        }
+
+        throw NSError(
+            domain: "AgentLoop",
+            code: 4,
+            userInfo: [
+                NSLocalizedDescriptionKey:
+                    "Tokenizer produced an empty token sequence for all fallback prompts."
+            ]
+        )
     }
 
     /// Prompt the user to approve a tool call using raw terminal mode.
@@ -2366,7 +2432,11 @@ public actor AgentLoop {
             let correctedOldText = try await modelContainer.perform { context in
                 if Task.isCancelled { throw CancellationError() }
                 let tokenizer = context.tokenizer
-                let tokens = tokenizer.encode(text: correctionPrompt)
+                let tokens = try AgentLoop.encodeNonEmptyTokens(
+                    primaryText: correctionPrompt,
+                    fallbackTexts: ["a"],
+                    using: tokenizer.encode(text:)
+                )
                 let inputTokens = MLXArray(tokens)
                 let input = MLXLMCommon.LMInput(tokens: inputTokens)
 
