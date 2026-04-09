@@ -5,6 +5,10 @@
 //   - Added `import Tokenizers` (needed when compiled as a separate module with explicit imports).
 //   - Changed `initializeRope(...)` → `gemma4InitializeRope(...)` to support
 //     the "proportional" RoPE type not yet in mlx-swift-lm 2.31.3.
+//   - compiledLogitSoftcap: fused compile() kernel replacing inline tanh(x/cap)*cap
+//     to avoid repeated intermediate tensor allocation on every forward pass.
+//   - Gemma4TextMLP: bfloat16 intermediate product avoids float16 precision loss
+//     in gate × up multiplication for 4-bit and float16 quantized models.
 
 import CoreImage
 import Foundation
@@ -15,6 +19,16 @@ import MLXVLM
 import Tokenizers
 
 // Based on https://github.com/Blaizzy/mlx-vlm/tree/main/mlx_vlm/models/gemma4
+
+/// Fused logit soft-capping kernel: tanh(x / cap) * cap.
+///
+/// Using `compile(shapeless: true)` traces once and reuses the compiled graph for
+/// any input shape, avoiding repeated intermediate tensor allocation and kernel
+/// launches on every forward pass.
+private let compiledLogitSoftcap: @Sendable (MLXArray, MLXArray) -> MLXArray =
+    compile(shapeless: true) { (x: MLXArray, cap: MLXArray) -> MLXArray in
+        tanh(x / cap) * cap
+    }
 
 private enum Gemma4Error: LocalizedError {
     case imageTokenCountMismatch(expectedVisionTokens: Int, actualPromptTokens: Int)
@@ -466,7 +480,15 @@ private final class Gemma4TextMLP: Module, UnaryLayer {
     }
 
     func callAsFunction(_ x: MLXArray) -> MLXArray {
-        downProj(geluApproximate(gateProj(x)) * upProj(x))
+        let g = geluApproximate(gateProj(x))
+        let u = upProj(x)
+        // Upcast to bfloat16 for the gate × up product when running float16 weights.
+        // Float16 loses precision in the elementwise product, accumulating
+        // noticeably in deep FFN layers of quantized or float16 models.
+        let product = (g.dtype == .float16 || u.dtype == .float16)
+            ? g.asType(.bfloat16) * u.asType(.bfloat16)
+            : g * u
+        return downProj(product)
     }
 }
 
@@ -1099,8 +1121,7 @@ private final class Gemma4TextLanguageModel: Module, KVCacheDimensionProvider {
             logits = model.embedTokens.asLinear(output)
         }
         if let finalLogitSoftcapping, finalLogitSoftcapping > 0 {
-            let scale = MLXArray(finalLogitSoftcapping)
-            return LMOutput(logits: tanh(logits / scale) * scale)
+            return LMOutput(logits: compiledLogitSoftcap(logits, MLXArray(finalLogitSoftcapping)))
         }
         return LMOutput(logits: logits)
     }

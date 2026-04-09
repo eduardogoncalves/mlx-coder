@@ -22,6 +22,7 @@ CLI_NAME="mlx-coder"
 RELEASE_DIR="releases"
 WORK_DIR=".build/release"
 BUILD_DIR_ARM64=".build/xcode-arm64"
+PACKAGE_CHECKOUTS_DIR=".build/package-checkouts"
 
 ARTIFACT_BASE="${APP_NAME}-${VERSION}-${ARCH}"
 CLI_STAGING_DIR="${WORK_DIR}/cli"
@@ -69,8 +70,8 @@ require_tools() {
 }
 
 patch_mlx_swift_lm_for_swift6() {
-    local derived_data="$1"
-    local target_file="${derived_data}/SourcePackages/checkouts/mlx-swift-lm/Libraries/MLXVLM/MediaProcessing.swift"
+    local cloned_packages_dir="$1"
+    local target_file="${cloned_packages_dir}/checkouts/mlx-swift-lm/Libraries/MLXVLM/MediaProcessing.swift"
 
     [[ -f "$target_file" ]] || fail "mlx-swift-lm source not found for patching: ${target_file}"
 
@@ -95,6 +96,8 @@ build_arch() {
 
     log "Building ${APP_NAME} for ${target_arch}"
     rm -rf "$derived_data"
+    rm -rf "$PACKAGE_CHECKOUTS_DIR"
+    mkdir -p "$PACKAGE_CHECKOUTS_DIR"
 
     log "Resolving Swift package dependencies"
     if ! xcodebuild \
@@ -102,17 +105,21 @@ build_arch() {
         -configuration Release \
         -destination "platform=macOS,arch=${target_arch}" \
         -derivedDataPath "$derived_data" \
+        -clonedSourcePackagesDirPath "$PACKAGE_CHECKOUTS_DIR" \
         -resolvePackageDependencies >&2; then
         fail "xcodebuild failed while resolving package dependencies for architecture ${target_arch}"
     fi
 
-    patch_mlx_swift_lm_for_swift6 "$derived_data"
+    patch_mlx_swift_lm_for_swift6 "$PACKAGE_CHECKOUTS_DIR"
 
     if ! xcodebuild \
         -scheme "$SCHEME_NAME" \
         -configuration Release \
         -destination "platform=macOS,arch=${target_arch}" \
         -derivedDataPath "$derived_data" \
+        -clonedSourcePackagesDirPath "$PACKAGE_CHECKOUTS_DIR" \
+        -disableAutomaticPackageResolution \
+        -onlyUsePackageVersionsFromResolvedFile \
         build >&2; then
         fail "xcodebuild failed for architecture ${target_arch}"
     fi
