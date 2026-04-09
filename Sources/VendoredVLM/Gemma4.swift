@@ -1793,6 +1793,17 @@ public struct Gemma4Processor: UserInputProcessor {
             messages: messages, tools: input.tools,
             additionalContext: input.additionalContext)
 
+        if promptTokens.isEmpty {
+            promptTokens = tokenizer.encode(text: "hi")
+        }
+        if promptTokens.isEmpty {
+            throw NSError(
+                domain: "Gemma4Processor",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "Tokenizer produced empty prompt tokens."]
+            )
+        }
+
         var processedImage: LMInput.ProcessedImage?
         if !input.images.isEmpty {
             let imagePixelsAndFrames = try input.images.map {

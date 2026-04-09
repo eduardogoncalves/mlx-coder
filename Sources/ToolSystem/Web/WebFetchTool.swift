@@ -253,7 +253,17 @@ extension WebFetchTool: ProgressReportingTool {
         // Perform generation
         let extractedText = try await container.perform { context in
             let chatML = "<|im_start|>system\nYou are a helpful AI.<|im_end|>\n<|im_start|>user\n\(prompt)<|im_end|>\n<|im_start|>assistant\n"
-            let tokens = context.tokenizer.encode(text: chatML)
+            var tokens = context.tokenizer.encode(text: chatML)
+            if tokens.isEmpty {
+                tokens = context.tokenizer.encode(text: "hi")
+            }
+            if tokens.isEmpty {
+                throw NSError(
+                    domain: "WebFetchTool",
+                    code: 1,
+                    userInfo: [NSLocalizedDescriptionKey: "Tokenizer produced an empty prompt for web extraction."]
+                )
+            }
             let inputTokens = MLXArray(tokens)
             let input = LMInput(tokens: inputTokens)
             

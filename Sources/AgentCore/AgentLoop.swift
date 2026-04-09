@@ -1418,8 +1418,9 @@ public actor AgentLoop {
         """
 
         let modelContainer = try requireLoadedModelContainer()
-        let isVLM = await modelContainer.isVLM
-        let shouldUseProcessorPath = isVLM
+        // Tool-output summarization is text-only; forcing processor.prepare for VLM
+        // checkpoints can produce empty prompts and crash in downstream reshape paths.
+        let shouldUseProcessorPath = false
         let extracted = try await modelContainer.perform { [shouldUseProcessorPath] context in
             if Task.isCancelled { throw CancellationError() }
 
@@ -1650,7 +1651,9 @@ public actor AgentLoop {
         // Some local checkpoints report VLM capability but ship without processor metadata.
         // In that case, forcing processor.prepare() on text-only turns can crash at runtime.
         let hasProcessorConfig = modelHasProcessorConfig(modelPath)
-        let shouldUseProcessorPath = !imageURLs.isEmpty || (isVLM && hasProcessorConfig)
+        // Use processor path only for image turns; text-only inputs bypass processor to avoid
+        // empty token crashes from VLM processor.prepare() on non-image prompts.
+        let shouldUseProcessorPath = !imageURLs.isEmpty && (isVLM && hasProcessorConfig)
         let enableThinking = thinkingLevel != .fast && !isGemma4Model
         let chatML = history.formatChatML(messages: transformedMessages, enableThinking: enableThinking)
 
