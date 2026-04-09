@@ -53,12 +53,6 @@ public final class ModelLoader: Sendable {
             MLX.Memory.cacheLimit = cacheLimit
         }
 
-        // Pre-flight check: Qwen3.5 models without processor config will crash at inference time.
-        // Fail early with helpful guidance instead of a cryptic fatal error later.
-        if usesLocalDirectory && isLikelyQwen35CheckpointMissingProcessor(modelURL) {
-            throw ModelLoaderError.unsupportedQwen35LocalCheckpoint(expandedPath)
-        }
-
         // ── Metal shader pre-warm ─────────────────────────────────────────────
         // When the binary is built with -DMLX_PREWARM_SHADERS (the release
         // script sets this flag) we force Metal to compile and cache all MLX
@@ -137,24 +131,6 @@ public final class ModelLoader: Sendable {
                 try? fileManager.removeItem(at: candidate)
             }
         }
-    }
-
-    private static func isLikelyQwen35CheckpointMissingProcessor(_ modelURL: URL) -> Bool {
-        let fm = FileManager.default
-        let configURL = modelURL.appendingPathComponent("config.json")
-        guard let data = try? Data(contentsOf: configURL),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let modelType = json["model_type"] as? String,
-              modelType == "qwen3_5" else {
-            return false
-        }
-
-        // VLM checkpoints are expected to carry processor metadata.
-        // Without it, MLX-Swift-LM attempts VLM initialization which crashes during
-        // rope-index computation (reshape failure on inconsistent token dimensions).
-        let hasProcessorConfig = fm.fileExists(atPath: modelURL.appendingPathComponent("processor_config.json").path)
-            || fm.fileExists(atPath: modelURL.appendingPathComponent("preprocessor_config.json").path)
-        return !hasProcessorConfig
     }
 
     // ── Metal shader pre-warm helper ──────────────────────────────────────────
@@ -327,25 +303,11 @@ private final class DownloadProgressTracker: @unchecked Sendable {
 
 public enum ModelLoaderError: LocalizedError {
     case modelDirectoryNotFound(String)
-    case unsupportedQwen35LocalCheckpoint(String)
 
     public var errorDescription: String? {
         switch self {
         case .modelDirectoryNotFound(let path):
             return "Model directory not found: \(path)"
-        case .unsupportedQwen35LocalCheckpoint(let path):
-            return """
-Unsupported local Qwen3.5 checkpoint: \(path)
-
-This checkpoint lacks processor metadata (processor_config.json/preprocessor_config.json) \
-that MLX-Swift-LM requires for Qwen3.5 models. Attempting to load it will crash during \
-inference with a reshape error.
-
-✓ To fix this, use one of:
-  • A text-only Qwen3.5 model: mlx-community/Qwen3.5-9B-MLX-4bit
-  • A full VLM checkpoint with processor metadata from Hugging Face
-  • Contact MLX-Swift-LM maintainers if your checkpoint should be supported
-"""
         }
     }
 }

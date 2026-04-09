@@ -1647,7 +1647,10 @@ public actor AgentLoop {
         // Only image turns need the processor path; plain text stays on the direct ChatML path.
         let modelContainer = try requireLoadedModelContainer()
         let isVLM = await modelContainer.isVLM
-        let shouldUseProcessorPath = !imageURLs.isEmpty || isVLM
+        // Some local checkpoints report VLM capability but ship without processor metadata.
+        // In that case, forcing processor.prepare() on text-only turns can crash at runtime.
+        let hasProcessorConfig = modelHasProcessorConfig(modelPath)
+        let shouldUseProcessorPath = !imageURLs.isEmpty || (isVLM && hasProcessorConfig)
         let enableThinking = thinkingLevel != .fast && !isGemma4Model
         let chatML = history.formatChatML(messages: transformedMessages, enableThinking: enableThinking)
 
@@ -1699,9 +1702,7 @@ public actor AgentLoop {
                         fallbackTexts: ["hi", "a"],
                         using: tokenizer.encode(text:)
                     )
-                    let tokenArray = MLXArray(tokens).expandedDimensions(axis: 0)
-                    let mask = ones(like: tokenArray).asType(.int8)
-                    input = LMInput(text: .init(tokens: tokenArray, mask: mask), image: nil)
+                    input = LMInput(tokens: MLXArray(tokens))
                 } else {
                     throw NSError(
                         domain: "AgentLoop",
@@ -1715,9 +1716,7 @@ public actor AgentLoop {
                     fallbackTexts: ["hi", "a"],
                     using: tokenizer.encode(text:)
                 )
-                let tokenArray = MLXArray(tokens).expandedDimensions(axis: 0)
-                let mask = ones(like: tokenArray).asType(.int8)
-                input = LMInput(text: .init(tokens: tokenArray, mask: mask), image: nil)
+                input = LMInput(tokens: MLXArray(tokens))
             }
 
             // Clean up stale .tmp files from previous crashed/interrupted sessions.
@@ -1910,6 +1909,20 @@ public actor AgentLoop {
             )
         }
         return modelContainer
+    }
+
+    private func modelHasProcessorConfig(_ path: String) -> Bool {
+        let expandedPath = NSString(string: path).expandingTildeInPath
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: expandedPath) else {
+            // Hub IDs are downloaded/resolved by MLX internals; keep existing behavior.
+            return true
+        }
+
+        let modelURL = URL(filePath: expandedPath)
+        let processorConfig = modelURL.appendingPathComponent("processor_config.json").path
+        let preprocessorConfig = modelURL.appendingPathComponent("preprocessor_config.json").path
+        return fm.fileExists(atPath: processorConfig) || fm.fileExists(atPath: preprocessorConfig)
     }
 
     private static func encodeNonEmptyTokens(
