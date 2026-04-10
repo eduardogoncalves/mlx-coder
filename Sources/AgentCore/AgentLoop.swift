@@ -1303,6 +1303,26 @@ public actor AgentLoop {
             charsPerToken: condensationConfig.charsPerTokenEstimate
         )
 
+        // Some checkpoints are unstable when invoked for secondary summarization
+        // passes after file-read tools. Use bounded raw fallback directly.
+        let nonLLMCondensationTools: Set<String> = ["read_file", "read_many"]
+        if nonLLMCondensationTools.contains(toolName) {
+            let fallback = ToolResultCondensationPolicy.boundedFallbackRawMessage(
+                toolName: toolName,
+                raw: rawToolResponse,
+                maxChars: condensationConfig.fallbackRawChars
+            )
+            let afterTokens = ToolResultCondensationPolicy.estimatedTokenCount(
+                for: fallback,
+                charsPerToken: condensationConfig.charsPerTokenEstimate
+            )
+            await hooks.emit(.compression(toolName: toolName, beforeTokens: beforeTokens, afterTokens: afterTokens, usedFallback: true))
+            if renderer.verbose {
+                renderer.printStatus("[debug] Tool result condensation used non-LLM fallback for \(toolName): before≈\(beforeTokens) tokens, after≈\(afterTokens), saved≈\(max(0, beforeTokens - afterTokens))")
+            }
+            return fallback
+        }
+
         do {
             let rawSummary = try await summarizeToolOutputEphemeral(
                 toolName: toolName,
@@ -1418,9 +1438,11 @@ public actor AgentLoop {
         """
 
         let modelContainer = try requireLoadedModelContainer()
-        // Tool-output summarization is text-only; forcing processor.prepare for VLM
-        // checkpoints can produce empty prompts and crash in downstream reshape paths.
-        let shouldUseProcessorPath = false
+        // Some VLM checkpoints require processor-driven prompt formatting even on
+        // text-only turns (e.g. summarization). Guard with processor-config presence
+        // so local checkpoints missing processor metadata still use direct tokenization.
+        let isVLM = await modelContainer.isVLM
+        let shouldUseProcessorPath = isVLM && modelHasProcessorConfig(modelPath)
         let extracted = try await modelContainer.perform { [shouldUseProcessorPath] context in
             if Task.isCancelled { throw CancellationError() }
 
@@ -1651,9 +1673,10 @@ public actor AgentLoop {
         // Some local checkpoints report VLM capability but ship without processor metadata.
         // In that case, forcing processor.prepare() on text-only turns can crash at runtime.
         let hasProcessorConfig = modelHasProcessorConfig(modelPath)
-        // Use processor path only for image turns; text-only inputs bypass processor to avoid
-        // empty token crashes from VLM processor.prepare() on non-image prompts.
-        let shouldUseProcessorPath = !imageURLs.isEmpty && (isVLM && hasProcessorConfig)
+        // Prefer processor path for VLM checkpoints with processor metadata, including
+        // text-only turns, because some VLM models require processor-formatted prompts.
+        // Checkpoints without processor config stay on direct tokenization.
+        let shouldUseProcessorPath = isVLM && hasProcessorConfig
         let enableThinking = thinkingLevel != .fast && !isGemma4Model
         let chatML = history.formatChatML(messages: transformedMessages, enableThinking: enableThinking)
 
@@ -1953,6 +1976,23 @@ public actor AgentLoop {
                     "Tokenizer produced an empty token sequence for all fallback prompts."
             ]
         )
+    }
+
+    private static func makeSafeTextLMInput(tokens: [Int]) throws -> LMInput {
+        guard !tokens.isEmpty else {
+            throw NSError(
+                domain: "AgentLoop",
+                code: 6,
+                userInfo: [
+                    NSLocalizedDescriptionKey:
+                        "Refusing to construct LMInput from an empty token sequence."
+                ]
+            )
+        }
+
+        let tokenArray = MLXArray(tokens).expandedDimensions(axis: 0)
+        let mask = ones(like: tokenArray).asType(.int8)
+        return LMInput(text: .init(tokens: tokenArray, mask: mask), image: nil)
     }
 
     /// Prompt the user to approve a tool call using raw terminal mode.
@@ -2453,8 +2493,7 @@ public actor AgentLoop {
                     fallbackTexts: ["a"],
                     using: tokenizer.encode(text:)
                 )
-                let inputTokens = MLXArray(tokens)
-                let input = MLXLMCommon.LMInput(tokens: inputTokens)
+                let input = try AgentLoop.makeSafeTextLMInput(tokens: tokens)
 
                 var responseText = ""
                 for try await item in try MLXLMCommon.generateTokens(
