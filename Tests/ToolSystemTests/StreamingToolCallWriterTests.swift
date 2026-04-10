@@ -54,6 +54,7 @@ final class StreamingToolCallWriterTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(collector.messages.count, 1)
         if collector.messages.count > 1 {
             XCTAssertTrue(collector.messages[1].hasPrefix("Writing to tmp file "))
+            XCTAssertTrue(collector.messages[1].contains("/"))
         }
 
         writer.cleanupAllTmpFiles()
