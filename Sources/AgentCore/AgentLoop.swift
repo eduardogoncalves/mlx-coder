@@ -424,6 +424,57 @@ public actor AgentLoop {
                 // Check builds if write/edit tools were executed in agent/coding mode
                 if fileModificationToolsExecuted && mode == .agent && taskType == .coding {
                     await performBuildCheckIfNeeded(modifiedPaths: modifiedFilePaths)
+                    if let manager = gitOrchestrationManager {
+                        do {
+                            let completionGuide = try await manager.onTaskComplete()
+                            renderer.printStatus(completionGuide.formattedMessage)
+
+                            if let interactiveInput = self.interactiveInput {
+                                print("")
+                                let mergeOptions = [
+                                    "Leave for later",
+                                    "Merge now (squash)",
+                                    "Merge now (merge commit)",
+                                    "Merge now (rebase)"
+                                ]
+                                if let selected = await interactiveInput.selectOption(
+                                    prompt: "Merge decision",
+                                    options: mergeOptions
+                                ) {
+                                    let outcome: MergeOutcome
+                                    switch selected {
+                                    case 1:
+                                        outcome = try await manager.finalizeAfterUserApproval(
+                                            mergeNow: true,
+                                            strategy: .squash,
+                                            cleanupWorktree: true
+                                        )
+                                    case 2:
+                                        outcome = try await manager.finalizeAfterUserApproval(
+                                            mergeNow: true,
+                                            strategy: .mergeCommit,
+                                            cleanupWorktree: true
+                                        )
+                                    case 3:
+                                        outcome = try await manager.finalizeAfterUserApproval(
+                                            mergeNow: true,
+                                            strategy: .rebase,
+                                            cleanupWorktree: true
+                                        )
+                                    default:
+                                        outcome = try await manager.finalizeAfterUserApproval(
+                                            mergeNow: false,
+                                            strategy: .squash,
+                                            cleanupWorktree: false
+                                        )
+                                    }
+                                    renderer.printStatus("✅ \(outcome.message)")
+                                }
+                            }
+                        } catch {
+                            renderer.printStatus("⚠️  Git completion flow failed: \(error.localizedDescription)")
+                        }
+                    }
                 }
                 
                 print() // newline after response

@@ -22,6 +22,9 @@ public enum GitError: LocalizedError, Sendable {
     case nothingToCommit
     case invalidCustomBranchName(String)
     case branchNameAlreadyExists(String)
+    case mergeFailed(reason: String)
+    case rebaseFailed(reason: String)
+    case cleanupFailed(reason: String)
 
     public var errorDescription: String? {
         switch self {
@@ -40,7 +43,7 @@ public enum GitError: LocalizedError, Sendable {
         case .pushFailed(let reason):
             return "Push failed: \(reason)"
         case .invalidBranchName(let name):
-            return "Invalid branch name: '\(name)'. Expected format: [feature|hotfix|chore]/YYYYMMDD-task-name"
+            return "Invalid branch name: '\(name)'. Expected format: [feature|fix|chore]/task-name"
         case .notOnCorrectBranch(let expected, let actual):
             return "Expected to be on branch '\(expected)' but currently on '\(actual)'"
         case .remoteNotConfigured:
@@ -61,6 +64,12 @@ public enum GitError: LocalizedError, Sendable {
             return "Invalid custom branch name: '\(name)'. Use letters, numbers, hyphens, underscores, or slashes."
         case .branchNameAlreadyExists(let name):
             return "Branch '\(name)' already exists. Choose a different name."
+        case .mergeFailed(let reason):
+            return "Merge failed: \(reason)"
+        case .rebaseFailed(let reason):
+            return "Rebase failed: \(reason)"
+        case .cleanupFailed(let reason):
+            return "Worktree cleanup failed: \(reason)"
         }
     }
 
