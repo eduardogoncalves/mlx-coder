@@ -41,7 +41,7 @@ public struct BashTool: Tool {
 
         let finalCommand: String
         if useSandbox {
-            finalCommand = sandboxEngine.wrap(command: command, workspaceRoot: permissions.workspaceRoot)
+            finalCommand = sandboxEngine.wrap(command: command, workspaceRoot: permissions.effectiveWorkspaceRoot)
         } else {
             finalCommand = command
         }
@@ -49,7 +49,7 @@ public struct BashTool: Tool {
         let process = Process()
         process.executableURL = URL(filePath: "/bin/zsh")
         process.arguments = ["-c", finalCommand]
-        process.currentDirectoryURL = URL(filePath: permissions.workspaceRoot)
+        process.currentDirectoryURL = URL(filePath: permissions.effectiveWorkspaceRoot)
 
         // Set up environment with whitelisted variables only
         // Security: Don't inherit parent environment which may contain dangerous variables like

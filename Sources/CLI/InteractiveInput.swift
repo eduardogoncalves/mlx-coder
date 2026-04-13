@@ -447,6 +447,103 @@ public final class InteractiveInput: @unchecked Sendable {
         return selectedIndex
     }
     
+    public func promptForText(prompt: String, placeholder: String = "", validate: @escaping (String) throws -> Bool = { _ in true }) async -> String? {
+        guard isatty(STDIN_FILENO) == 1 else {
+            print("\(prompt) \(placeholder)", terminator: "")
+            fflush(stdout)
+            if let line = readLine(strippingNewline: true), !line.isEmpty {
+                do {
+                    if try validate(line) {
+                        return line
+                    }
+                } catch {
+                    print("\(dim)Validation failed: \(error.localizedDescription)\(reset)")
+                }
+            }
+            return nil
+        }
+        
+        var originalTerm = termios()
+        tcgetattr(STDIN_FILENO, &originalTerm)
+        
+        var rawTerm = originalTerm
+        rawTerm.c_lflag &= ~tcflag_t(ECHO | ICANON | ISIG)
+        rawTerm.c_cc.16 = 1
+        rawTerm.c_cc.17 = 0
+        tcsetattr(STDIN_FILENO, TCSANOW, &rawTerm)
+        
+        defer {
+            tcsetattr(STDIN_FILENO, TCSANOW, &originalTerm)
+        }
+        
+        print("\n\(bold)\(prompt)\(reset)")
+        if !placeholder.isEmpty {
+            print("\(dim)[\(placeholder)]\(reset)")
+        }
+        print("\(magenta)> \(reset)", terminator: "")
+        fflush(stdout)
+        
+        var input = ""
+        var cursorPosition = 0
+        
+        while true {
+            var byte: UInt8 = 0
+            if read(STDIN_FILENO, &byte, 1) != 1 { continue }
+            
+            if byte == 4 || byte == 3 {
+                print("")
+                return nil
+            } else if byte == 10 || byte == 13 {
+                break
+            } else if byte == 127 {
+                if cursorPosition > 0 {
+                    let index = input.index(input.startIndex, offsetBy: cursorPosition - 1)
+                    input.remove(at: index)
+                    cursorPosition -= 1
+                    print("\u{001B}[D \u{001B}[D", terminator: "")
+                    fflush(stdout)
+                }
+            } else if byte >= 32 {
+                var bytes = [byte]
+                var expectedLen = 1
+                if byte & 0xE0 == 0xC0 { expectedLen = 2 }
+                else if byte & 0xF0 == 0xE0 { expectedLen = 3 }
+                else if byte & 0xF8 == 0xF0 { expectedLen = 4 }
+                
+                while bytes.count < expectedLen {
+                    var nextByte: UInt8 = 0
+                    if read(STDIN_FILENO, &nextByte, 1) == 1 {
+                        bytes.append(nextByte)
+                    } else {
+                        break
+                    }
+                }
+                
+                if let str = String(bytes: bytes, encoding: .utf8) {
+                    let index = input.index(input.startIndex, offsetBy: cursorPosition)
+                    input.insert(contentsOf: str, at: index)
+                    cursorPosition += str.count
+                    print(str, terminator: "")
+                    fflush(stdout)
+                }
+            }
+        }
+        
+        print("")
+        
+        let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        let finalInput = trimmed.isEmpty ? placeholder : trimmed
+        
+        do {
+            try _ = validate(finalInput)
+            return finalInput
+        } catch {
+            print("\(dim)Validation failed: \(error.localizedDescription)\(reset)")
+        }
+        
+        return nil
+    }
+    
     private func moveToPreviousWord(input: String, cursorPosition: inout Int) {
         if cursorPosition <= 0 { return }
         var pos = cursorPosition

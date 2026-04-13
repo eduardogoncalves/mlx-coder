@@ -5,6 +5,11 @@ import XCTest
 
 final class PermissionEngineTests: XCTestCase {
 
+    override func tearDown() {
+        PermissionEngine.clearGlobalEffectiveWorkspace()
+        super.tearDown()
+    }
+
     func testPathInsideWorkspace() throws {
         let engine = PermissionEngine(workspaceRoot: "/tmp/workspace")
         let resolved = try engine.validatePath("/tmp/workspace/src/main.swift")
@@ -71,5 +76,24 @@ final class PermissionEngineTests: XCTestCase {
         XCTAssertTrue(engine.isPathIgnored("Sources/API.generated.swift"))
         XCTAssertTrue(engine.isPathIgnored("/tmp/workspace/vendor/lib/file.swift"))
         XCTAssertFalse(engine.isPathIgnored("Sources/Main.swift"))
+    }
+
+    func testRelativeGlobalEffectiveWorkspaceIsNormalizedToAbsolutePath() throws {
+        let tempRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mlx-coder-permissions-\(UUID().uuidString)", isDirectory: true)
+        let originalCWD = FileManager.default.currentDirectoryPath
+        try FileManager.default.createDirectory(at: tempRoot, withIntermediateDirectories: true)
+        XCTAssertTrue(FileManager.default.changeCurrentDirectoryPath(tempRoot.path))
+        defer {
+            XCTAssertTrue(FileManager.default.changeCurrentDirectoryPath(originalCWD))
+            try? FileManager.default.removeItem(at: tempRoot)
+        }
+
+        let engine = PermissionEngine(workspaceRoot: tempRoot.path)
+        PermissionEngine.setGlobalEffectiveWorkspace(".mlx-coder-work-12345678")
+
+        XCTAssertTrue((engine.effectiveWorkspaceRoot as NSString).isAbsolutePath)
+        XCTAssertTrue(engine.effectiveWorkspaceRoot.hasSuffix("/.mlx-coder-work-12345678"))
+        XCTAssertTrue(engine.effectiveWorkspaceRoot.contains(tempRoot.lastPathComponent))
     }
 }

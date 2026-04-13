@@ -511,6 +511,7 @@ public struct TaskTool: Tool {
             renderer: renderer,
             systemPrompt: systemPrompt,
             modelPath: modelPath,
+            workspace: subPermissions.effectiveWorkspaceRoot,
             useSandbox: useSandbox
         )
 

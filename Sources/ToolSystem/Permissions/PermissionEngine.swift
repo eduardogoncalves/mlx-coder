@@ -11,6 +11,40 @@ import Glibc
 /// Validates filesystem paths and shell commands against security rules.
 /// All resolved paths must start with `workspaceRoot`. Reject otherwise.
 public struct PermissionEngine: Sendable {
+    
+    /// Global effective workspace override - use setGlobalEffectiveWorkspace/clearGlobalEffectiveWorkspace
+    /// Marked as unsafe because this is intentionally shared mutable state for worktree support
+    private static nonisolated(unsafe) var _globalEffectiveWorkspace: String? = nil
+    
+    /// Set the global effective workspace (e.g., worktree path) - affects all PermissionEngine instances
+    public static nonisolated func setGlobalEffectiveWorkspace(_ path: String?) {
+        guard let path else {
+            _globalEffectiveWorkspace = nil
+            return
+        }
+
+        let expanded = NSString(string: path).expandingTildeInPath
+        let absolutePath: String
+        if expanded.hasPrefix("/") {
+            absolutePath = expanded
+        } else {
+            absolutePath = URL(filePath: FileManager.default.currentDirectoryPath)
+                .appending(path: expanded)
+                .standardized.path()
+        }
+
+        _globalEffectiveWorkspace = URL(filePath: absolutePath).standardized.path()
+    }
+    
+    /// Get the global effective workspace
+    public static nonisolated func getGlobalEffectiveWorkspace() -> String? {
+        _globalEffectiveWorkspace
+    }
+    
+    /// Clear the global effective workspace
+    public static nonisolated func clearGlobalEffectiveWorkspace() {
+        _globalEffectiveWorkspace = nil
+    }
 
     /// Static policy document used for tool/path allow/deny rules.
     public struct PolicyDocument: Sendable, Codable {
@@ -48,11 +82,8 @@ public struct PermissionEngine: Sendable {
 
     /// Approval strategy for destructive tools.
     public enum ApprovalMode: String, Sendable, CaseIterable {
-        /// Prompt for destructive operations.
         case `default` = "default"
-        /// Auto-approve common file edit tools; still prompt for shell/task.
         case autoEdit = "auto-edit"
-        /// Auto-approve all destructive operations.
         case yolo = "yolo"
     }
 
@@ -82,7 +113,6 @@ public struct PermissionEngine: Sendable {
         policy: PolicyDocument? = nil,
         ignoredPathPatterns: [String] = []
     ) {
-        // Resolve workspace root to absolute path
         let expanded = NSString(string: workspaceRoot).expandingTildeInPath
         self.workspaceRoot = URL(filePath: expanded).standardized.path()
         self.allowedCommands = allowedCommands
@@ -92,35 +122,37 @@ public struct PermissionEngine: Sendable {
         self.ignoredPathPatterns = ignoredPathPatterns
     }
 
+    /// Get the effective workspace (worktree if set, otherwise original)
+    public var effectiveWorkspaceRoot: String {
+        // Check global override first (set by git orchestration)
+        if let global = PermissionEngine.getGlobalEffectiveWorkspace() {
+            return global
+        }
+        return workspaceRoot
+    }
+
     /// Validate that a path is within the workspace root.
-    ///
-    /// - Parameter path: The path to validate (will be resolved to absolute, symlinks resolved)
-    /// - Returns: The resolved absolute path
-    /// - Throws: `PermissionError.pathOutsideWorkspace` if the path escapes
     public func validatePath(_ path: String) throws -> String {
         let expanded = NSString(string: path).expandingTildeInPath
         let resolved: String
+        let effectiveRoot = effectiveWorkspaceRoot
 
         if expanded.hasPrefix("/") {
             resolved = expanded
         } else {
-            resolved = workspaceRoot + "/" + expanded
+            resolved = effectiveRoot + "/" + expanded
         }
 
-        // Resolve symlinks and normalize the path
-        // This is critical for security: we must resolve symlinks to prevent TOCTOU attacks
-        // where symlinks are created after validation but before the actual operation.
         let url = URL(filePath: resolved).standardized
         let normalizedPath = url.path()
         
-        // Resolve any symlinks in the normalized path
         let resolvedURL = URL(filePath: normalizedPath).resolvingSymlinksInPath()
         let finalPath = resolvedURL.path()
 
-        guard finalPath.hasPrefix(workspaceRoot) else {
+        guard finalPath.hasPrefix(effectiveRoot) else {
             throw PermissionError.pathOutsideWorkspace(
                 path: finalPath,
-                workspaceRoot: workspaceRoot
+                workspaceRoot: effectiveRoot
             )
         }
 
@@ -129,14 +161,12 @@ public struct PermissionEngine: Sendable {
 
     /// Check if a shell command is allowed.
     public func isCommandAllowed(_ command: String) -> Bool {
-        // Check deny list first
         for pattern in deniedCommands {
             if matchesGlob(command, pattern: pattern) {
                 return false
             }
         }
 
-        // Check allow list
         for pattern in allowedCommands {
             if matchesGlob(command, pattern: pattern) {
                 return true
@@ -155,7 +185,8 @@ public struct PermissionEngine: Sendable {
         let normalizedPath: String?
         if let targetPath {
             let expanded = NSString(string: targetPath).expandingTildeInPath
-            let candidate = expanded.hasPrefix("/") ? expanded : workspaceRoot + "/" + expanded
+            let effectiveRoot = effectiveWorkspaceRoot
+            let candidate = expanded.hasPrefix("/") ? expanded : effectiveRoot + "/" + expanded
             normalizedPath = URL(filePath: candidate).standardized.path()
         } else {
             normalizedPath = nil
@@ -193,16 +224,16 @@ public struct PermissionEngine: Sendable {
     }
 
     /// Returns true if a path should be ignored by search-style tools.
-    /// Accepts relative or absolute paths.
     public func isPathIgnored(_ path: String) -> Bool {
         guard !ignoredPathPatterns.isEmpty else {
             return false
         }
 
         let relativePath: String
-        if path.hasPrefix(workspaceRoot + "/") {
-            relativePath = String(path.dropFirst(workspaceRoot.count + 1))
-        } else if path == workspaceRoot {
+        let effectiveRoot = effectiveWorkspaceRoot
+        if path.hasPrefix(effectiveRoot + "/") {
+            relativePath = String(path.dropFirst(effectiveRoot.count + 1))
+        } else if path == effectiveRoot {
             relativePath = "."
         } else {
             relativePath = path
@@ -217,12 +248,7 @@ public struct PermissionEngine: Sendable {
         return false
     }
 
-    // MARK: - Private
-
     private func matchesGlob(_ string: String, pattern: String) -> Bool {
-        // Use fnmatch for proper glob pattern matching
-        // This prevents bypasses using regex metacharacters
-        // fnmatch matches patterns literally except for POSIX glob wildcards (*, ?, [])
         return fnmatch(pattern, string, 0) == 0
     }
 }

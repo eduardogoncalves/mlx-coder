@@ -52,18 +52,22 @@ public actor GitOrchestrationManager {
             await stateTracker.markGitInitialized(true)
         }
         
-        // Validate current branch setup
+        // Validate current branch setup - only if we have commits
         let currentBranch = try? await gitService.getCurrentBranch()
-        let taskSetupValidation = validateTaskSetup(
-            repositoryInitialized: gitService.isRepositoryInitialized(),
-            currentBranch: currentBranch
-        )
-        
-        if !taskSetupValidation.isValid {
-            throw GitError.notOnCorrectBranch(expected: "main/master", actual: currentBranch ?? "unknown")
+        if currentBranch != nil && currentBranch != "HEAD" {
+            let taskSetupValidation = validateTaskSetup(
+                repositoryInitialized: gitService.isRepositoryInitialized(),
+                currentBranch: currentBranch
+            )
+            
+            if !taskSetupValidation.isValid {
+                throw GitError.notOnCorrectBranch(expected: "main/master", actual: currentBranch ?? "unknown")
+            }
         }
 
-        let prepareWarning = taskSetupValidation.warning
+        let prepareWarning = currentBranch == nil || currentBranch == "HEAD" 
+            ? "New repository - will create branch from scratch"
+            : nil
         
         // Determine base branch
         let hasRemote = try await gitService.hasRemote()
@@ -95,12 +99,59 @@ public actor GitOrchestrationManager {
             } else if let first = branches.first {
                 self.baseBranch = first
             }
+        } else {
+            // No remote - use main or create first branch
+            self.baseBranch = "main"
         }
         
         await stateTracker.setBaseBranch(baseBranch)
         try await stateTracker.saveState()
         
         return (branchName: branchInfo.branchName, baseBranch: baseBranch, warning: prepareWarning)
+    }
+    
+    /// Update the branch name (e.g., if user provides custom name)
+    public func updateBranchName(_ newName: String) throws {
+        guard BranchNamer.isValidCustomBranchName(newName) else {
+            throw GitError.invalidCustomBranchName(newName)
+        }
+        
+        self.currentBranchName = newName
+    }
+    
+    /// Create worktree immediately (non-lazy initialization)
+    public func createWorktreeNow() async throws {
+        guard let branchName = self.currentBranchName else {
+            throw GitError.invalidBranchName("No branch name set - call prepareTask first")
+        }
+        
+        guard self.currentWorktreePath == nil else {
+            return
+        }
+        
+        let worktreePath = try await gitService.createWorktree(
+            branchName: branchName,
+            fromBranch: baseBranch
+        )
+        
+        self.currentWorktreePath = worktreePath
+        await stateTracker.setWorktreeRoot(worktreePath)
+        try await stateTracker.saveState()
+    }
+    
+    /// Get current branch name
+    public func getCurrentBranchName() -> String? {
+        return currentBranchName
+    }
+    
+    /// Get worktree path
+    public func getWorktreePath() -> String? {
+        return currentWorktreePath
+    }
+    
+    /// Get base branch
+    public func getBaseBranch() -> String {
+        return baseBranch
     }
     
     // MARK: - Validation Helpers
@@ -278,11 +329,6 @@ public actor GitOrchestrationManager {
         }
         
         return .ready(branchName: branchName, worktreePath: currentWorktreePath)
-    }
-    
-    /// Get current branch name
-    public func getCurrentBranchName() -> String? {
-        currentBranchName
     }
     
     /// Get number of commits made this session

@@ -20,6 +20,8 @@ public enum GitError: LocalizedError, Sendable {
     case gitCommandFailed(command: String, stderr: String)
     case invalidWorkspace(String)
     case nothingToCommit
+    case invalidCustomBranchName(String)
+    case branchNameAlreadyExists(String)
 
     public var errorDescription: String? {
         switch self {
@@ -55,6 +57,10 @@ public enum GitError: LocalizedError, Sendable {
             return "Invalid workspace path: \(path)"
         case .nothingToCommit:
             return "Nothing to commit (working tree clean)"
+        case .invalidCustomBranchName(let name):
+            return "Invalid custom branch name: '\(name)'. Use letters, numbers, hyphens, underscores, or slashes."
+        case .branchNameAlreadyExists(let name):
+            return "Branch '\(name)' already exists. Choose a different name."
         }
     }
 

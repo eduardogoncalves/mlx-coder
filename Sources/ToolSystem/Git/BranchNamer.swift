@@ -123,6 +123,38 @@ public struct BranchNamer {
         }
         return false
     }
+    
+    /// Validate custom branch name (more permissive than auto-generated names)
+    public static func isValidCustomBranchName(_ name: String) -> Bool {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+        
+        // Check length limits
+        if trimmed.count > 100 || trimmed.count < 1 { return false }
+        
+        // Check for invalid patterns
+        if trimmed.hasPrefix("-") || trimmed.hasSuffix("-") { return false }
+        if trimmed.contains("..") { return false }
+        if trimmed.contains("//") { return false }
+        
+        // Must contain only valid git branch characters
+        // Git allows: letters, numbers, . - _ /
+        let validPattern = "^[a-zA-Z0-9][a-zA-Z0-9._/-]*$"
+        if let regex = try? NSRegularExpression(pattern: validPattern) {
+            let range = NSRange(trimmed.startIndex..<trimmed.endIndex, in: trimmed)
+            if regex.firstMatch(in: trimmed, range: range) == nil {
+                return false
+            }
+        } else {
+            return false
+        }
+        
+        // Check for git reserved names
+        let reserved = [".", "..", "CON", "PRN", "AUX", "NUL", "COM1", "LPT1"]
+        if reserved.contains(trimmed) { return false }
+        
+        return true
+    }
 }
 
 // MARK: - Extension for date formatting

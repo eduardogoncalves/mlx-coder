@@ -13,7 +13,7 @@ public actor AgentLoop {
 
     private var modelContainer: ModelContainer?
     private let registry: ToolRegistry
-    private let permissions: PermissionEngine
+    private var permissions: PermissionEngine
     private let renderer: StreamRenderer
     private let auditLogger: ToolAuditLogger?
     public private(set) var history: ConversationHistory
@@ -102,6 +102,8 @@ public actor AgentLoop {
     public private(set) var taskType: TaskType = .general
     public private(set) var currentMode: ModelMode = .planLow
     
+    private var interactiveInput: InteractiveInput?
+    
     private var currentGenerationConfig: GenerationEngine.Config
     private let condensationConfig = ToolResultCondensationConfig()
     private let contextReserveTokens: Int = 1024
@@ -169,11 +171,8 @@ public actor AgentLoop {
         self.memoryLimit = memoryLimit
         self.cacheLimit = cacheLimit
         
-        // Initial loaded state
-        self.loadedModelPath = modelPath
-        self.loadedMemoryLimit = memoryLimit
-        self.loadedCacheLimit = cacheLimit
-        self.loadedKVBits = generationConfig.kvBits
+        // Initialize interactive input for branch name prompting
+        self.interactiveInput = InteractiveInput()
         
         // Ensure initial config matches default mode/thinking/task
         self.currentGenerationConfig = AgentLoop.calculateGenerationConfig(
@@ -274,15 +273,56 @@ public actor AgentLoop {
         // Initialize git orchestration for coding tasks
         if taskType == .coding && gitOrchestrationManager == nil {
             do {
-                self.gitOrchestrationManager = try await GitOrchestrationManager.create(projectRoot: workspace)
+                self.gitOrchestrationManager = try await GitOrchestrationManager.create(projectRoot: permissions.effectiveWorkspaceRoot)
                 let (branchName, baseBranch, warning) = try await gitOrchestrationManager!.prepareTask(userMessage: message)
-                renderer.printStatus("📋 Git branch prepared: \(branchName) (base: \(baseBranch))")
+                renderer.printStatus("📋 Proposed branch: \(branchName) (base: \(baseBranch))")
+                
+                // Prompt for custom branch name
+                if let interactiveInput = self.interactiveInput {
+                    let branchOptions = ["Use this name", "Enter custom name"]
+                    print("")
+                    if let selected = await interactiveInput.selectOption(prompt: "Branch name options", options: branchOptions) {
+                        if selected == 1 {
+                            // User wants to enter custom name
+                            if let customName = await interactiveInput.promptForText(
+                                prompt: "Enter custom branch name:",
+                                placeholder: branchName,
+                                validate: { name in
+                                    if !BranchNamer.isValidCustomBranchName(name) {
+                                        throw GitError.invalidCustomBranchName(name)
+                                    }
+                                    return true
+                                }
+                            ) {
+                                try await gitOrchestrationManager!.updateBranchName(customName)
+                                renderer.printStatus("✅ Using custom branch: \(customName)")
+                            } else {
+                                renderer.printStatus("Using proposed branch: \(branchName)")
+                            }
+                        } else {
+                            renderer.printStatus("Using branch: \(branchName)")
+                        }
+                    }
+                }
+                
+                // Create worktree immediately
+                try await gitOrchestrationManager!.createWorktreeNow()
+                let currentBranch = await gitOrchestrationManager!.getCurrentBranchName() ?? branchName
+                let worktreePath = await gitOrchestrationManager!.getWorktreePath() ?? "current directory"
+                renderer.printStatus("🌿 Worktree created at: \(worktreePath) (branch: \(currentBranch))")
+                
+                // Update permissions to use worktree as effective workspace
+                if let worktreePath = await gitOrchestrationManager!.getWorktreePath() {
+                    let expandedPath = (worktreePath as NSString).standardizingPath + "/"
+                    PermissionEngine.setGlobalEffectiveWorkspace(expandedPath)
+                    renderer.printStatus("📁 Files will be edited in worktree")
+                }
+                
                 if let warning, !warning.isEmpty {
                     renderer.printStatus("⚠️  Git setup warning: \(warning)")
                 }
             } catch {
                 renderer.printStatus("⚠️  Git initialization failed: \(error.localizedDescription)")
-                // Continue anyway - git orchestration is optional
             }
         }
 
@@ -492,7 +532,7 @@ public actor AgentLoop {
                         let correctionResult = await ParameterCorrectionService.correct(
                             toolName: call.name,
                             arguments: call.arguments,
-                            workspaceRoot: workspace
+                            workspaceRoot: permissions.effectiveWorkspaceRoot
                         )
                         
                         // Log corrections if any were made
@@ -2322,7 +2362,7 @@ public actor AgentLoop {
         renderer.printStatus("🔧 Checking builds in agent/coding mode...")
         
         let success = await buildCheckManager.checkBeforeCommit(
-            workspace: workspace,
+            workspace: permissions.effectiveWorkspaceRoot,
             onProgress: { msg in
                 // Progress updates from Ralph loop
                 self.renderer.printStatus("  → \(msg)")
@@ -2432,7 +2472,7 @@ public actor AgentLoop {
         // Read the actual file content
         let resolvedPath = (path as NSString).isAbsolutePath
             ? path
-            : (workspace as NSString).appendingPathComponent(path)
+            : (permissions.effectiveWorkspaceRoot as NSString).appendingPathComponent(path)
 
         guard FileManager.default.fileExists(atPath: resolvedPath),
               let fileContent = try? String(contentsOfFile: resolvedPath, encoding: .utf8) else {
@@ -2632,7 +2672,7 @@ public actor AgentLoop {
                 let correctionResult = await ParameterCorrectionService.correct(
                     toolName: "edit_file",
                     arguments: streamedArguments,
-                    workspaceRoot: workspace
+                    workspaceRoot: permissions.effectiveWorkspaceRoot
                 )
                 if correctionResult.wasCorrected {
                     for correction in correctionResult.corrections {

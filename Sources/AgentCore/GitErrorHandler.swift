@@ -109,6 +109,12 @@ public struct GitErrorHandler: Sendable {
         
         case .stateFileNotFound:
             return stateFileNotFoundError()
+        
+        case .invalidCustomBranchName(let name):
+            return invalidCustomBranchNameError(name: name)
+        
+        case .branchNameAlreadyExists(let name):
+            return branchNameAlreadyExistsError(name: name)
         }
     }
     
@@ -342,6 +348,35 @@ public struct GitErrorHandler: Sendable {
             ],
             isRecoverable: true,
             category: .unknown
+        )
+    }
+    
+    private static func invalidCustomBranchNameError(name: String) -> UserError {
+        UserError(
+            title: "Invalid Branch Name",
+            message: "Branch name '\(name)' is not valid.",
+            suggestions: [
+                "Use letters, numbers, hyphens (-), underscores (_), or slashes (/)",
+                "Avoid leading or trailing hyphens",
+                "Avoid consecutive slashes",
+                "Example valid names: feature/my-feature, hotfix/bug-fix, my-branch"
+            ],
+            isRecoverable: true,
+            category: .commitValidation
+        )
+    }
+    
+    private static func branchNameAlreadyExistsError(name: String) -> UserError {
+        UserError(
+            title: "Branch Already Exists",
+            message: "Branch '\(name)' already exists in this repository.",
+            suggestions: [
+                "Choose a different branch name",
+                "Use 'git branch -a' to see existing branches",
+                "Or delete the existing branch first: git branch -D \(name)"
+            ],
+            isRecoverable: true,
+            category: .workingTreeConflict
         )
     }
     

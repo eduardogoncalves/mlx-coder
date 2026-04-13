@@ -7,13 +7,22 @@ public actor GitService {
     private let projectRoot: String
     
     public init(projectRoot: String) throws {
-        self.projectRoot = projectRoot
+        let expanded = NSString(string: projectRoot).expandingTildeInPath
+        let normalizedRoot: String
+        if expanded.hasPrefix("/") {
+            normalizedRoot = URL(filePath: expanded).standardized.path()
+        } else {
+            normalizedRoot = URL(filePath: FileManager.default.currentDirectoryPath)
+                .appending(path: expanded)
+                .standardized.path()
+        }
+        self.projectRoot = normalizedRoot
         
         // Validate project root exists
         let fileManager = FileManager.default
         var isDir: ObjCBool = false
-        guard fileManager.fileExists(atPath: projectRoot, isDirectory: &isDir), isDir.boolValue else {
-            throw GitError.invalidWorkspace(projectRoot)
+        guard fileManager.fileExists(atPath: normalizedRoot, isDirectory: &isDir), isDir.boolValue else {
+            throw GitError.invalidWorkspace(normalizedRoot)
         }
     }
     
@@ -37,6 +46,14 @@ public actor GitService {
         let output = try runGitCommand(["init"], cwd: projectRoot)
         _ = try runGitCommand(["config", "user.email", "agent@mlx-coder.local"], cwd: projectRoot)
         _ = try runGitCommand(["config", "user.name", "Native Agent"], cwd: projectRoot)
+        
+        // Create initial commit if there are files to commit
+        let statusOutput = try runGitCommand(["status", "--porcelain"], cwd: projectRoot)
+        if !statusOutput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            _ = try runGitCommand(["add", "."], cwd: projectRoot)
+            _ = try runGitCommand(["commit", "-m", "Initial commit by mlx-coder"], cwd: projectRoot)
+        }
+        
         return output.trimmingCharacters(in: .whitespacesAndNewlines)
     }
     
@@ -86,12 +103,12 @@ public actor GitService {
             throw GitError.repositoryNotInitialized
         }
         
-        // Validate branch name format
-        guard BranchNamer.isValidBranchName(branchName) else {
+        // Validate branch name format (accept both auto-generated and custom)
+        guard BranchNamer.isValidBranchName(branchName) || BranchNamer.isValidCustomBranchName(branchName) else {
             throw GitError.invalidBranchName(branchName)
         }
         
-        // Create worktree directory path
+        // Create worktree directory path (absolute path)
         let worktreeDir = (projectRoot as NSString).appendingPathComponent(".mlx-coder-work-\(UUID().uuidString.prefix(8))")
         
         do {
@@ -100,7 +117,8 @@ public actor GitService {
                 ["worktree", "add", "-b", branchName, worktreeDir, fromBranch],
                 cwd: projectRoot
             )
-            return worktreeDir
+            // Return absolute path
+            return URL(filePath: worktreeDir).standardized.path()
         } catch {
             throw GitError.failedToCreateWorktree(branchName: branchName, reason: error.localizedDescription)
         }
