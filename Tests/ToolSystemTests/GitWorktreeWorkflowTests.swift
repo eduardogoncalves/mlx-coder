@@ -113,6 +113,73 @@ final class GitWorktreeWorkflowTests: XCTestCase {
         XCTAssertTrue(guide.approvalPromptMessage.contains("Commits created: 1"))
     }
 
+    func testConnectToExistingWorktreeRestoresBranchAndPath() async throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("git-worktree-resume-tests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        try runGit(["init"], cwd: tempDir.path)
+        try runGit(["config", "user.email", "tests@mlx-coder.local"], cwd: tempDir.path)
+        try runGit(["config", "user.name", "MLX Coder Tests"], cwd: tempDir.path)
+
+        let file = tempDir.appendingPathComponent("README.md")
+        try "base\n".write(to: file, atomically: true, encoding: .utf8)
+        try runGit(["add", "."], cwd: tempDir.path)
+        try runGit(["commit", "-m", "chore: initial commit"], cwd: tempDir.path)
+        try runGit(["branch", "-M", "main"], cwd: tempDir.path)
+
+        let service = try GitService(projectRoot: tempDir.path)
+        let branchName = "feature/resume-session"
+        let worktreePath = try await service.createWorktree(branchName: branchName, fromBranch: "main")
+
+        let manager = try await GitOrchestrationManager.create(projectRoot: tempDir.path)
+        let worktrees = try await manager.listAvailableWorktrees()
+        XCTAssertTrue(worktrees.contains(where: { URL(filePath: $0.path).lastPathComponent == URL(filePath: worktreePath).lastPathComponent }))
+
+        let connected = try await manager.connectToExistingWorktree(path: worktreePath)
+        let currentBranch = await manager.getCurrentBranchName()
+        let currentWorktree = await manager.getWorktreePath()
+        XCTAssertEqual(connected.branch, branchName)
+        XCTAssertEqual(currentBranch, branchName)
+        XCTAssertEqual(currentWorktree, worktreePath)
+    }
+
+    func testMergeSquashWorksWhenServiceIsInitializedFromFeatureWorktree() async throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("git-worktree-merge-tests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        try runGit(["init"], cwd: tempDir.path)
+        try runGit(["config", "user.email", "tests@mlx-coder.local"], cwd: tempDir.path)
+        try runGit(["config", "user.name", "MLX Coder Tests"], cwd: tempDir.path)
+
+        let rootFile = tempDir.appendingPathComponent("README.md")
+        try "base\n".write(to: rootFile, atomically: true, encoding: .utf8)
+        try runGit(["add", "."], cwd: tempDir.path)
+        try runGit(["commit", "-m", "chore: initial commit"], cwd: tempDir.path)
+        try runGit(["branch", "-M", "main"], cwd: tempDir.path)
+
+        let rootService = try GitService(projectRoot: tempDir.path)
+        let featureBranch = "feature/header-font"
+        let worktreePath = try await rootService.createWorktree(branchName: featureBranch, fromBranch: "main")
+
+        let featureFile = URL(fileURLWithPath: worktreePath).appendingPathComponent("README.md")
+        try "base\nheader-font-change\n".write(to: featureFile, atomically: true, encoding: .utf8)
+
+        let featureService = try GitService(projectRoot: worktreePath)
+        _ = try await featureService.commit(message: "feat: header font update", in: worktreePath)
+        _ = try await featureService.mergeSquash(
+            baseBranch: "main",
+            sourceBranch: featureBranch,
+            commitMessage: "feat: merge header font"
+        )
+
+        let mainContent = try String(contentsOf: rootFile, encoding: .utf8)
+        XCTAssertTrue(mainContent.contains("header-font-change"))
+    }
+
     private func runGit(_ arguments: [String], cwd: String) throws {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/git")

@@ -4,6 +4,11 @@
 import Foundation
 
 public actor GitService {
+    public struct WorktreeInfo: Sendable {
+        public let path: String
+        public let branch: String?
+    }
+
     private let projectRoot: String
     
     public init(projectRoot: String) throws {
@@ -31,7 +36,11 @@ public actor GitService {
         let gitDir = (projectRoot as NSString).appendingPathComponent(".git")
         let fileManager = FileManager.default
         var isDir: ObjCBool = false
-        return fileManager.fileExists(atPath: gitDir, isDirectory: &isDir) && isDir.boolValue
+        guard fileManager.fileExists(atPath: gitDir, isDirectory: &isDir) else {
+            return false
+        }
+        // In linked worktrees, .git is a file that points to the common git dir.
+        return true
     }
     
     /// Initialize git repository
@@ -265,9 +274,10 @@ public actor GitService {
         }
 
         do {
-            _ = try runGitCommand(["checkout", baseBranch], cwd: projectRoot)
-            _ = try runGitCommand(["merge", "--squash", sourceBranch], cwd: projectRoot)
-            let output = try runGitCommand(["commit", "-m", commitMessage], cwd: projectRoot)
+            let baseCwd = try resolveWorktreePath(for: baseBranch) ?? projectRoot
+            _ = try runGitCommand(["checkout", baseBranch], cwd: baseCwd)
+            _ = try runGitCommand(["merge", "--squash", sourceBranch], cwd: baseCwd)
+            let output = try runGitCommand(["commit", "-m", commitMessage], cwd: baseCwd)
             return output.trimmingCharacters(in: .whitespacesAndNewlines)
         } catch {
             throw GitError.mergeFailed(reason: error.localizedDescription)
@@ -281,8 +291,9 @@ public actor GitService {
         }
 
         do {
-            _ = try runGitCommand(["checkout", baseBranch], cwd: projectRoot)
-            let output = try runGitCommand(["merge", "--no-ff", sourceBranch, "-m", mergeMessage], cwd: projectRoot)
+            let baseCwd = try resolveWorktreePath(for: baseBranch) ?? projectRoot
+            _ = try runGitCommand(["checkout", baseBranch], cwd: baseCwd)
+            let output = try runGitCommand(["merge", "--no-ff", sourceBranch, "-m", mergeMessage], cwd: baseCwd)
             return output.trimmingCharacters(in: .whitespacesAndNewlines)
         } catch {
             throw GitError.mergeFailed(reason: error.localizedDescription)
@@ -296,10 +307,13 @@ public actor GitService {
         }
 
         do {
-            _ = try runGitCommand(["checkout", sourceBranch], cwd: projectRoot)
-            _ = try runGitCommand(["rebase", baseBranch], cwd: projectRoot)
-            _ = try runGitCommand(["checkout", baseBranch], cwd: projectRoot)
-            let output = try runGitCommand(["merge", "--ff-only", sourceBranch], cwd: projectRoot)
+            let sourceCwd = try resolveWorktreePath(for: sourceBranch) ?? projectRoot
+            let baseCwd = try resolveWorktreePath(for: baseBranch) ?? projectRoot
+
+            _ = try runGitCommand(["checkout", sourceBranch], cwd: sourceCwd)
+            _ = try runGitCommand(["rebase", baseBranch], cwd: sourceCwd)
+            _ = try runGitCommand(["checkout", baseBranch], cwd: baseCwd)
+            let output = try runGitCommand(["merge", "--ff-only", sourceBranch], cwd: baseCwd)
             return output.trimmingCharacters(in: .whitespacesAndNewlines)
         } catch {
             throw GitError.rebaseFailed(reason: error.localizedDescription)
@@ -331,6 +345,38 @@ public actor GitService {
             .split(separator: "\n")
             .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
+    }
+
+    /// List active worktrees with structured path/branch information.
+    public func listWorktreeInfos() throws -> [WorktreeInfo] {
+        let output = try runGitCommand(["worktree", "list", "--porcelain"], cwd: projectRoot)
+        let blocks = output
+            .split(separator: "\n\n")
+            .map(String.init)
+
+        var infos: [WorktreeInfo] = []
+        for block in blocks {
+            let lines = block
+                .split(separator: "\n")
+                .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+
+            guard let worktreeLine = lines.first(where: { $0.hasPrefix("worktree ") }) else {
+                continue
+            }
+            let path = String(worktreeLine.dropFirst("worktree ".count))
+            let branchLine = lines.first(where: { $0.hasPrefix("branch ") })
+            let branchRef = branchLine.map { String($0.dropFirst("branch ".count)) }
+            let branchName = branchRef.map { ref -> String in
+                if ref.hasPrefix("refs/heads/") {
+                    return String(ref.dropFirst("refs/heads/".count))
+                }
+                return ref
+            }
+            infos.append(WorktreeInfo(path: path, branch: branchName))
+        }
+
+        return infos
     }
 
     /// Prune stale worktree metadata.
@@ -398,6 +444,14 @@ public actor GitService {
         }
         
         return output
+    }
+
+    private func resolveWorktreePath(for branch: String) throws -> String? {
+        let infos = try listWorktreeInfos()
+        guard let match = infos.first(where: { $0.branch == branch }) else {
+            return nil
+        }
+        return URL(filePath: match.path).standardized.path()
     }
 
     private func resolveWorkingDirectory(_ workingDirectory: String?) -> String {

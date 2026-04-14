@@ -333,6 +333,8 @@ struct ChatCommand: AsyncParsableCommand {
                   \u{001B}[32m/thinking [lvl]\u{001B}[0m Set thinking budget: fast/off, minimal, low, medium, high (default: low)
                   \u{001B}[32m/steer [msg]\u{001B}[0m   Queue a steering message injected between agent turns (no arg = list queue)
                   \u{001B}[32m/followup [msg]\u{001B}[0m Queue a follow-up run after the current task (no arg = list queue)
+                  \u{001B}[32m/merge-approval\u{001B}[0m Trigger the "Awaiting approval before merge" flow
+                  \u{001B}[32m/gittree\u{001B}[0m       List git worktrees and switch workspace/branch to one
                   \u{001B}[32m/sandbox\u{001B}[0m       Toggle macOS Seatbelt sandbox for shell commands
                   \u{001B}[32mEsc\u{001B}[0m            Cancel current generation
                   \u{001B}[32mShift+Tab\u{001B}[0m      Cycle modes (default starts at Plan low):
@@ -345,6 +347,14 @@ struct ChatCommand: AsyncParsableCommand {
             }
             if trimmed == "/undo" || trimmed == "/revert" {
                 await agentLoop.undoLastTurn()
+                continue
+            }
+            if trimmed == "/merge-approval" {
+                await agentLoop.runMergeApprovalShortcutFlow()
+                continue
+            }
+            if trimmed == "/gittree" {
+                await agentLoop.runGitTreeShortcutFlow()
                 continue
             }
             if trimmed == "/clear" {

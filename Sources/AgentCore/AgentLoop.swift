@@ -430,51 +430,7 @@ public actor AgentLoop {
                     await performBuildCheckIfNeeded(modifiedPaths: modifiedFilePaths)
                     if let manager = gitOrchestrationManager {
                         do {
-                            let completionGuide = try await manager.onTaskComplete()
-                            renderer.printStatus(completionGuide.formattedMessage)
-
-                            if let interactiveInput = self.interactiveInput {
-                                print("")
-                                let mergeOptions = [
-                                    "Leave for later",
-                                    "Merge now (squash)",
-                                    "Merge now (merge commit)",
-                                    "Merge now (rebase)"
-                                ]
-                                if let selected = await interactiveInput.selectOption(
-                                    prompt: "Merge decision",
-                                    options: mergeOptions
-                                ) {
-                                    let outcome: MergeOutcome
-                                    switch selected {
-                                    case 1:
-                                        outcome = try await manager.finalizeAfterUserApproval(
-                                            mergeNow: true,
-                                            strategy: .squash,
-                                            cleanupWorktree: true
-                                        )
-                                    case 2:
-                                        outcome = try await manager.finalizeAfterUserApproval(
-                                            mergeNow: true,
-                                            strategy: .mergeCommit,
-                                            cleanupWorktree: true
-                                        )
-                                    case 3:
-                                        outcome = try await manager.finalizeAfterUserApproval(
-                                            mergeNow: true,
-                                            strategy: .rebase,
-                                            cleanupWorktree: true
-                                        )
-                                    default:
-                                        outcome = try await manager.finalizeAfterUserApproval(
-                                            mergeNow: false,
-                                            strategy: .squash,
-                                            cleanupWorktree: false
-                                        )
-                                    }
-                                    renderer.printStatus("✅ \(outcome.message)")
-                                }
-                            }
+                            try await presentMergeApprovalFlow(manager: manager)
                         } catch {
                             renderer.printStatus("⚠️  Git completion flow failed: \(error.localizedDescription)")
                         }
@@ -747,6 +703,115 @@ public actor AgentLoop {
         }
 
         renderer.printError("Exceeded maximum tool iterations (\(maxToolIterations))")
+    }
+
+    public func runMergeApprovalShortcutFlow() async {
+        do {
+            let manager = try await ensureGitOrchestrationManager()
+            try await presentMergeApprovalFlow(manager: manager)
+        } catch {
+            renderer.printStatus("⚠️  Could not run merge approval flow: \(error.localizedDescription)")
+        }
+    }
+
+    public func runGitTreeShortcutFlow() async {
+        do {
+            let manager = try await ensureGitOrchestrationManager()
+            let worktrees = try await manager.listAvailableWorktrees()
+            guard !worktrees.isEmpty else {
+                renderer.printStatus("No git worktrees found.")
+                return
+            }
+
+            let currentDir = URL(filePath: FileManager.default.currentDirectoryPath).standardized.path()
+            let options = worktrees.map { info in
+                let normalizedPath = URL(filePath: info.path).standardized.path()
+                let branch = info.branch ?? "detached HEAD"
+                let marker = normalizedPath == currentDir ? " (current)" : ""
+                return "\(branch) — \(normalizedPath)\(marker)"
+            }
+
+            guard let interactiveInput = self.interactiveInput else {
+                renderer.printStatus("Git worktrees:")
+                for option in options {
+                    renderer.printStatus("  \(option)")
+                }
+                return
+            }
+
+            if let selected = await interactiveInput.selectOption(
+                prompt: "Select git worktree",
+                options: options
+            ) {
+                let target = worktrees[selected]
+                let connected = try await manager.connectToExistingWorktree(path: target.path)
+                let normalizedPath = URL(filePath: connected.path).standardized.path()
+                let workspaceRoot = normalizedPath.hasSuffix("/") ? normalizedPath : "\(normalizedPath)/"
+                PermissionEngine.setGlobalEffectiveWorkspace(workspaceRoot)
+                _ = FileManager.default.changeCurrentDirectoryPath(normalizedPath)
+                renderer.printStatus("📁 Switched workspace to: \(normalizedPath)")
+                renderer.printStatus("🌿 Active branch: \(connected.branch)")
+            }
+        } catch {
+            renderer.printStatus("⚠️  Could not open git worktree selector: \(error.localizedDescription)")
+        }
+    }
+
+    private func ensureGitOrchestrationManager() async throws -> GitOrchestrationManager {
+        if let manager = gitOrchestrationManager {
+            return manager
+        }
+        let manager = try await GitOrchestrationManager.create(projectRoot: permissions.effectiveWorkspaceRoot)
+        gitOrchestrationManager = manager
+        return manager
+    }
+
+    private func presentMergeApprovalFlow(manager: GitOrchestrationManager) async throws {
+        let completionGuide = try await manager.onTaskComplete()
+        renderer.printStatus(completionGuide.formattedMessage)
+
+        guard let interactiveInput = self.interactiveInput else { return }
+
+        print("")
+        let mergeOptions = [
+            "Leave for later",
+            "Merge now (squash)",
+            "Merge now (merge commit)",
+            "Merge now (rebase)"
+        ]
+        if let selected = await interactiveInput.selectOption(
+            prompt: "Merge decision",
+            options: mergeOptions
+        ) {
+            let outcome: MergeOutcome
+            switch selected {
+            case 1:
+                outcome = try await manager.finalizeAfterUserApproval(
+                    mergeNow: true,
+                    strategy: .squash,
+                    cleanupWorktree: true
+                )
+            case 2:
+                outcome = try await manager.finalizeAfterUserApproval(
+                    mergeNow: true,
+                    strategy: .mergeCommit,
+                    cleanupWorktree: true
+                )
+            case 3:
+                outcome = try await manager.finalizeAfterUserApproval(
+                    mergeNow: true,
+                    strategy: .rebase,
+                    cleanupWorktree: true
+                )
+            default:
+                outcome = try await manager.finalizeAfterUserApproval(
+                    mergeNow: false,
+                    strategy: .squash,
+                    cleanupWorktree: false
+                )
+            }
+            renderer.printStatus("✅ \(outcome.message)")
+        }
     }
 
     private func extractPolicyTargetPath(from arguments: [String: Any]) -> String? {

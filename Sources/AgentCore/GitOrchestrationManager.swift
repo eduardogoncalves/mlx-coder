@@ -164,6 +164,28 @@ public actor GitOrchestrationManager {
     public func getBaseBranch() -> String {
         return baseBranch
     }
+
+    /// List available git worktrees and their branches.
+    public func listAvailableWorktrees() async throws -> [GitService.WorktreeInfo] {
+        try await gitService.listWorktreeInfos()
+    }
+
+    /// Connect this orchestration session to an existing worktree.
+    @discardableResult
+    public func connectToExistingWorktree(path: String) async throws -> (path: String, branch: String) {
+        try await gitService.switchWorktree(path: path)
+        let branch = try await gitService.getCurrentBranch(in: path)
+
+        currentWorktreePath = path
+        currentBranchName = branch
+        pendingApprovalSummary = nil
+
+        await stateTracker.setWorktreeRoot(path)
+        await stateTracker.setBranchName(branch)
+        try await stateTracker.saveState()
+
+        return (path, branch)
+    }
     
     // MARK: - Validation Helpers
     
