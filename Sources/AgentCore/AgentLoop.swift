@@ -2844,7 +2844,8 @@ public actor AgentLoop {
             let lines = new.components(separatedBy: .newlines)
             let preview = lines.prefix(20).joined(separator: "\n")
             let truncated = lines.count > 20 ? "\n... (\(lines.count - 20) more lines)" : ""
-            return "--- /dev/null\n+++ b/\(path)\n@@ -0,0 +1,\(lines.count) @@\n\(preview)\(truncated)"
+            let diff = "--- /dev/null\n+++ b/\(path)\n@@ -0,0 +1,\(lines.count) @@\n\(preview)\(truncated)"
+            return colorizeUnifiedDiff(diff)
         }
 
         let origLines = original.components(separatedBy: .newlines)
@@ -2936,12 +2937,36 @@ public actor AgentLoop {
             diff += buildHunk(origStart: origStart, origCount: origCount, newStart: newStart, newCount: newCount, changes: changes)
         }
 
-        return diff.isEmpty ? "(no changes)" : diff
+        return diff.isEmpty ? "(no changes)" : colorizeUnifiedDiff(diff)
     }
 
     private func buildHunk(origStart: Int, origCount: Int, newStart: Int, newCount: Int, changes: [String]) -> String {
         let origRange = origCount > 0 ? "\(origStart),\(origCount)" : "\(origStart),0"
         let newRange = newCount > 0 ? "\(newStart),\(newCount)" : "\(newStart),0"
         return "@@ -\(origRange) +\(newRange) @@\n" + changes.joined(separator: "\n") + "\n"
+    }
+
+    private func colorizeUnifiedDiff(_ diff: String) -> String {
+        let white = "\u{001B}[38;2;255;255;255m"
+        let removedBackground = "\u{001B}[48;2;38;24;28m" // #26181c
+        let addedBackground = "\u{001B}[48;2;20;38;29m" // #14261d
+        let reset = "\u{001B}[0m"
+
+        return diff
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .map { rawLine in
+                let line = String(rawLine)
+                if line.hasPrefix("--- ") || line.hasPrefix("+++ ") {
+                    return line
+                }
+                if line.hasPrefix("-") {
+                    return "\(white)\(removedBackground)\(line)\(reset)"
+                }
+                if line.hasPrefix("+") {
+                    return "\(white)\(addedBackground)\(line)\(reset)"
+                }
+                return line
+            }
+            .joined(separator: "\n")
     }
 }

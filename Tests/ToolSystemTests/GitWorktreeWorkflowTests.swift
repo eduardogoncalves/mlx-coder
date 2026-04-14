@@ -78,6 +78,41 @@ final class GitWorktreeWorkflowTests: XCTestCase {
         XCTAssertTrue(commits[0].contains("feat: update from worktree"))
     }
 
+    func testOnTaskCompleteCreatesCommitBeforeApprovalPromptWhenNeeded() async throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("git-worktree-orchestration-tests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        try runGit(["init"], cwd: tempDir.path)
+        try runGit(["config", "user.email", "tests@mlx-coder.local"], cwd: tempDir.path)
+        try runGit(["config", "user.name", "MLX Coder Tests"], cwd: tempDir.path)
+
+        let file = tempDir.appendingPathComponent("README.md")
+        try "base\n".write(to: file, atomically: true, encoding: .utf8)
+        try runGit(["add", "."], cwd: tempDir.path)
+        try runGit(["commit", "-m", "chore: initial commit"], cwd: tempDir.path)
+        try runGit(["branch", "-M", "main"], cwd: tempDir.path)
+
+        let manager = try await GitOrchestrationManager.create(projectRoot: tempDir.path)
+        _ = try await manager.prepareTask(userMessage: "implement merge approval flow", shouldPromptForBaseBranch: false)
+        try await manager.createWorktreeNow()
+
+        guard let worktreePath = await manager.getWorktreePath() else {
+            XCTFail("Expected worktree path to be initialized")
+            return
+        }
+
+        let worktreeFile = URL(fileURLWithPath: worktreePath).appendingPathComponent("README.md")
+        try "base\npending-change\n".write(to: worktreeFile, atomically: true, encoding: .utf8)
+
+        let guide = try await manager.onTaskComplete()
+
+        XCTAssertEqual(guide.commits.count, 1)
+        XCTAssertTrue(guide.commits[0].contains("Final changes"))
+        XCTAssertTrue(guide.approvalPromptMessage.contains("Commits created: 1"))
+    }
+
     private func runGit(_ arguments: [String], cwd: String) throws {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/git")

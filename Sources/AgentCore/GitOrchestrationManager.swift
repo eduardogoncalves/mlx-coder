@@ -313,12 +313,23 @@ public actor GitOrchestrationManager {
                 // Non-fatal - log but continue
             }
         }
-        
+
+        // Ensure at least one commit exists before showing merge approval guidance.
+        var commits = try await gitService.getCommitsSince(baseBranch: baseBranch, in: currentWorktreePath)
+        if commits.isEmpty {
+            do {
+                _ = try await gitService.commit(message: "Final changes", in: currentWorktreePath)
+                await stateTracker.recordCommit(message: "Final changes")
+                filesModifiedInCurrentSubtask.removeAll()
+                try await stateTracker.saveState()
+                commits = try await gitService.getCommitsSince(baseBranch: baseBranch, in: currentWorktreePath)
+            } catch GitError.nothingToCommit {
+                // No pending changes - keep zero commits.
+            }
+        }
+
         // Try to push to remote (non-blocking failure)
         let pushResult = await attemptPush()
-        
-        // Get commit info for PR guidance
-        let commits = try await gitService.getCommitsSince(baseBranch: baseBranch, in: currentWorktreePath)
         
         let guide = TaskCompletionGuide(
             branchName: currentBranchName ?? "unknown",
