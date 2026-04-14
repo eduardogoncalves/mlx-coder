@@ -2681,25 +2681,53 @@ public actor AgentLoop {
             originalContent = nil
         }
 
-        // Generate and display the diff
-        let diff = generateDiff(original: originalContent, new: tmpContent, path: call.path)
+        // Generate and display the diff from the tool's proposed final file content.
+        let previewContent: String
+        switch call.toolName {
+        case "edit_file":
+            if let originalContent,
+               let oldText = (
+                (call.otherArgs["old_text"] as? String)
+                ?? (call.otherArgs["oldText"] as? String)
+                ?? (call.otherArgs["old"] as? String)
+                ?? (call.otherArgs["search_text"] as? String)
+                ?? (call.otherArgs["searchText"] as? String)
+               ),
+               !oldText.isEmpty,
+               let range = originalContent.range(of: oldText) {
+                previewContent = originalContent.replacingCharacters(in: range, with: tmpContent)
+            } else {
+                // Fallback for malformed/partial arguments; execution-time correction
+                // still handles these cases before writing.
+                previewContent = tmpContent
+            }
+        case "append_file":
+            previewContent = (originalContent ?? "") + tmpContent
+        default:
+            previewContent = tmpContent
+        }
+
+        let diff = generateDiff(original: originalContent, new: previewContent, path: call.path)
         renderer.printStatus("\n\(diff)")
 
         // Ask for approval
-        let approved: Bool
+        let approval: (approved: Bool, suggestion: String?)
         if permissions.approvalMode == .yolo {
-            approved = true
+            approval = (true, nil)
         } else if permissions.approvalMode == .autoEdit && !["write_file", "edit_file", "append_file"].contains(call.toolName) {
             // autoEdit only auto-approves edit tools
-            approved = await askForToolApproval(name: call.toolName, isPlanMode: mode == .plan).approved
+            approval = await askForToolApproval(name: call.toolName, isPlanMode: mode == .plan)
         } else if autoApproveAllTools {
-            approved = true
+            approval = (true, nil)
         } else {
-            approved = await askForToolApproval(name: call.toolName, isPlanMode: mode == .plan).approved
+            approval = await askForToolApproval(name: call.toolName, isPlanMode: mode == .plan)
         }
 
-        if !approved {
+        if !approval.approved {
             try? FileManager.default.removeItem(at: call.contentFile)
+            if let suggestion = approval.suggestion {
+                return .error("User rejected the file change for \(call.path) with this feedback/suggestion: \(suggestion)")
+            }
             return .error("User rejected the file change for \(call.path)")
         }
 
@@ -2852,21 +2880,54 @@ public actor AgentLoop {
                 i += 1
                 j += 1
             } else {
-                // Change
+                // Change block: emit deletions before insertions to preserve
+                // unified-diff ordering within each hunk.
                 if context.isEmpty && changes.isEmpty {
                     origStart = max(1, i)
                     newStart = max(1, j)
                 }
-                if i < origLines.count {
-                    changes.append("-\(origLines[i])")
+
+                var removed: [String] = []
+                var added: [String] = []
+
+                while i < origLines.count && j < newLines.count && origLines[i] != newLines[j] {
+                    // Prefer a single-sided edit when the next line re-syncs.
+                    if j + 1 < newLines.count && origLines[i] == newLines[j + 1] {
+                        added.append(newLines[j])
+                        j += 1
+                    } else if i + 1 < origLines.count && origLines[i + 1] == newLines[j] {
+                        removed.append(origLines[i])
+                        i += 1
+                    } else {
+                        // Replacement: keep both but still output deletions first.
+                        removed.append(origLines[i])
+                        added.append(newLines[j])
+                        i += 1
+                        j += 1
+                    }
+                }
+
+                if j >= newLines.count {
+                    while i < origLines.count {
+                        removed.append(origLines[i])
+                        i += 1
+                    }
+                } else if i >= origLines.count {
+                    while j < newLines.count {
+                        added.append(newLines[j])
+                        j += 1
+                    }
+                }
+
+                for line in removed {
+                    changes.append("-\(line)")
                     origCount += 1
-                    i += 1
                 }
-                if j < newLines.count {
-                    changes.append("+\(newLines[j])")
+                for line in added {
+                    changes.append("+\(line)")
                     newCount += 1
-                    j += 1
                 }
+
                 context = []
             }
         }
