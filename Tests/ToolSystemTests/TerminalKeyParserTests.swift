@@ -40,4 +40,16 @@ final class TerminalKeyParserTests: XCTestCase {
         XCTAssertNil(TerminalKeyParser.numericSelection(forEscapeSequence: [79, 115], allowThirdOption: false))
         XCTAssertNil(TerminalKeyParser.numericSelection(forEscapeSequence: [91, 49, 126], allowThirdOption: true))
     }
+
+    func testNumericSelectionFromByteWithFourOptions() {
+        XCTAssertEqual(TerminalKeyParser.numericSelection(for: 49, optionCount: 4), 0)
+        XCTAssertEqual(TerminalKeyParser.numericSelection(for: 52, optionCount: 4), 3)
+        XCTAssertNil(TerminalKeyParser.numericSelection(for: 53, optionCount: 4))
+    }
+
+    func testNumericSelectionFromEscapeSequenceWithFourOptions() {
+        XCTAssertEqual(TerminalKeyParser.numericSelection(forEscapeSequence: [79, 113], optionCount: 4), 0)
+        XCTAssertEqual(TerminalKeyParser.numericSelection(forEscapeSequence: [79, 116], optionCount: 4), 3)
+        XCTAssertNil(TerminalKeyParser.numericSelection(forEscapeSequence: [79, 117], optionCount: 4))
+    }
 }

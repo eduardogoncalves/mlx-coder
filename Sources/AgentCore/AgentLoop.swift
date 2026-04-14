@@ -19,6 +19,7 @@ public actor AgentLoop {
     public private(set) var history: ConversationHistory
     private let maxToolIterations: Int
     private var autoApproveAllTools: Bool = false
+    private var sessionApprovedToolCommands: Set<String> = []
     private var useSandbox: Bool
     private var modelPath: String
     private let memoryLimit: Int?
@@ -531,12 +532,12 @@ public actor AgentLoop {
                 if isDestructive {
                     await hooks.emit(.permissionRequest(toolName: call.name, isPlanMode: mode == .plan))
                     if mode == .plan {
-                        approval = await askForToolApproval(name: call.name, isPlanMode: true)
+                        approval = await askForToolApproval(name: call.name, arguments: call.arguments, isPlanMode: true)
                         if approval.approved {
                             await setMode(.agent)
                         }
                     } else {
-                        approval = await askForToolApproval(name: call.name, isPlanMode: false)
+                        approval = await askForToolApproval(name: call.name, arguments: call.arguments, isPlanMode: false)
                     }
                 } else {
                     approval = (true, nil)
@@ -1895,6 +1896,46 @@ public actor AgentLoop {
         return text
     }
 
+    private static func menuOptionHint(_ count: Int) -> String {
+        guard count > 0 else { return "1" }
+        return (1...count).map(String.init).joined(separator: "/")
+    }
+
+    private static func approvalCommandKey(toolName: String, arguments: [String: Any]?) -> String {
+        guard toolName == "bash",
+              let arguments,
+              JSONSerialization.isValidJSONObject(arguments),
+              let data = try? JSONSerialization.data(withJSONObject: arguments, options: [.sortedKeys]),
+              let text = String(data: data, encoding: .utf8) else {
+            return toolName
+        }
+        return "\(toolName) \(text)"
+    }
+
+    private static func approvalCommandDisplay(toolName: String, arguments: [String: Any]?) -> String {
+        guard toolName == "bash", let arguments else {
+            return toolName.replacingOccurrences(of: "'", with: "\\'")
+        }
+
+        let command = (arguments["command"] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "'", with: "\\'") ?? ""
+        guard !command.isEmpty else {
+            return toolName.replacingOccurrences(of: "'", with: "\\'")
+        }
+
+        var otherArguments = arguments
+        otherArguments.removeValue(forKey: "command")
+        guard !otherArguments.isEmpty,
+              JSONSerialization.isValidJSONObject(otherArguments),
+              let data = try? JSONSerialization.data(withJSONObject: otherArguments, options: [.sortedKeys]),
+              let text = String(data: data, encoding: .utf8) else {
+            return "\(toolName) \(command)"
+        }
+
+        return "\(toolName) \(command) \(text.replacingOccurrences(of: "'", with: "\\'"))"
+    }
+
     static func makeTokenCountLookup(contents: [String], counts: [Int]) -> [String: Int] {
         var lookup: [String: Int] = [:]
         lookup.reserveCapacity(min(contents.count, counts.count))
@@ -2420,7 +2461,10 @@ public actor AgentLoop {
     }
 
     /// Prompt the user to approve a tool call using raw terminal mode.
-    private func askForToolApproval(name: String, isPlanMode: Bool) async -> (approved: Bool, suggestion: String?) {
+    private func askForToolApproval(name: String, arguments: [String: Any]? = nil, isPlanMode: Bool) async -> (approved: Bool, suggestion: String?) {
+        let approvalCommand = Self.approvalCommandKey(toolName: name, arguments: arguments)
+        let approvalCommandDisplay = Self.approvalCommandDisplay(toolName: name, arguments: arguments)
+
         // Global auto-approve mode for power users.
         if permissions.approvalMode == .yolo {
             await auditLogger?.logApprovalDecision(
@@ -2446,6 +2490,10 @@ public actor AgentLoop {
                 )
                 return (true, nil)
             }
+        }
+
+        if sessionApprovedToolCommands.contains(approvalCommand) && !isPlanMode {
+            return (true, nil)
         }
 
         if autoApproveAllTools && !isPlanMode {
@@ -2477,12 +2525,14 @@ public actor AgentLoop {
             "Stay in PLAN mode and deny with suggestion (esc)"
         ] : [
             "Yes, allow once",
-            "Yes, allow always in this session",
+            "Yes, allow '\(approvalCommandDisplay)' always in this session",
+            "Yes, allow all tool calls (autopilot mode)",
             "No, suggest changes (esc)"
         ]
         var selectedIndex = 0
         var menuDrawnOnce = false
-        var footerHint = "Use 1/2/3, arrows, Enter, or Esc."
+        let selectionHint = "Use \(Self.menuOptionHint(options.count)), arrows, Enter, or Esc."
+        var footerHint = selectionHint
         
         func drawMenu() {
             if menuDrawnOnce {
@@ -2525,11 +2575,11 @@ public actor AgentLoop {
                 if escapeKind == .bare {
                     // Bare ESC — treat as deny/cancel
                     shouldDrainInputTail = true
-                    finalSelection = isPlanMode ? 1 : 2
+                    finalSelection = isPlanMode ? 1 : (options.count - 1)
                     break
                 }
 
-                if let keypadSelection = TerminalKeyParser.numericSelection(forEscapeSequence: seq, allowThirdOption: !isPlanMode) {
+                if let keypadSelection = TerminalKeyParser.numericSelection(forEscapeSequence: seq, optionCount: options.count) {
                     selectedIndex = keypadSelection
                     drawMenu()
                     finalSelection = keypadSelection
@@ -2539,25 +2589,25 @@ public actor AgentLoop {
                 if let direction = TerminalKeyParser.arrowDirection(for: seq) {
                     if direction == .up {
                         selectedIndex = max(0, selectedIndex - 1)
-                        footerHint = "Use 1/2/3, arrows, Enter, or Esc."
+                        footerHint = selectionHint
                         drawMenu()
                     } else if direction == .down {
                         selectedIndex = min(options.count - 1, selectedIndex + 1)
-                        footerHint = "Use 1/2/3, arrows, Enter, or Esc."
+                        footerHint = selectionHint
                         drawMenu()
                     }
                 } else {
                     // Alt-key combos or unsupported escape sequences are ignored.
                     shouldDrainInputTail = true
-                    footerHint = "Unsupported key. Use 1/2/3, arrows, Enter, or Esc."
+                    footerHint = "Unsupported key. \(selectionHint)"
                     drawMenu()
                 }
             } else if byte == 10 || byte == 13 { // Enter
                 finalSelection = selectedIndex
                 break
-            } else if let numericSelection = TerminalKeyParser.numericSelection(for: byte, allowThirdOption: !isPlanMode) {
+            } else if let numericSelection = TerminalKeyParser.numericSelection(for: byte, optionCount: options.count) {
                 selectedIndex = numericSelection
-                footerHint = "Use 1/2/3, arrows, Enter, or Esc."
+                footerHint = selectionHint
                 drawMenu()
                 finalSelection = numericSelection
                 break
@@ -2567,7 +2617,7 @@ public actor AgentLoop {
                 print("\u{1B}[?25h\n")
                 exit(1)
             } else {
-                footerHint = "Unsupported key. Use 1/2/3, arrows, Enter, or Esc."
+                footerHint = "Unsupported key. \(selectionHint)"
                 drawMenu()
             }
         }
@@ -2591,17 +2641,27 @@ public actor AgentLoop {
             )
             return await resumeCancelListeningAndReturn((true, nil))
         } else if finalSelection == 1 && !isPlanMode {
+            sessionApprovedToolCommands.insert(approvalCommand)
+            await auditLogger?.logApprovalDecision(
+                toolName: name,
+                mode: mode.rawValue,
+                isPlanModePrompt: isPlanMode,
+                approved: true,
+                suggestion: "session_command_auto_approve_enabled:\(approvalCommand)"
+            )
+            return await resumeCancelListeningAndReturn((true, nil))
+        } else if finalSelection == 2 && !isPlanMode {
             autoApproveAllTools = true
             await auditLogger?.logApprovalDecision(
                 toolName: name,
                 mode: mode.rawValue,
                 isPlanModePrompt: isPlanMode,
                 approved: true,
-                suggestion: "session_auto_approve_enabled"
+                suggestion: "session_autopilot_mode_enabled"
             )
             return await resumeCancelListeningAndReturn((true, nil))
         } else {
-            // Option 3 or ESC: Suggest changes
+            // Last option or ESC: Suggest changes
             TerminalKeyParser.drainAvailableInput()
             var suggestionTerm = termios()
             tcgetattr(STDIN_FILENO, &suggestionTerm)
@@ -3045,11 +3105,15 @@ public actor AgentLoop {
             approval = (true, nil)
         } else if permissions.approvalMode == .autoEdit && !["write_file", "edit_file", "append_file"].contains(call.toolName) {
             // autoEdit only auto-approves edit tools
-            approval = await askForToolApproval(name: call.toolName, isPlanMode: mode == .plan)
+            var approvalArguments = call.otherArgs
+            approvalArguments["path"] = call.path
+            approval = await askForToolApproval(name: call.toolName, arguments: approvalArguments, isPlanMode: mode == .plan)
         } else if autoApproveAllTools {
             approval = (true, nil)
         } else {
-            approval = await askForToolApproval(name: call.toolName, isPlanMode: mode == .plan)
+            var approvalArguments = call.otherArgs
+            approvalArguments["path"] = call.path
+            approval = await askForToolApproval(name: call.toolName, arguments: approvalArguments, isPlanMode: mode == .plan)
         }
 
         if !approval.approved {
