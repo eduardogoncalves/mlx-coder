@@ -13,7 +13,7 @@ public actor AgentLoop {
 
     private var modelContainer: ModelContainer?
     private let registry: ToolRegistry
-    private let permissions: PermissionEngine
+    private var permissions: PermissionEngine
     private let renderer: StreamRenderer
     private let auditLogger: ToolAuditLogger?
     public private(set) var history: ConversationHistory
@@ -30,6 +30,7 @@ public actor AgentLoop {
     private let skillsMetadata: [SkillMetadata]
     private var promptSectionTokenEstimates: [PromptSection: Int]
     private let workspace: String
+    private let projectWorkspaceRoot: String
     private let buildCheckManager: BuildCheckManager
     private var gitOrchestrationManager: GitOrchestrationManager?
     
@@ -102,6 +103,8 @@ public actor AgentLoop {
     public private(set) var taskType: TaskType = .general
     public private(set) var currentMode: ModelMode = .planLow
     
+    private var interactiveInput: InteractiveInput?
+    
     private var currentGenerationConfig: GenerationEngine.Config
     private let condensationConfig = ToolResultCondensationConfig()
     private let contextReserveTokens: Int = 1024
@@ -158,6 +161,7 @@ public actor AgentLoop {
         self.maxToolIterations = maxToolIterations
         self.modelPath = modelPath
         self.workspace = workspace
+        self.projectWorkspaceRoot = permissions.workspaceRoot
         self.buildCheckManager = BuildCheckManager()
         self.useSandbox = useSandbox
         self.dryRun = dryRun
@@ -169,11 +173,8 @@ public actor AgentLoop {
         self.memoryLimit = memoryLimit
         self.cacheLimit = cacheLimit
         
-        // Initial loaded state
-        self.loadedModelPath = modelPath
-        self.loadedMemoryLimit = memoryLimit
-        self.loadedCacheLimit = cacheLimit
-        self.loadedKVBits = generationConfig.kvBits
+        // Initialize interactive input for branch name prompting
+        self.interactiveInput = InteractiveInput()
         
         // Ensure initial config matches default mode/thinking/task
         self.currentGenerationConfig = AgentLoop.calculateGenerationConfig(
@@ -274,15 +275,59 @@ public actor AgentLoop {
         // Initialize git orchestration for coding tasks
         if taskType == .coding && gitOrchestrationManager == nil {
             do {
-                self.gitOrchestrationManager = try await GitOrchestrationManager.create(projectRoot: workspace)
+                self.gitOrchestrationManager = try await GitOrchestrationManager.create(projectRoot: projectWorkspaceRoot)
                 let (branchName, baseBranch, warning) = try await gitOrchestrationManager!.prepareTask(userMessage: message)
-                renderer.printStatus("📋 Git branch prepared: \(branchName) (base: \(baseBranch))")
+                renderer.printStatus("📋 Proposed branch: \(branchName) (base: \(baseBranch))")
+                
+                // Prompt for custom branch name
+                if let interactiveInput = self.interactiveInput {
+                    let branchOptions = ["Use this name", "No, suggest changes (esc)"]
+                    print("")
+                    if let selected = await interactiveInput.selectOption(
+                        prompt: "Branch name options",
+                        options: branchOptions,
+                        escSelectsLastOption: true
+                    ) {
+                        if selected == 1 {
+                            // User wants to suggest an alternative branch name
+                            if let customName = await interactiveInput.promptForText(
+                                prompt: "[branch] Blocked. Suggest changes (or press Enter to keep proposed):",
+                                placeholder: branchName,
+                                validate: { name in
+                                    if !BranchNamer.isValidCustomBranchName(name) {
+                                        throw GitError.invalidCustomBranchName(name)
+                                    }
+                                    return true
+                                }
+                            ) {
+                                try await gitOrchestrationManager!.updateBranchName(customName)
+                                renderer.printStatus("✅ Using custom branch: \(customName)")
+                            } else {
+                                renderer.printStatus("Using proposed branch: \(branchName)")
+                            }
+                        } else {
+                            renderer.printStatus("Using branch: \(branchName)")
+                        }
+                    }
+                }
+                
+                // Create worktree immediately
+                try await gitOrchestrationManager!.createWorktreeNow()
+                let currentBranch = await gitOrchestrationManager!.getCurrentBranchName() ?? branchName
+                let worktreePath = await gitOrchestrationManager!.getWorktreePath() ?? "current directory"
+                renderer.printStatus("🌿 Worktree created at: \(worktreePath) (branch: \(currentBranch))")
+                
+                // Update permissions to use worktree as effective workspace
+                if let worktreePath = await gitOrchestrationManager!.getWorktreePath() {
+                    await switchSessionWorkspace(to: worktreePath, changeDirectory: false)
+                    renderer.printStatus("📁 Files will be edited in worktree")
+                }
+                
                 if let warning, !warning.isEmpty {
                     renderer.printStatus("⚠️  Git setup warning: \(warning)")
                 }
             } catch {
                 renderer.printStatus("⚠️  Git initialization failed: \(error.localizedDescription)")
-                // Continue anyway - git orchestration is optional
             }
         }
 
@@ -384,6 +429,13 @@ public actor AgentLoop {
                 // Check builds if write/edit tools were executed in agent/coding mode
                 if fileModificationToolsExecuted && mode == .agent && taskType == .coding {
                     await performBuildCheckIfNeeded(modifiedPaths: modifiedFilePaths)
+                    if let manager = gitOrchestrationManager {
+                        do {
+                            try await presentMergeApprovalFlow(manager: manager)
+                        } catch {
+                            renderer.printStatus("⚠️  Git completion flow failed: \(error.localizedDescription)")
+                        }
+                    }
                 }
                 
                 print() // newline after response
@@ -492,7 +544,7 @@ public actor AgentLoop {
                         let correctionResult = await ParameterCorrectionService.correct(
                             toolName: call.name,
                             arguments: call.arguments,
-                            workspaceRoot: workspace
+                            workspaceRoot: permissions.effectiveWorkspaceRoot
                         )
                         
                         // Log corrections if any were made
@@ -652,6 +704,304 @@ public actor AgentLoop {
         }
 
         renderer.printError("Exceeded maximum tool iterations (\(maxToolIterations))")
+    }
+
+    public func runMergeApprovalShortcutFlow() async {
+        do {
+            let manager = try await ensureGitOrchestrationManager()
+            try await presentMergeApprovalFlow(manager: manager)
+        } catch {
+            renderer.printStatus("⚠️  Could not run merge approval flow: \(error.localizedDescription)")
+        }
+    }
+
+    public func runGitTreeShortcutFlow() async {
+        do {
+            let manager = try await ensureGitOrchestrationManager()
+            let worktrees = try await manager.listAvailableWorktrees()
+            guard !worktrees.isEmpty else {
+                renderer.printStatus("No git worktrees found.")
+                return
+            }
+
+            let currentDir = URL(filePath: FileManager.default.currentDirectoryPath).standardized.path()
+            let options = worktrees.map { info in
+                let normalizedPath = URL(filePath: info.path).standardized.path()
+                let branch = info.branch ?? "detached HEAD"
+                let marker = normalizedPath == currentDir ? " (current)" : ""
+                return "\(branch) — \(normalizedPath)\(marker)"
+            }
+
+            guard let interactiveInput = self.interactiveInput else {
+                renderer.printStatus("Git worktrees:")
+                for option in options {
+                    renderer.printStatus("  \(option)")
+                }
+                return
+            }
+
+            let actionOptions = ["Switch workspace to a worktree", "Delete local branch"]
+            if let action = await interactiveInput.selectOption(
+                prompt: "Git tree actions",
+                options: actionOptions
+            ) {
+                if action == 1 {
+                    try await runBranchDeleteFlow(manager: manager, interactiveInput: interactiveInput)
+                    return
+                }
+
+                if let selected = await interactiveInput.selectOption(
+                    prompt: "Select git worktree",
+                    options: options
+                ) {
+                    let target = worktrees[selected]
+                    let connected = try await manager.connectToExistingWorktree(path: target.path)
+                    let normalizedPath = URL(filePath: connected.path).standardized.path()
+                    await switchSessionWorkspace(to: normalizedPath, changeDirectory: true)
+                    renderer.printStatus("📁 Switched workspace to: \(normalizedPath)")
+                    renderer.printStatus("🌿 Active branch: \(connected.branch)")
+                }
+            }
+        } catch {
+            renderer.printStatus("⚠️  Could not open git worktree selector: \(error.localizedDescription)")
+        }
+    }
+
+    private func runBranchDeleteFlow(manager: GitOrchestrationManager, interactiveInput: InteractiveInput) async throws {
+        let localBranches = try await manager.listLocalBranches()
+        guard !localBranches.isEmpty else {
+            renderer.printStatus("No local branches found.")
+            return
+        }
+
+        let currentDir = URL(filePath: FileManager.default.currentDirectoryPath).standardized.path()
+        let currentBranch = (try? await manager.getCurrentBranch(in: currentDir)) ?? ""
+        let branchOptions = localBranches.map { branch in
+            branch == currentBranch ? "\(branch) (current)" : branch
+        }
+
+        guard let selected = await interactiveInput.selectOption(
+            prompt: "Select local branch to delete",
+            options: branchOptions,
+            escSelectsLastOption: true
+        ) else {
+            return
+        }
+
+        let targetBranch = localBranches[selected]
+        let deleteOptions = ["Delete safely (-d)", "Force delete (-D)", "Cancel"]
+        guard let deleteAction = await interactiveInput.selectOption(
+            prompt: "Delete branch '\(targetBranch)'?",
+            options: deleteOptions,
+            escSelectsLastOption: true
+        ) else {
+            return
+        }
+
+        switch deleteAction {
+        case 0:
+            try await manager.deleteLocalBranch(targetBranch, force: false)
+            renderer.printStatus("🗑️ Deleted branch: \(targetBranch)")
+        case 1:
+            try await manager.deleteLocalBranch(targetBranch, force: true)
+            renderer.printStatus("🗑️ Force deleted branch: \(targetBranch)")
+        default:
+            renderer.printStatus("Branch deletion cancelled.")
+        }
+    }
+
+    private func ensureGitOrchestrationManager() async throws -> GitOrchestrationManager {
+        if let manager = gitOrchestrationManager {
+            return manager
+        }
+        let manager = try await GitOrchestrationManager.create(projectRoot: projectWorkspaceRoot)
+        gitOrchestrationManager = manager
+        return manager
+    }
+
+    private func presentMergeApprovalFlow(manager: GitOrchestrationManager) async throws {
+        var finalCommitMessage = "chore: finalize task changes"
+        var skipFinalCommit = false
+        if let interactiveInput = self.interactiveInput {
+            let pendingDiff = (try? await manager.buildPendingCommitDiff()) ?? ""
+            let suggestedFinalCommit = await generateCommitMessageSuggestion(
+                diff: pendingDiff,
+                fallback: finalCommitMessage,
+                context: "final commit"
+            )
+            let finalChoice = await chooseEditableMessage(
+                interactiveInput: interactiveInput,
+                title: "Final commit message",
+                suggested: suggestedFinalCommit,
+                allowSkip: true
+            )
+            finalCommitMessage = finalChoice.message
+            skipFinalCommit = finalChoice.skip
+            if skipFinalCommit {
+                renderer.printStatus("⏭️  Skipping final commit for now. Pending changes were kept.")
+            }
+        }
+
+        let completionGuide = try await manager.onTaskComplete(
+            finalCommitMessage: finalCommitMessage,
+            autoFinalCommit: !skipFinalCommit
+        )
+        renderer.printStatus(completionGuide.formattedMessage)
+
+        guard let interactiveInput = self.interactiveInput else { return }
+
+        print("")
+        let mergeOptions = [
+            "Leave for later",
+            "Merge now (squash)",
+            "Merge now (merge commit)",
+            "Merge now (rebase)"
+        ]
+        if let selected = await interactiveInput.selectOption(
+            prompt: "Merge decision",
+            options: mergeOptions
+        ) {
+            let outcome: MergeOutcome
+            switch selected {
+            case 1:
+                let diffArtifacts = try? await manager.buildDiffReview()
+                let suggestedSquashMessage = await generateCommitMessageSuggestion(
+                    diff: diffArtifacts?.fullDiff ?? "",
+                    fallback: "feat: merge \(completionGuide.branchName)",
+                    context: "squash merge commit"
+                )
+                let squashChoice = await chooseEditableMessage(
+                    interactiveInput: interactiveInput,
+                    title: "Squash commit message",
+                    suggested: suggestedSquashMessage
+                )
+                outcome = try await manager.finalizeAfterUserApproval(
+                    mergeNow: true,
+                    strategy: .squash,
+                    cleanupWorktree: true,
+                    squashCommitMessage: squashChoice.message
+                )
+            case 2:
+                outcome = try await manager.finalizeAfterUserApproval(
+                    mergeNow: true,
+                    strategy: .mergeCommit,
+                    cleanupWorktree: true,
+                    squashCommitMessage: nil
+                )
+            case 3:
+                outcome = try await manager.finalizeAfterUserApproval(
+                    mergeNow: true,
+                    strategy: .rebase,
+                    cleanupWorktree: true,
+                    squashCommitMessage: nil
+                )
+            default:
+                outcome = try await manager.finalizeAfterUserApproval(
+                    mergeNow: false,
+                    strategy: .squash,
+                    cleanupWorktree: false,
+                    squashCommitMessage: nil
+                )
+            }
+            renderer.printStatus("✅ \(outcome.message)")
+            for warning in outcome.cleanupWarnings {
+                renderer.printStatus("⚠️  Cleanup warning: \(warning)")
+            }
+
+            if outcome.merged && selected != 0 {
+                await restoreWorkspaceToProjectRoot()
+                do {
+                    try await reloadModel()
+                } catch {
+                    renderer.printStatus("⚠️  Merge completed, but model reload failed: \(error.localizedDescription)")
+                }
+            }
+        }
+    }
+
+    private func chooseEditableMessage(
+        interactiveInput: InteractiveInput,
+        title: String,
+        suggested: String,
+        allowSkip: Bool = false
+    ) async -> (message: String, skip: Bool) {
+        renderer.printStatus("📝 Proposed \(title.lowercased()): \(suggested)")
+        let options = allowSkip
+            ? ["Use this message", "No, suggest changes (esc)", "Skip commit for now"]
+            : ["Use this message", "No, suggest changes (esc)"]
+        if let selected = await interactiveInput.selectOption(
+            prompt: "\(title) options",
+            options: options,
+            escSelectsLastOption: true
+        ) {
+            if allowSkip && selected == 2 {
+                return (suggested, true)
+            }
+            if selected == 1 {
+                let edited = await interactiveInput.promptForText(
+                    prompt: "[\(title.lowercased())] Blocked. Suggest changes (or press Enter to keep suggested):",
+                    placeholder: suggested,
+                    validate: { message in
+                        let trimmed = message.trimmingCharacters(in: .whitespacesAndNewlines)
+                        if trimmed.isEmpty {
+                            throw NSError(
+                                domain: "AgentLoop",
+                                code: 3,
+                                userInfo: [NSLocalizedDescriptionKey: "\(title) cannot be empty"]
+                            )
+                        }
+                        return true
+                    }
+                ) ?? suggested
+                return (edited, false)
+            }
+        }
+        return (suggested, false)
+    }
+
+    private func restoreWorkspaceToProjectRoot() async {
+        let normalizedPath = URL(filePath: projectWorkspaceRoot).standardized.path()
+        await switchSessionWorkspace(to: normalizedPath, changeDirectory: true)
+        renderer.printStatus("📁 Restored workspace to project root: \(normalizedPath)")
+    }
+
+    private func switchSessionWorkspace(to path: String, changeDirectory: Bool) async {
+        let normalizedPath = URL(filePath: path).standardized.path()
+        permissions = PermissionEngine(
+            workspaceRoot: normalizedPath,
+            allowedCommands: permissions.allowedCommands,
+            deniedCommands: permissions.deniedCommands,
+            approvalMode: permissions.approvalMode,
+            policy: permissions.policy,
+            ignoredPathPatterns: permissions.ignoredPathPatterns
+        )
+        await registerToolsInternal()
+        if changeDirectory, !FileManager.default.changeCurrentDirectoryPath(normalizedPath) {
+            renderer.printStatus("⚠️  Failed to switch current directory to: \(normalizedPath)")
+        }
+    }
+
+    private func generateCommitMessageSuggestion(diff: String, fallback: String, context: String) async -> String {
+        let trimmedDiff = diff.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedDiff.isEmpty else { return fallback }
+        _ = context
+        // Deliberately avoid secondary model inference here because this path has shown
+        // runtime instability on some checkpoints after tool execution.
+        return heuristicCommitMessage(from: trimmedDiff, fallback: fallback)
+    }
+
+    private func heuristicCommitMessage(from diff: String, fallback: String) -> String {
+        let lower = diff.lowercased()
+        if lower.contains("test") || lower.contains("spec") || lower.contains("xctest") {
+            return "test: update coverage"
+        }
+        if lower.contains("readme") || lower.contains("/docs/") || lower.contains("changelog") {
+            return "docs: update documentation"
+        }
+        if lower.contains("fix") || lower.contains("error") || lower.contains("fatal") {
+            return "fix: harden merge approval flow"
+        }
+        return fallback
     }
 
     private func extractPolicyTargetPath(from arguments: [String: Any]) -> String? {
@@ -2156,7 +2506,7 @@ public actor AgentLoop {
         // Restore terminal and show cursor
         tcsetattr(STDIN_FILENO, TCSANOW, &originalTermios)
         print("\u{1B}[?25h\n")
-        
+
         if finalSelection == 0 {
             await auditLogger?.logApprovalDecision(
                 toolName: name,
@@ -2178,6 +2528,14 @@ public actor AgentLoop {
             return await resumeCancelListeningAndReturn((true, nil))
         } else {
             // Option 3 or ESC: Suggest changes
+            TerminalKeyParser.drainAvailableInput()
+            var suggestionTerm = termios()
+            tcgetattr(STDIN_FILENO, &suggestionTerm)
+            var cookedTerm = suggestionTerm
+            cookedTerm.c_lflag |= tcflag_t(ECHO | ICANON | ISIG)
+            cookedTerm.c_cc.16 = 1
+            cookedTerm.c_cc.17 = 0
+            tcsetattr(STDIN_FILENO, TCSANOW, &cookedTerm)
             print("[\(name)] Blocked. Suggest changes (or press Enter to deny with no comment): ", terminator: "")
             fflush(stdout)
             guard let suggestion = readLine(strippingNewline: true)?.trimmingCharacters(in: .whitespacesAndNewlines), !suggestion.isEmpty else {
@@ -2322,7 +2680,7 @@ public actor AgentLoop {
         renderer.printStatus("🔧 Checking builds in agent/coding mode...")
         
         let success = await buildCheckManager.checkBeforeCommit(
-            workspace: workspace,
+            workspace: permissions.effectiveWorkspaceRoot,
             onProgress: { msg in
                 // Progress updates from Ralph loop
                 self.renderer.printStatus("  → \(msg)")
@@ -2432,7 +2790,7 @@ public actor AgentLoop {
         // Read the actual file content
         let resolvedPath = (path as NSString).isAbsolutePath
             ? path
-            : (workspace as NSString).appendingPathComponent(path)
+            : (permissions.effectiveWorkspaceRoot as NSString).appendingPathComponent(path)
 
         guard FileManager.default.fileExists(atPath: resolvedPath),
               let fileContent = try? String(contentsOfFile: resolvedPath, encoding: .utf8) else {
@@ -2578,25 +2936,53 @@ public actor AgentLoop {
             originalContent = nil
         }
 
-        // Generate and display the diff
-        let diff = generateDiff(original: originalContent, new: tmpContent, path: call.path)
+        // Generate and display the diff from the tool's proposed final file content.
+        let previewContent: String
+        switch call.toolName {
+        case "edit_file":
+            if let originalContent,
+               let oldText = (
+                (call.otherArgs["old_text"] as? String)
+                ?? (call.otherArgs["oldText"] as? String)
+                ?? (call.otherArgs["old"] as? String)
+                ?? (call.otherArgs["search_text"] as? String)
+                ?? (call.otherArgs["searchText"] as? String)
+               ),
+               !oldText.isEmpty,
+               let range = originalContent.range(of: oldText) {
+                previewContent = originalContent.replacingCharacters(in: range, with: tmpContent)
+            } else {
+                // Fallback for malformed/partial arguments; execution-time correction
+                // still handles these cases before writing.
+                previewContent = tmpContent
+            }
+        case "append_file":
+            previewContent = (originalContent ?? "") + tmpContent
+        default:
+            previewContent = tmpContent
+        }
+
+        let diff = generateDiff(original: originalContent, new: previewContent, path: call.path)
         renderer.printStatus("\n\(diff)")
 
         // Ask for approval
-        let approved: Bool
+        let approval: (approved: Bool, suggestion: String?)
         if permissions.approvalMode == .yolo {
-            approved = true
+            approval = (true, nil)
         } else if permissions.approvalMode == .autoEdit && !["write_file", "edit_file", "append_file"].contains(call.toolName) {
             // autoEdit only auto-approves edit tools
-            approved = await askForToolApproval(name: call.toolName, isPlanMode: mode == .plan).approved
+            approval = await askForToolApproval(name: call.toolName, isPlanMode: mode == .plan)
         } else if autoApproveAllTools {
-            approved = true
+            approval = (true, nil)
         } else {
-            approved = await askForToolApproval(name: call.toolName, isPlanMode: mode == .plan).approved
+            approval = await askForToolApproval(name: call.toolName, isPlanMode: mode == .plan)
         }
 
-        if !approved {
+        if !approval.approved {
             try? FileManager.default.removeItem(at: call.contentFile)
+            if let suggestion = approval.suggestion {
+                return .error("User rejected the file change for \(call.path) with this feedback/suggestion: \(suggestion)")
+            }
             return .error("User rejected the file change for \(call.path)")
         }
 
@@ -2632,7 +3018,7 @@ public actor AgentLoop {
                 let correctionResult = await ParameterCorrectionService.correct(
                     toolName: "edit_file",
                     arguments: streamedArguments,
-                    workspaceRoot: workspace
+                    workspaceRoot: permissions.effectiveWorkspaceRoot
                 )
                 if correctionResult.wasCorrected {
                     for correction in correctionResult.corrections {
@@ -2713,7 +3099,8 @@ public actor AgentLoop {
             let lines = new.components(separatedBy: .newlines)
             let preview = lines.prefix(20).joined(separator: "\n")
             let truncated = lines.count > 20 ? "\n... (\(lines.count - 20) more lines)" : ""
-            return "--- /dev/null\n+++ b/\(path)\n@@ -0,0 +1,\(lines.count) @@\n\(preview)\(truncated)"
+            let diff = "--- /dev/null\n+++ b/\(path)\n@@ -0,0 +1,\(lines.count) @@\n\(preview)\(truncated)"
+            return colorizeUnifiedDiff(diff)
         }
 
         let origLines = original.components(separatedBy: .newlines)
@@ -2749,21 +3136,54 @@ public actor AgentLoop {
                 i += 1
                 j += 1
             } else {
-                // Change
+                // Change block: emit deletions before insertions to preserve
+                // unified-diff ordering within each hunk.
                 if context.isEmpty && changes.isEmpty {
                     origStart = max(1, i)
                     newStart = max(1, j)
                 }
-                if i < origLines.count {
-                    changes.append("-\(origLines[i])")
+
+                var removed: [String] = []
+                var added: [String] = []
+
+                while i < origLines.count && j < newLines.count && origLines[i] != newLines[j] {
+                    // Prefer a single-sided edit when the next line re-syncs.
+                    if j + 1 < newLines.count && origLines[i] == newLines[j + 1] {
+                        added.append(newLines[j])
+                        j += 1
+                    } else if i + 1 < origLines.count && origLines[i + 1] == newLines[j] {
+                        removed.append(origLines[i])
+                        i += 1
+                    } else {
+                        // Replacement: keep both but still output deletions first.
+                        removed.append(origLines[i])
+                        added.append(newLines[j])
+                        i += 1
+                        j += 1
+                    }
+                }
+
+                if j >= newLines.count {
+                    while i < origLines.count {
+                        removed.append(origLines[i])
+                        i += 1
+                    }
+                } else if i >= origLines.count {
+                    while j < newLines.count {
+                        added.append(newLines[j])
+                        j += 1
+                    }
+                }
+
+                for line in removed {
+                    changes.append("-\(line)")
                     origCount += 1
-                    i += 1
                 }
-                if j < newLines.count {
-                    changes.append("+\(newLines[j])")
+                for line in added {
+                    changes.append("+\(line)")
                     newCount += 1
-                    j += 1
                 }
+
                 context = []
             }
         }
@@ -2772,12 +3192,36 @@ public actor AgentLoop {
             diff += buildHunk(origStart: origStart, origCount: origCount, newStart: newStart, newCount: newCount, changes: changes)
         }
 
-        return diff.isEmpty ? "(no changes)" : diff
+        return diff.isEmpty ? "(no changes)" : colorizeUnifiedDiff(diff)
     }
 
     private func buildHunk(origStart: Int, origCount: Int, newStart: Int, newCount: Int, changes: [String]) -> String {
         let origRange = origCount > 0 ? "\(origStart),\(origCount)" : "\(origStart),0"
         let newRange = newCount > 0 ? "\(newStart),\(newCount)" : "\(newStart),0"
         return "@@ -\(origRange) +\(newRange) @@\n" + changes.joined(separator: "\n") + "\n"
+    }
+
+    private func colorizeUnifiedDiff(_ diff: String) -> String {
+        let white = "\u{001B}[38;2;255;255;255m"
+        let removedBackground = "\u{001B}[48;2;38;24;28m" // #26181c
+        let addedBackground = "\u{001B}[48;2;20;38;29m" // #14261d
+        let reset = "\u{001B}[0m"
+
+        return diff
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .map { rawLine in
+                let line = String(rawLine)
+                if line.hasPrefix("--- ") || line.hasPrefix("+++ ") {
+                    return line
+                }
+                if line.hasPrefix("-") {
+                    return "\(white)\(removedBackground)\(line)\(reset)"
+                }
+                if line.hasPrefix("+") {
+                    return "\(white)\(addedBackground)\(line)\(reset)"
+                }
+                return line
+            }
+            .joined(separator: "\n")
     }
 }

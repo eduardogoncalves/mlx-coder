@@ -72,4 +72,16 @@ final class PermissionEngineTests: XCTestCase {
         XCTAssertTrue(engine.isPathIgnored("/tmp/workspace/vendor/lib/file.swift"))
         XCTAssertFalse(engine.isPathIgnored("Sources/Main.swift"))
     }
+
+    func testEffectiveWorkspaceRootMatchesWorkspaceRoot() throws {
+        let tempRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mlx-coder-permissions-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tempRoot, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempRoot) }
+
+        let engine = PermissionEngine(workspaceRoot: tempRoot.path)
+
+        XCTAssertTrue((engine.effectiveWorkspaceRoot as NSString).isAbsolutePath)
+        XCTAssertEqual(engine.effectiveWorkspaceRoot, URL(filePath: tempRoot.path).standardized.path())
+    }
 }

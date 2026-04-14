@@ -109,6 +109,21 @@ public struct GitErrorHandler: Sendable {
         
         case .stateFileNotFound:
             return stateFileNotFoundError()
+        
+        case .invalidCustomBranchName(let name):
+            return invalidCustomBranchNameError(name: name)
+        
+        case .branchNameAlreadyExists(let name):
+            return branchNameAlreadyExistsError(name: name)
+
+        case .mergeFailed(let reason):
+            return mergeFailedError(reason: reason)
+
+        case .rebaseFailed(let reason):
+            return rebaseFailedError(reason: reason)
+
+        case .cleanupFailed(let reason):
+            return cleanupFailedError(reason: reason)
         }
     }
     
@@ -223,13 +238,55 @@ public struct GitErrorHandler: Sendable {
             title: "Invalid Branch Name",
             message: "Branch name '\(name)' does not match required format.",
             suggestions: [
-                "Branch names must match: [feature|hotfix|chore]/YYYYMMDD-task-name",
-                "Example: 'feature/20260328-add-git-support'",
+                "Branch names must match: [feature|fix|chore]/task-name",
+                "Example: 'feature/add-git-support'",
                 "Use simpler, lowercase task descriptions",
                 "Avoid special characters"
             ],
             isRecoverable: true,
             category: .repositoryNotSetup
+        )
+    }
+
+    private static func mergeFailedError(reason: String) -> UserError {
+        UserError(
+            title: "Merge Failed",
+            message: "Could not merge branch into base: \(reason)",
+            suggestions: [
+                "Review branch diff and conflicts",
+                "Run 'git status' to inspect merge state",
+                "Resolve conflicts and retry merge"
+            ],
+            isRecoverable: true,
+            category: .workingTreeConflict
+        )
+    }
+
+    private static func rebaseFailedError(reason: String) -> UserError {
+        UserError(
+            title: "Rebase Failed",
+            message: "Could not rebase branch: \(reason)",
+            suggestions: [
+                "Resolve conflicts with 'git status'",
+                "Continue with: git rebase --continue",
+                "Abort with: git rebase --abort and retry"
+            ],
+            isRecoverable: true,
+            category: .workingTreeConflict
+        )
+    }
+
+    private static func cleanupFailedError(reason: String) -> UserError {
+        UserError(
+            title: "Cleanup Failed",
+            message: "Could not clean up worktree resources: \(reason)",
+            suggestions: [
+                "Run 'git worktree list' to inspect active worktrees",
+                "Remove manually with 'git worktree remove <path>'",
+                "Prune stale entries with 'git worktree prune'"
+            ],
+            isRecoverable: true,
+            category: .workingTreeConflict
         )
     }
     
@@ -342,6 +399,35 @@ public struct GitErrorHandler: Sendable {
             ],
             isRecoverable: true,
             category: .unknown
+        )
+    }
+    
+    private static func invalidCustomBranchNameError(name: String) -> UserError {
+        UserError(
+            title: "Invalid Branch Name",
+            message: "Branch name '\(name)' is not valid.",
+            suggestions: [
+                "Use letters, numbers, hyphens (-), underscores (_), or slashes (/)",
+                "Avoid leading or trailing hyphens",
+                "Avoid consecutive slashes",
+                "Example valid names: feature/my-feature, hotfix/bug-fix, my-branch"
+            ],
+            isRecoverable: true,
+            category: .commitValidation
+        )
+    }
+    
+    private static func branchNameAlreadyExistsError(name: String) -> UserError {
+        UserError(
+            title: "Branch Already Exists",
+            message: "Branch '\(name)' already exists in this repository.",
+            suggestions: [
+                "Choose a different branch name",
+                "Use 'git branch -a' to see existing branches",
+                "Or delete the existing branch first: git branch -D \(name)"
+            ],
+            isRecoverable: true,
+            category: .workingTreeConflict
         )
     }
     

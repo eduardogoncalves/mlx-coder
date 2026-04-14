@@ -345,12 +345,21 @@ public final class InteractiveInput: @unchecked Sendable {
     }
 
     /// Displays a simple arrow-key picker and returns the selected option index.
-    /// Up/Down moves the selection; Enter confirms; Escape or Ctrl-C cancels.
-    public func selectOption(prompt: String, options: [String]) async -> Int? {
+    /// Up/Down moves the selection; Enter confirms.
+    /// Escape can either cancel or select the last option (`escSelectsLastOption`).
+    public func selectOption(prompt: String, options: [String], escSelectsLastOption: Bool = false) async -> Int? {
         guard !options.isEmpty else { return nil }
 
         guard isatty(STDIN_FILENO) == 1 else {
             return 0
+        }
+
+        // Prevent concurrent stdin readers (e.g. cancellation listener) from
+        // stealing escape sequences while the picker is active.
+        await CancelController.shared.suspendListening()
+        func resumeListeningAndReturn<T>(_ value: T) async -> T {
+            await CancelController.shared.resumeListeningIfNeeded()
+            return value
         }
 
         var originalTerm = termios()
@@ -361,13 +370,19 @@ public final class InteractiveInput: @unchecked Sendable {
         rawTerm.c_cc.16 = 1
         rawTerm.c_cc.17 = 0
         tcsetattr(STDIN_FILENO, TCSANOW, &rawTerm)
-
-        defer {
+        tcflush(STDIN_FILENO, TCIFLUSH)
+        
+        var terminalRestored = false
+        func restoreTerminalIfNeeded() {
+            guard !terminalRestored else { return }
             tcsetattr(STDIN_FILENO, TCSANOW, &originalTerm)
+            terminalRestored = true
         }
 
         let title = prompt.isEmpty ? "Select a model" : prompt
-        let footer = "Use Up/Down and Enter. Esc cancels."
+        let footer = escSelectsLastOption
+            ? "Use Up/Down (or j/k) and Enter. Esc selects last option."
+            : "Use Up/Down (or j/k) and Enter. Esc cancels."
         var selectedIndex = 0
         var isInitialDraw = true
         var renderedLineCount = 0
@@ -406,34 +421,61 @@ public final class InteractiveInput: @unchecked Sendable {
                 }
                 print("\r\u{1B}[J", terminator: "")
                 fflush(stdout)
-                return nil
+                restoreTerminalIfNeeded()
+                return await resumeListeningAndReturn(nil)
             } else if byte == 10 || byte == 13 {
                 break
+            } else if byte == 106 { // j
+                if options.count > 1 {
+                    selectedIndex = (selectedIndex + 1) % options.count
+                    draw()
+                }
+            } else if byte == 107 { // k
+                if options.count > 1 {
+                    selectedIndex = (selectedIndex - 1 + options.count) % options.count
+                    draw()
+                }
+            } else if let numericSelection = TerminalKeyParser.numericSelection(for: byte, allowThirdOption: options.count >= 3) {
+                if numericSelection < options.count {
+                    selectedIndex = numericSelection
+                    draw()
+                }
             } else if byte == 27 {
-                let sequence = TerminalKeyParser.readEscapeSequence(initialTimeoutMs: 80, extendedTimeoutMs: 120)
+                let sequence = TerminalKeyParser.readEscapeSequence(initialTimeoutMs: 200, extendedTimeoutMs: 300)
                 if sequence.isEmpty {
-                    if renderedLineCount > 0 {
-                        print("\r\u{1B}[\(renderedLineCount)A", terminator: "")
+                    if escSelectsLastOption {
+                        selectedIndex = options.count - 1
+                        break
+                    } else {
+                        if renderedLineCount > 0 {
+                            print("\r\u{1B}[\(renderedLineCount)A", terminator: "")
+                        }
+                        print("\r\u{1B}[J", terminator: "")
+                        fflush(stdout)
+                        restoreTerminalIfNeeded()
+                        return await resumeListeningAndReturn(nil)
                     }
-                    print("\r\u{1B}[J", terminator: "")
-                    fflush(stdout)
-                    return nil
                 }
 
                 if let direction = TerminalKeyParser.arrowDirection(for: sequence) {
                     switch direction {
                     case .up:
-                        if selectedIndex > 0 {
-                            selectedIndex -= 1
+                        if options.count > 1 {
+                            selectedIndex = (selectedIndex - 1 + options.count) % options.count
                             draw()
                         }
                     case .down:
-                        if selectedIndex < options.count - 1 {
-                            selectedIndex += 1
+                        if options.count > 1 {
+                            selectedIndex = (selectedIndex + 1) % options.count
                             draw()
                         }
                     case .left, .right:
                         break
+                    }
+                } else if let numericSelection = TerminalKeyParser.numericSelection(forEscapeSequence: sequence, allowThirdOption: options.count >= 3) {
+                    if numericSelection < options.count {
+                        selectedIndex = numericSelection
+                        draw()
                     }
                 }
             }
@@ -444,7 +486,62 @@ public final class InteractiveInput: @unchecked Sendable {
         }
         print("\r\u{1B}[J", terminator: "")
         fflush(stdout)
-        return selectedIndex
+        restoreTerminalIfNeeded()
+        return await resumeListeningAndReturn(selectedIndex)
+    }
+    
+    public func promptForText(prompt: String, placeholder: String = "", validate: @escaping (String) throws -> Bool = { _ in true }) async -> String? {
+        await CancelController.shared.suspendListening()
+        func resumeListeningAndReturn<T>(_ value: T) async -> T {
+            await CancelController.shared.resumeListeningIfNeeded()
+            return value
+        }
+
+        var originalTerm = termios()
+        tcgetattr(STDIN_FILENO, &originalTerm)
+        var cookedTerm = originalTerm
+        cookedTerm.c_lflag |= tcflag_t(ECHO | ICANON | ISIG)
+        cookedTerm.c_cc.16 = 1
+        cookedTerm.c_cc.17 = 0
+        tcsetattr(STDIN_FILENO, TCSANOW, &cookedTerm)
+
+        // Avoid carrying buffered escape tails from previous key-mode menus.
+        tcflush(STDIN_FILENO, TCIFLUSH)
+
+        print("\n\(bold)\(prompt)\(reset)")
+        if !placeholder.isEmpty {
+            print("\(dim)[\(placeholder)]\(reset)")
+        }
+        print("\(magenta)> \(reset)", terminator: "")
+        fflush(stdout)
+
+        var terminalRestored = false
+        func restoreTerminalIfNeeded() {
+            guard !terminalRestored else { return }
+            tcsetattr(STDIN_FILENO, TCSANOW, &originalTerm)
+            terminalRestored = true
+        }
+
+        guard let line = readLine(strippingNewline: true) else {
+            print("")
+            restoreTerminalIfNeeded()
+            return await resumeListeningAndReturn(nil)
+        }
+        print("")
+
+        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        let finalInput = trimmed.isEmpty ? placeholder : trimmed
+        
+        do {
+            try _ = validate(finalInput)
+            restoreTerminalIfNeeded()
+            return await resumeListeningAndReturn(finalInput)
+        } catch {
+            print("\(dim)Validation failed: \(error.localizedDescription)\(reset)")
+        }
+        
+        restoreTerminalIfNeeded()
+        return await resumeListeningAndReturn(nil)
     }
     
     private func moveToPreviousWord(input: String, cursorPosition: inout Int) {
