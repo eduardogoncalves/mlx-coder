@@ -374,6 +374,9 @@ public actor AgentLoop {
         var lastReadFileSignature: String?
         var sameReadFileStreak = 0
         var readLoopSteeredPaths = Set<String>()
+        var lastReadOnlyToolSignature: String?
+        var sameReadOnlyToolStreak = 0
+        var readOnlyLoopSteeredSignatures = Set<String>()
 
         while iterations < maxToolIterations {
             iterations += 1
@@ -481,6 +484,16 @@ public actor AgentLoop {
                 sameReadFileStreak = readLoopState.nextStreak
                 let blockedRepeatedReadPath = readLoopState.shouldBlock ? readLoopState.rawPath : nil
                 let blockedRepeatedReadNormalizedPath = readLoopState.shouldBlock ? readLoopState.normalizedPath : nil
+
+                let readOnlyLoopState = Self.evaluateReadOnlyToolLoop(
+                    callName: call.name,
+                    arguments: call.arguments,
+                    previousSignature: lastReadOnlyToolSignature,
+                    previousStreak: sameReadOnlyToolStreak
+                )
+                lastReadOnlyToolSignature = readOnlyLoopState.nextSignature
+                sameReadOnlyToolStreak = readOnlyLoopState.nextStreak
+                let blockedRepeatedReadOnlySignature = readOnlyLoopState.shouldBlock ? readOnlyLoopState.signature : nil
                 
                 // Track file modifications for build checking
                 let isFileModificationTool = (call.name == "write_file" || call.name == "edit_file" || call.name == "append_file" || call.name == "patch")
@@ -538,6 +551,12 @@ public actor AgentLoop {
                            !readLoopSteeredPaths.contains(normalizedPath) {
                             readLoopSteeredPaths.insert(normalizedPath)
                             steeringQueue.append("You are repeatedly calling read_file for '\(blockedPath)'. Reuse prior read output from history, or read a different file/line range only if needed.")
+                        }
+                    } else if let blockedSignature = blockedRepeatedReadOnlySignature {
+                        result = .error("Detected repeated \(call.name) loop with the same arguments. Reuse prior tool output in history and continue without re-running it.")
+                        if !readOnlyLoopSteeredSignatures.contains(blockedSignature) {
+                            readOnlyLoopSteeredSignatures.insert(blockedSignature)
+                            steeringQueue.append("You are repeatedly calling \(call.name) with identical arguments. Reuse the existing tool output and move to the final answer.")
                         }
                     } else {
                         // Apply automatic parameter correction before execution
@@ -1887,6 +1906,16 @@ public actor AgentLoop {
     }
 
     private static let repeatedReadFileStreakLimit = 2
+    private static let repeatedReadOnlyToolStreakLimit = 1
+    private static let repeatedReadOnlyLoopTools: Set<String> = [
+        "list_dir",
+        "glob",
+        "grep",
+        "read_many",
+        "code_search",
+        "web_fetch",
+        "web_search"
+    ]
 
     static func evaluateReadFileLoop(
         callName: String,
@@ -1914,6 +1943,25 @@ public actor AgentLoop {
         return (currentSignature, nextStreak, shouldBlock, normalizedPath, rawPath)
     }
 
+    static func evaluateReadOnlyToolLoop(
+        callName: String,
+        arguments: [String: Any],
+        previousSignature: String?,
+        previousStreak: Int,
+        limit: Int = AgentLoop.repeatedReadOnlyToolStreakLimit
+    ) -> (nextSignature: String?, nextStreak: Int, shouldBlock: Bool, signature: String?) {
+        guard repeatedReadOnlyLoopTools.contains(callName) else {
+            return (nil, 0, false, nil)
+        }
+
+        let normalizedArgs = normalizedReadOnlyLoopArguments(arguments)
+        let argsSignature = stableReadOnlyLoopArgumentsSignature(normalizedArgs)
+        let currentSignature = "\(callName)|\(argsSignature)"
+        let nextStreak = (currentSignature == previousSignature) ? (previousStreak + 1) : 1
+        let shouldBlock = nextStreak > limit
+        return (currentSignature, nextStreak, shouldBlock, currentSignature)
+    }
+
     private static func readFileLoopSignatureValue(_ value: Any?) -> String {
         switch value {
         case let stringValue as String:
@@ -1925,6 +1973,32 @@ public actor AgentLoop {
         default:
             return String(describing: value!)
         }
+    }
+
+    private static func normalizedReadOnlyLoopArguments(_ arguments: [String: Any]) -> [String: Any] {
+        var normalized = arguments
+        let pathKeys = ["path", "file_path"]
+        for key in pathKeys {
+            if let path = normalized[key] as? String {
+                let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
+                normalized[key] = NSString(string: trimmed).standardizingPath
+            }
+        }
+        if let paths = normalized["paths"] as? [String] {
+            normalized["paths"] = paths.map {
+                NSString(string: $0.trimmingCharacters(in: .whitespacesAndNewlines)).standardizingPath
+            }
+        }
+        return normalized
+    }
+
+    private static func stableReadOnlyLoopArgumentsSignature(_ arguments: [String: Any]) -> String {
+        guard JSONSerialization.isValidJSONObject(arguments),
+              let data = try? JSONSerialization.data(withJSONObject: arguments, options: [.sortedKeys]),
+              let text = String(data: data, encoding: .utf8) else {
+            return String(describing: arguments)
+        }
+        return text
     }
 
     static func missingRequiredArgumentNames(required: [String]?, arguments: [String: Any]) -> [String] {

@@ -135,4 +135,56 @@ final class AgentLoopTokenLookupTests: XCTestCase {
 
         XCTAssertTrue(missing.isEmpty)
     }
+
+    func testEvaluateReadOnlyToolLoopBlocksSecondConsecutiveIdenticalCall() {
+        let first = AgentLoop.evaluateReadOnlyToolLoop(
+            callName: "list_dir",
+            arguments: ["path": ".", "recursive": false],
+            previousSignature: nil,
+            previousStreak: 0
+        )
+
+        let second = AgentLoop.evaluateReadOnlyToolLoop(
+            callName: "list_dir",
+            arguments: ["path": "./", "recursive": false],
+            previousSignature: first.nextSignature,
+            previousStreak: first.nextStreak
+        )
+
+        XCTAssertFalse(first.shouldBlock)
+        XCTAssertTrue(second.shouldBlock)
+        XCTAssertEqual(second.nextStreak, 2)
+    }
+
+    func testEvaluateReadOnlyToolLoopResetsForDifferentArguments() {
+        let first = AgentLoop.evaluateReadOnlyToolLoop(
+            callName: "list_dir",
+            arguments: ["path": ".", "recursive": false],
+            previousSignature: nil,
+            previousStreak: 0
+        )
+
+        let second = AgentLoop.evaluateReadOnlyToolLoop(
+            callName: "list_dir",
+            arguments: ["path": ".", "recursive": true],
+            previousSignature: first.nextSignature,
+            previousStreak: first.nextStreak
+        )
+
+        XCTAssertFalse(second.shouldBlock)
+        XCTAssertEqual(second.nextStreak, 1)
+    }
+
+    func testEvaluateReadOnlyToolLoopIgnoresNonReadOnlyTools() {
+        let state = AgentLoop.evaluateReadOnlyToolLoop(
+            callName: "write_file",
+            arguments: ["path": "a.txt", "content": "x"],
+            previousSignature: "list_dir|{}",
+            previousStreak: 3
+        )
+
+        XCTAssertNil(state.nextSignature)
+        XCTAssertEqual(state.nextStreak, 0)
+        XCTAssertFalse(state.shouldBlock)
+    }
 }

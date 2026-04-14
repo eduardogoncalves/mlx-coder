@@ -123,7 +123,7 @@ public struct ConversationHistory: Sendable {
         var result = ""
         for message in messagesOverride {
             result += "\(ToolCallPattern.imStart)\(message.role.rawValue)\n"
-            result += message.content
+            result += sanitizedChatMLContent(message.content)
             result += "\n\(ToolCallPattern.imEnd)\n"
         }
         // Add the opening for the assistant's next turn
@@ -138,6 +138,14 @@ public struct ConversationHistory: Sendable {
         }
         
         return result
+    }
+
+    /// Escapes ChatML control tokens present in message content so untrusted tool/user text
+    /// cannot inject synthetic role boundaries into subsequent model turns.
+    private func sanitizedChatMLContent(_ content: String) -> String {
+        content
+            .replacingOccurrences(of: ToolCallPattern.imStart, with: "[CHATML_IM_START]")
+            .replacingOccurrences(of: ToolCallPattern.imEnd, with: "[CHATML_IM_END]")
     }
 
     /// Total estimated token count (rough: 4 chars ≈ 1 token).
