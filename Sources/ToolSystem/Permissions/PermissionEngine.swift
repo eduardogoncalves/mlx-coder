@@ -11,40 +11,6 @@ import Glibc
 /// Validates filesystem paths and shell commands against security rules.
 /// All resolved paths must start with `workspaceRoot`. Reject otherwise.
 public struct PermissionEngine: Sendable {
-    
-    /// Global effective workspace override - use setGlobalEffectiveWorkspace/clearGlobalEffectiveWorkspace
-    /// Marked as unsafe because this is intentionally shared mutable state for worktree support
-    private static nonisolated(unsafe) var _globalEffectiveWorkspace: String? = nil
-    
-    /// Set the global effective workspace (e.g., worktree path) - affects all PermissionEngine instances
-    public static nonisolated func setGlobalEffectiveWorkspace(_ path: String?) {
-        guard let path else {
-            _globalEffectiveWorkspace = nil
-            return
-        }
-
-        let expanded = NSString(string: path).expandingTildeInPath
-        let absolutePath: String
-        if expanded.hasPrefix("/") {
-            absolutePath = expanded
-        } else {
-            absolutePath = URL(filePath: FileManager.default.currentDirectoryPath)
-                .appending(path: expanded)
-                .standardized.path()
-        }
-
-        _globalEffectiveWorkspace = URL(filePath: absolutePath).standardized.path()
-    }
-    
-    /// Get the global effective workspace
-    public static nonisolated func getGlobalEffectiveWorkspace() -> String? {
-        _globalEffectiveWorkspace
-    }
-    
-    /// Clear the global effective workspace
-    public static nonisolated func clearGlobalEffectiveWorkspace() {
-        _globalEffectiveWorkspace = nil
-    }
 
     /// Static policy document used for tool/path allow/deny rules.
     public struct PolicyDocument: Sendable, Codable {
@@ -124,10 +90,6 @@ public struct PermissionEngine: Sendable {
 
     /// Get the effective workspace (worktree if set, otherwise original)
     public var effectiveWorkspaceRoot: String {
-        // Check global override first (set by git orchestration)
-        if let global = PermissionEngine.getGlobalEffectiveWorkspace() {
-            return global
-        }
         return workspaceRoot
     }
 

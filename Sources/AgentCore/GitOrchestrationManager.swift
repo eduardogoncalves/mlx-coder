@@ -407,9 +407,13 @@ public actor GitOrchestrationManager {
             return MergeOutcome(
                 merged: false,
                 cleanedUp: false,
-                message: "Merge deferred. Worktree remains available at \(summary.worktreePath ?? "current directory")."
+                message: "Merge deferred. Worktree remains available at \(summary.worktreePath ?? "current directory").",
+                cleanupWarnings: []
             )
         }
+
+        // Re-sync base immediately before merge to reduce stale-base surprises.
+        _ = try await gitService.syncBaseBranch(summary.baseBranch)
 
         let mergeMessage: String
         switch strategy {
@@ -438,6 +442,7 @@ public actor GitOrchestrationManager {
         }
 
         var cleanedUp = false
+        var cleanupWarnings: [String] = []
         if cleanupWorktree {
             let forceDeleteBranch: Bool
             switch strategy {
@@ -447,11 +452,23 @@ public actor GitOrchestrationManager {
                 forceDeleteBranch = false
             }
             if let worktreePath = summary.worktreePath {
-                try await gitService.removeWorktree(path: worktreePath)
+                do {
+                    try await gitService.removeWorktree(path: worktreePath)
+                } catch {
+                    cleanupWarnings.append(error.localizedDescription)
+                }
             }
-            try await gitService.deleteBranch(summary.branchName, force: forceDeleteBranch)
-            try await gitService.pruneWorktrees()
-            cleanedUp = true
+            do {
+                try await gitService.deleteBranch(summary.branchName, force: forceDeleteBranch)
+            } catch {
+                cleanupWarnings.append(error.localizedDescription)
+            }
+            do {
+                try await gitService.pruneWorktrees()
+            } catch {
+                cleanupWarnings.append(error.localizedDescription)
+            }
+            cleanedUp = cleanupWarnings.isEmpty
         }
 
         pendingApprovalSummary = nil
@@ -460,7 +477,10 @@ public actor GitOrchestrationManager {
             cleanedUp: cleanedUp,
             message: cleanedUp
                 ? "Merge completed on \(summary.baseBranch) and worktree cleaned up."
-                : "Merge completed on \(summary.baseBranch). Worktree was kept."
+                : cleanupWorktree
+                    ? "Merge completed on \(summary.baseBranch), but cleanup had issues."
+                    : "Merge completed on \(summary.baseBranch). Worktree was kept.",
+            cleanupWarnings: cleanupWarnings
         )
     }
     
@@ -564,6 +584,7 @@ public struct MergeOutcome: Sendable {
     public let merged: Bool
     public let cleanedUp: Bool
     public let message: String
+    public let cleanupWarnings: [String]
 }
 
 public struct VerificationStepResult: Sendable {

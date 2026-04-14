@@ -227,6 +227,53 @@ final class GitWorktreeWorkflowTests: XCTestCase {
         XCTAssertFalse(branches.contains(featureBranch))
     }
 
+    func testFinalizeAfterApprovalReportsCleanupWarningsWithoutMaskingMergeSuccess() async throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("git-worktree-merge-cleanup-warning-tests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        try runGit(["init"], cwd: tempDir.path)
+        try runGit(["config", "user.email", "tests@mlx-coder.local"], cwd: tempDir.path)
+        try runGit(["config", "user.name", "MLX Coder Tests"], cwd: tempDir.path)
+
+        let file = tempDir.appendingPathComponent("README.md")
+        try "base\n".write(to: file, atomically: true, encoding: .utf8)
+        try runGit(["add", "."], cwd: tempDir.path)
+        try runGit(["commit", "-m", "chore: initial commit"], cwd: tempDir.path)
+        try runGit(["branch", "-M", "main"], cwd: tempDir.path)
+
+        let manager = try await GitOrchestrationManager.create(projectRoot: tempDir.path)
+        _ = try await manager.prepareTask(userMessage: "add cleanup warning coverage", shouldPromptForBaseBranch: false)
+        try await manager.createWorktreeNow()
+
+        guard let worktreePath = await manager.getWorktreePath() else {
+            XCTFail("Expected worktree path")
+            return
+        }
+
+        let worktreeFile = URL(fileURLWithPath: worktreePath).appendingPathComponent("README.md")
+        try "base\ncleanup-warning-change\n".write(to: worktreeFile, atomically: true, encoding: .utf8)
+        _ = try await manager.onTaskComplete()
+
+        // Force cleanup partial failure after a successful merge by removing worktree early.
+        try runGit(["worktree", "remove", worktreePath], cwd: tempDir.path)
+
+        let outcome = try await manager.finalizeAfterUserApproval(
+            mergeNow: true,
+            strategy: .squash,
+            cleanupWorktree: true
+        )
+
+        XCTAssertTrue(outcome.merged)
+        XCTAssertFalse(outcome.cleanedUp)
+        XCTAssertFalse(outcome.cleanupWarnings.isEmpty)
+        XCTAssertTrue(outcome.message.contains("cleanup had issues"))
+
+        let contentOnMain = try String(contentsOf: file, encoding: .utf8)
+        XCTAssertTrue(contentOnMain.contains("cleanup-warning-change"))
+    }
+
     private func runGit(_ arguments: [String], cwd: String) throws {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/git")

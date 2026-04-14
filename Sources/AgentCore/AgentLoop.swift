@@ -30,6 +30,7 @@ public actor AgentLoop {
     private let skillsMetadata: [SkillMetadata]
     private var promptSectionTokenEstimates: [PromptSection: Int]
     private let workspace: String
+    private let projectWorkspaceRoot: String
     private let buildCheckManager: BuildCheckManager
     private var gitOrchestrationManager: GitOrchestrationManager?
     
@@ -160,6 +161,7 @@ public actor AgentLoop {
         self.maxToolIterations = maxToolIterations
         self.modelPath = modelPath
         self.workspace = workspace
+        self.projectWorkspaceRoot = permissions.workspaceRoot
         self.buildCheckManager = BuildCheckManager()
         self.useSandbox = useSandbox
         self.dryRun = dryRun
@@ -273,7 +275,7 @@ public actor AgentLoop {
         // Initialize git orchestration for coding tasks
         if taskType == .coding && gitOrchestrationManager == nil {
             do {
-                self.gitOrchestrationManager = try await GitOrchestrationManager.create(projectRoot: permissions.effectiveWorkspaceRoot)
+                self.gitOrchestrationManager = try await GitOrchestrationManager.create(projectRoot: projectWorkspaceRoot)
                 let (branchName, baseBranch, warning) = try await gitOrchestrationManager!.prepareTask(userMessage: message)
                 renderer.printStatus("📋 Proposed branch: \(branchName) (base: \(baseBranch))")
                 
@@ -317,8 +319,7 @@ public actor AgentLoop {
                 
                 // Update permissions to use worktree as effective workspace
                 if let worktreePath = await gitOrchestrationManager!.getWorktreePath() {
-                    let expandedPath = (worktreePath as NSString).standardizingPath + "/"
-                    PermissionEngine.setGlobalEffectiveWorkspace(expandedPath)
+                    await switchSessionWorkspace(to: worktreePath, changeDirectory: false)
                     renderer.printStatus("📁 Files will be edited in worktree")
                 }
                 
@@ -746,9 +747,7 @@ public actor AgentLoop {
                 let target = worktrees[selected]
                 let connected = try await manager.connectToExistingWorktree(path: target.path)
                 let normalizedPath = URL(filePath: connected.path).standardized.path()
-                let workspaceRoot = normalizedPath.hasSuffix("/") ? normalizedPath : "\(normalizedPath)/"
-                PermissionEngine.setGlobalEffectiveWorkspace(workspaceRoot)
-                _ = FileManager.default.changeCurrentDirectoryPath(normalizedPath)
+                await switchSessionWorkspace(to: normalizedPath, changeDirectory: true)
                 renderer.printStatus("📁 Switched workspace to: \(normalizedPath)")
                 renderer.printStatus("🌿 Active branch: \(connected.branch)")
             }
@@ -761,7 +760,7 @@ public actor AgentLoop {
         if let manager = gitOrchestrationManager {
             return manager
         }
-        let manager = try await GitOrchestrationManager.create(projectRoot: permissions.effectiveWorkspaceRoot)
+        let manager = try await GitOrchestrationManager.create(projectRoot: projectWorkspaceRoot)
         gitOrchestrationManager = manager
         return manager
     }
@@ -811,9 +810,12 @@ public actor AgentLoop {
                 )
             }
             renderer.printStatus("✅ \(outcome.message)")
+            for warning in outcome.cleanupWarnings {
+                renderer.printStatus("⚠️  Cleanup warning: \(warning)")
+            }
 
-            if outcome.merged && outcome.cleanedUp {
-                restoreWorkspaceToProjectRoot()
+            if outcome.merged && selected != 0 {
+                await restoreWorkspaceToProjectRoot()
                 do {
                     try await reloadModel()
                 } catch {
@@ -823,12 +825,26 @@ public actor AgentLoop {
         }
     }
 
-    private func restoreWorkspaceToProjectRoot() {
-        let normalizedPath = URL(filePath: permissions.workspaceRoot).standardized.path()
-        let workspaceRoot = normalizedPath.hasSuffix("/") ? normalizedPath : "\(normalizedPath)/"
-        PermissionEngine.setGlobalEffectiveWorkspace(workspaceRoot)
-        _ = FileManager.default.changeCurrentDirectoryPath(normalizedPath)
+    private func restoreWorkspaceToProjectRoot() async {
+        let normalizedPath = URL(filePath: projectWorkspaceRoot).standardized.path()
+        await switchSessionWorkspace(to: normalizedPath, changeDirectory: true)
         renderer.printStatus("📁 Restored workspace to project root: \(normalizedPath)")
+    }
+
+    private func switchSessionWorkspace(to path: String, changeDirectory: Bool) async {
+        let normalizedPath = URL(filePath: path).standardized.path()
+        permissions = PermissionEngine(
+            workspaceRoot: normalizedPath,
+            allowedCommands: permissions.allowedCommands,
+            deniedCommands: permissions.deniedCommands,
+            approvalMode: permissions.approvalMode,
+            policy: permissions.policy,
+            ignoredPathPatterns: permissions.ignoredPathPatterns
+        )
+        await registerToolsInternal()
+        if changeDirectory, !FileManager.default.changeCurrentDirectoryPath(normalizedPath) {
+            renderer.printStatus("⚠️  Failed to switch current directory to: \(normalizedPath)")
+        }
     }
 
     private func extractPolicyTargetPath(from arguments: [String: Any]) -> String? {
