@@ -180,6 +180,53 @@ final class GitWorktreeWorkflowTests: XCTestCase {
         XCTAssertTrue(mainContent.contains("header-font-change"))
     }
 
+    func testDeleteBranchAfterSquashRequiresForceDelete() async throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("git-worktree-delete-after-squash-tests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        try runGit(["init"], cwd: tempDir.path)
+        try runGit(["config", "user.email", "tests@mlx-coder.local"], cwd: tempDir.path)
+        try runGit(["config", "user.name", "MLX Coder Tests"], cwd: tempDir.path)
+
+        let rootFile = tempDir.appendingPathComponent("README.md")
+        try "base\n".write(to: rootFile, atomically: true, encoding: .utf8)
+        try runGit(["add", "."], cwd: tempDir.path)
+        try runGit(["commit", "-m", "chore: initial commit"], cwd: tempDir.path)
+        try runGit(["branch", "-M", "main"], cwd: tempDir.path)
+
+        let rootService = try GitService(projectRoot: tempDir.path)
+        let featureBranch = "feature/squash-delete"
+        let worktreePath = try await rootService.createWorktree(branchName: featureBranch, fromBranch: "main")
+        let featureService = try GitService(projectRoot: worktreePath)
+
+        let featureFile = URL(fileURLWithPath: worktreePath).appendingPathComponent("README.md")
+        try "base\nsquashed-change\n".write(to: featureFile, atomically: true, encoding: .utf8)
+        _ = try await featureService.commit(message: "feat: squash me", in: worktreePath)
+        _ = try await featureService.mergeSquash(
+            baseBranch: "main",
+            sourceBranch: featureBranch,
+            commitMessage: "feat: squashed merge"
+        )
+        try await rootService.removeWorktree(path: worktreePath)
+
+        do {
+            try await rootService.deleteBranch(featureBranch)
+            XCTFail("Expected non-forced branch deletion to fail after squash merge")
+        } catch let error as GitError {
+            guard case .cleanupFailed(let reason) = error else {
+                XCTFail("Expected cleanupFailed, got \(error)")
+                return
+            }
+            XCTAssertTrue(reason.contains("not fully merged") || reason.contains("is not fully merged"))
+        }
+
+        try await rootService.deleteBranch(featureBranch, force: true)
+        let branches = try await rootService.listBranches()
+        XCTAssertFalse(branches.contains(featureBranch))
+    }
+
     private func runGit(_ arguments: [String], cwd: String) throws {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/git")

@@ -811,7 +811,24 @@ public actor AgentLoop {
                 )
             }
             renderer.printStatus("✅ \(outcome.message)")
+
+            if outcome.merged && outcome.cleanedUp {
+                restoreWorkspaceToProjectRoot()
+                do {
+                    try await reloadModel()
+                } catch {
+                    renderer.printStatus("⚠️  Merge completed, but model reload failed: \(error.localizedDescription)")
+                }
+            }
         }
+    }
+
+    private func restoreWorkspaceToProjectRoot() {
+        let normalizedPath = URL(filePath: permissions.workspaceRoot).standardized.path()
+        let workspaceRoot = normalizedPath.hasSuffix("/") ? normalizedPath : "\(normalizedPath)/"
+        PermissionEngine.setGlobalEffectiveWorkspace(workspaceRoot)
+        _ = FileManager.default.changeCurrentDirectoryPath(normalizedPath)
+        renderer.printStatus("📁 Restored workspace to project root: \(normalizedPath)")
     }
 
     private func extractPolicyTargetPath(from arguments: [String: Any]) -> String? {

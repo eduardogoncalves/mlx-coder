@@ -439,10 +439,17 @@ public actor GitOrchestrationManager {
 
         var cleanedUp = false
         if cleanupWorktree {
+            let forceDeleteBranch: Bool
+            switch strategy {
+            case .squash:
+                forceDeleteBranch = true
+            case .mergeCommit, .rebase:
+                forceDeleteBranch = false
+            }
             if let worktreePath = summary.worktreePath {
                 try await gitService.removeWorktree(path: worktreePath)
             }
-            try await gitService.deleteBranch(summary.branchName)
+            try await gitService.deleteBranch(summary.branchName, force: forceDeleteBranch)
             try await gitService.pruneWorktrees()
             cleanedUp = true
         }

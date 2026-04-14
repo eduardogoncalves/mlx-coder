@@ -330,9 +330,10 @@ public actor GitService {
     }
 
     /// Delete a local branch.
-    public func deleteBranch(_ branchName: String) throws {
+    public func deleteBranch(_ branchName: String, force: Bool = false) throws {
         do {
-            _ = try runGitCommand(["branch", "-d", branchName], cwd: projectRoot)
+            let deleteFlag = force ? "-D" : "-d"
+            _ = try runGitCommand(["branch", deleteFlag, branchName], cwd: projectRoot)
         } catch {
             throw GitError.cleanupFailed(reason: error.localizedDescription)
         }
