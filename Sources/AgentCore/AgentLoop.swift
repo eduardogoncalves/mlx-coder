@@ -1897,43 +1897,67 @@ public actor AgentLoop {
     }
 
     private static func menuOptionHint(_ count: Int) -> String {
-        guard count > 0 else { return "1" }
+        guard count > 0 else { return "" }
         return (1...count).map(String.init).joined(separator: "/")
     }
 
-    private static func approvalCommandKey(toolName: String, arguments: [String: Any]?) -> String {
-        guard toolName == "bash",
-              let arguments,
-              JSONSerialization.isValidJSONObject(arguments),
-              let data = try? JSONSerialization.data(withJSONObject: arguments, options: [.sortedKeys]),
-              let text = String(data: data, encoding: .utf8) else {
+    static func approvalCommandKey(toolName: String, arguments: [String: Any]?) -> String {
+        guard toolName == "bash", let arguments else {
             return toolName
         }
-        return "\(toolName) \(text)"
-    }
 
-    private static func approvalCommandDisplay(toolName: String, arguments: [String: Any]?) -> String {
-        guard toolName == "bash", let arguments else {
-            return toolName.replacingOccurrences(of: "'", with: "\\'")
+        if JSONSerialization.isValidJSONObject(arguments),
+           let data = try? JSONSerialization.data(withJSONObject: arguments, options: [.sortedKeys]),
+           let text = String(data: data, encoding: .utf8) {
+            return "\(toolName) \(text)"
         }
 
-        let command = (arguments["command"] as? String)?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .replacingOccurrences(of: "'", with: "\\'") ?? ""
+        return "\(toolName) \(String(describing: arguments))"
+    }
+
+    static func approvalCommandDisplay(toolName: String, arguments: [String: Any]?) -> String {
+        guard toolName == "bash", let arguments else {
+            return toolName
+        }
+
+        let command = (arguments["command"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         guard !command.isEmpty else {
-            return toolName.replacingOccurrences(of: "'", with: "\\'")
+            return toolName
         }
 
         var otherArguments = arguments
         otherArguments.removeValue(forKey: "command")
-        guard !otherArguments.isEmpty,
-              JSONSerialization.isValidJSONObject(otherArguments),
-              let data = try? JSONSerialization.data(withJSONObject: otherArguments, options: [.sortedKeys]),
-              let text = String(data: data, encoding: .utf8) else {
+        guard !otherArguments.isEmpty else {
             return "\(toolName) \(command)"
         }
 
-        return "\(toolName) \(command) \(text.replacingOccurrences(of: "'", with: "\\'"))"
+        if JSONSerialization.isValidJSONObject(otherArguments),
+           let data = try? JSONSerialization.data(withJSONObject: otherArguments, options: [.sortedKeys]),
+           let text = String(data: data, encoding: .utf8) {
+            return "\(toolName) \(command) \(text)"
+        }
+
+        return "\(toolName) \(command) \(String(describing: otherArguments))"
+    }
+
+    static func sanitizeAuditField(_ value: String) -> String {
+        var sanitized = ""
+        sanitized.reserveCapacity(value.count)
+        for scalar in value.unicodeScalars {
+            switch scalar {
+            case "\\":
+                sanitized += "\\\\"
+            case "\r":
+                sanitized += "\\r"
+            case "\n":
+                sanitized += "\\n"
+            case "\t":
+                sanitized += "\\t"
+            default:
+                sanitized.unicodeScalars.append(scalar)
+            }
+        }
+        return sanitized
     }
 
     static func makeTokenCountLookup(contents: [String], counts: [Int]) -> [String: Int] {
@@ -2520,18 +2544,28 @@ public actor AgentLoop {
         // during async operations like Shift+Tab mode cycling.
         tcflush(STDIN_FILENO, TCIFLUSH)
         
+        let commandScopedOption: String
+        if approvalCommandDisplay.contains("'") {
+            commandScopedOption = "Yes, allow \"\(approvalCommandDisplay)\" always in this session"
+        } else {
+            commandScopedOption = "Yes, allow '\(approvalCommandDisplay)' always in this session"
+        }
+
         let options = isPlanMode ? [
             "Switch to AGENT mode and allow",
             "Stay in PLAN mode and deny with suggestion (esc)"
         ] : [
             "Yes, allow once",
-            "Yes, allow '\(approvalCommandDisplay)' always in this session",
+            commandScopedOption,
             "Yes, allow all tool calls (autopilot mode)",
             "No, suggest changes (esc)"
         ]
         var selectedIndex = 0
         var menuDrawnOnce = false
-        let selectionHint = "Use \(Self.menuOptionHint(options.count)), arrows, Enter, or Esc."
+        let optionHint = Self.menuOptionHint(options.count)
+        let selectionHint = optionHint.isEmpty
+            ? "Use arrows, Enter, or Esc."
+            : "Use \(optionHint), arrows, Enter, or Esc."
         var footerHint = selectionHint
         
         func drawMenu() {
@@ -2641,14 +2675,14 @@ public actor AgentLoop {
             )
             return await resumeCancelListeningAndReturn((true, nil))
         } else if finalSelection == 1 && !isPlanMode {
-            sessionApprovedToolCommands.insert(approvalCommand)
             await auditLogger?.logApprovalDecision(
                 toolName: name,
                 mode: mode.rawValue,
                 isPlanModePrompt: isPlanMode,
                 approved: true,
-                suggestion: "session_command_auto_approve_enabled:\(approvalCommand)"
+                suggestion: "session_command_auto_approve_enabled:\(Self.sanitizeAuditField(approvalCommand))"
             )
+            sessionApprovedToolCommands.insert(approvalCommand)
             return await resumeCancelListeningAndReturn((true, nil))
         } else if finalSelection == 2 && !isPlanMode {
             autoApproveAllTools = true
