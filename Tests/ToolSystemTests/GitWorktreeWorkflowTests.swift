@@ -307,6 +307,81 @@ final class GitWorktreeWorkflowTests: XCTestCase {
         XCTAssertTrue(guide.commits.contains(where: { $0.contains(customMessage) }))
     }
 
+    func testOnTaskCompleteCanSkipAutoFinalCommit() async throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("git-worktree-skip-final-commit-tests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        try runGit(["init"], cwd: tempDir.path)
+        try runGit(["config", "user.email", "tests@mlx-coder.local"], cwd: tempDir.path)
+        try runGit(["config", "user.name", "MLX Coder Tests"], cwd: tempDir.path)
+
+        let file = tempDir.appendingPathComponent("README.md")
+        try "base\n".write(to: file, atomically: true, encoding: .utf8)
+        try runGit(["add", "."], cwd: tempDir.path)
+        try runGit(["commit", "-m", "chore: initial commit"], cwd: tempDir.path)
+        try runGit(["branch", "-M", "main"], cwd: tempDir.path)
+
+        let manager = try await GitOrchestrationManager.create(projectRoot: tempDir.path)
+        _ = try await manager.prepareTask(userMessage: "skip auto final commit", shouldPromptForBaseBranch: false)
+        try await manager.createWorktreeNow()
+
+        guard let worktreePath = await manager.getWorktreePath() else {
+            XCTFail("Expected worktree path")
+            return
+        }
+
+        let worktreeFile = URL(fileURLWithPath: worktreePath).appendingPathComponent("README.md")
+        try "base\npending-uncommitted-change\n".write(to: worktreeFile, atomically: true, encoding: .utf8)
+
+        let guide = try await manager.onTaskComplete(
+            finalCommitMessage: "feat: should not be committed",
+            autoFinalCommit: false
+        )
+        XCTAssertTrue(guide.commits.isEmpty)
+
+        let status = try runGitCapture(["status", "--porcelain"], cwd: worktreePath)
+        XCTAssertTrue(status.contains("README.md"))
+    }
+
+    func testManagerCanListAndDeleteLocalBranch() async throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("git-worktree-delete-branch-shortcut-tests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        try runGit(["init"], cwd: tempDir.path)
+        try runGit(["config", "user.email", "tests@mlx-coder.local"], cwd: tempDir.path)
+        try runGit(["config", "user.name", "MLX Coder Tests"], cwd: tempDir.path)
+
+        let file = tempDir.appendingPathComponent("README.md")
+        try "base\n".write(to: file, atomically: true, encoding: .utf8)
+        try runGit(["add", "."], cwd: tempDir.path)
+        try runGit(["commit", "-m", "chore: initial commit"], cwd: tempDir.path)
+        try runGit(["branch", "-M", "main"], cwd: tempDir.path)
+
+        let manager = try await GitOrchestrationManager.create(projectRoot: tempDir.path)
+        _ = try await manager.prepareTask(userMessage: "delete stale local branch", shouldPromptForBaseBranch: false)
+        try await manager.createWorktreeNow()
+        guard let worktreePath = await manager.getWorktreePath() else {
+            XCTFail("Expected worktree path")
+            return
+        }
+
+        // Remove worktree first so branch is deletable.
+        let service = try GitService(projectRoot: tempDir.path)
+        try await service.removeWorktree(path: worktreePath)
+
+        let branchName = await manager.getCurrentBranchName() ?? ""
+        let branchesBefore = try await manager.listLocalBranches()
+        XCTAssertTrue(branchesBefore.contains(branchName))
+
+        try await manager.deleteLocalBranch(branchName, force: true)
+        let branchesAfter = try await manager.listLocalBranches()
+        XCTAssertFalse(branchesAfter.contains(branchName))
+    }
+
     func testFinalizeAfterApprovalUsesProvidedSquashCommitMessage() async throws {
         let tempDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("git-worktree-custom-squash-message-tests-\(UUID().uuidString)", isDirectory: true)

@@ -106,6 +106,19 @@ public actor GitService {
         
         return branches
     }
+
+    /// Get list of local branches only.
+    public func listLocalBranches() throws -> [String] {
+        guard isRepositoryInitialized() else {
+            throw GitError.repositoryNotInitialized
+        }
+
+        let output = try runGitCommand(["branch", "--format=%(refname:short)"], cwd: projectRoot)
+        return output
+            .components(separatedBy: "\n")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+    }
     
     /// Create a new worktree for a branch
     public func createWorktree(branchName: String, fromBranch: String = "main") throws -> String {

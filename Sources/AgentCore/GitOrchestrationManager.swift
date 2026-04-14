@@ -170,6 +170,21 @@ public actor GitOrchestrationManager {
         try await gitService.listWorktreeInfos()
     }
 
+    /// List local branches.
+    public func listLocalBranches() async throws -> [String] {
+        try await gitService.listLocalBranches()
+    }
+
+    /// Get current branch from a specific directory (or project root when nil).
+    public func getCurrentBranch(in workingDirectory: String? = nil) async throws -> String {
+        try await gitService.getCurrentBranch(in: workingDirectory)
+    }
+
+    /// Delete a local branch.
+    public func deleteLocalBranch(_ branchName: String, force: Bool = false) async throws {
+        try await gitService.deleteBranch(branchName, force: force)
+    }
+
     /// Connect this orchestration session to an existing worktree.
     @discardableResult
     public func connectToExistingWorktree(path: String) async throws -> (path: String, branch: String) {
@@ -329,9 +344,12 @@ public actor GitOrchestrationManager {
     }
 
     /// Called when task is complete
-    public func onTaskComplete(finalCommitMessage: String = "Final changes") async throws -> TaskCompletionGuide {
-        // Final commit if there are pending changes
-        if !filesModifiedInCurrentSubtask.isEmpty {
+    public func onTaskComplete(
+        finalCommitMessage: String = "Final changes",
+        autoFinalCommit: Bool = true
+    ) async throws -> TaskCompletionGuide {
+        // Final commit if there are pending changes (optional).
+        if autoFinalCommit && !filesModifiedInCurrentSubtask.isEmpty {
             do {
                 _ = try await gitService.commit(message: finalCommitMessage, in: currentWorktreePath)
                 await stateTracker.recordCommit(message: finalCommitMessage)
@@ -344,9 +362,9 @@ public actor GitOrchestrationManager {
             }
         }
 
-        // Ensure at least one commit exists before showing merge approval guidance.
+        // Ensure at least one commit exists before showing merge approval guidance when enabled.
         var commits = try await gitService.getCommitsSince(baseBranch: baseBranch, in: currentWorktreePath)
-        if commits.isEmpty {
+        if autoFinalCommit && commits.isEmpty {
             do {
                 _ = try await gitService.commit(message: finalCommitMessage, in: currentWorktreePath)
                 await stateTracker.recordCommit(message: finalCommitMessage)

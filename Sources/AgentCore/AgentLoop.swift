@@ -740,19 +740,73 @@ public actor AgentLoop {
                 return
             }
 
-            if let selected = await interactiveInput.selectOption(
-                prompt: "Select git worktree",
-                options: options
+            let actionOptions = ["Switch workspace to a worktree", "Delete local branch"]
+            if let action = await interactiveInput.selectOption(
+                prompt: "Git tree actions",
+                options: actionOptions
             ) {
-                let target = worktrees[selected]
-                let connected = try await manager.connectToExistingWorktree(path: target.path)
-                let normalizedPath = URL(filePath: connected.path).standardized.path()
-                await switchSessionWorkspace(to: normalizedPath, changeDirectory: true)
-                renderer.printStatus("📁 Switched workspace to: \(normalizedPath)")
-                renderer.printStatus("🌿 Active branch: \(connected.branch)")
+                if action == 1 {
+                    try await runBranchDeleteFlow(manager: manager, interactiveInput: interactiveInput)
+                    return
+                }
+
+                if let selected = await interactiveInput.selectOption(
+                    prompt: "Select git worktree",
+                    options: options
+                ) {
+                    let target = worktrees[selected]
+                    let connected = try await manager.connectToExistingWorktree(path: target.path)
+                    let normalizedPath = URL(filePath: connected.path).standardized.path()
+                    await switchSessionWorkspace(to: normalizedPath, changeDirectory: true)
+                    renderer.printStatus("📁 Switched workspace to: \(normalizedPath)")
+                    renderer.printStatus("🌿 Active branch: \(connected.branch)")
+                }
             }
         } catch {
             renderer.printStatus("⚠️  Could not open git worktree selector: \(error.localizedDescription)")
+        }
+    }
+
+    private func runBranchDeleteFlow(manager: GitOrchestrationManager, interactiveInput: InteractiveInput) async throws {
+        let localBranches = try await manager.listLocalBranches()
+        guard !localBranches.isEmpty else {
+            renderer.printStatus("No local branches found.")
+            return
+        }
+
+        let currentDir = URL(filePath: FileManager.default.currentDirectoryPath).standardized.path()
+        let currentBranch = (try? await manager.getCurrentBranch(in: currentDir)) ?? ""
+        let branchOptions = localBranches.map { branch in
+            branch == currentBranch ? "\(branch) (current)" : branch
+        }
+
+        guard let selected = await interactiveInput.selectOption(
+            prompt: "Select local branch to delete",
+            options: branchOptions,
+            escSelectsLastOption: true
+        ) else {
+            return
+        }
+
+        let targetBranch = localBranches[selected]
+        let deleteOptions = ["Delete safely (-d)", "Force delete (-D)", "Cancel"]
+        guard let deleteAction = await interactiveInput.selectOption(
+            prompt: "Delete branch '\(targetBranch)'?",
+            options: deleteOptions,
+            escSelectsLastOption: true
+        ) else {
+            return
+        }
+
+        switch deleteAction {
+        case 0:
+            try await manager.deleteLocalBranch(targetBranch, force: false)
+            renderer.printStatus("🗑️ Deleted branch: \(targetBranch)")
+        case 1:
+            try await manager.deleteLocalBranch(targetBranch, force: true)
+            renderer.printStatus("🗑️ Force deleted branch: \(targetBranch)")
+        default:
+            renderer.printStatus("Branch deletion cancelled.")
         }
     }
 
@@ -767,6 +821,7 @@ public actor AgentLoop {
 
     private func presentMergeApprovalFlow(manager: GitOrchestrationManager) async throws {
         var finalCommitMessage = "chore: finalize task changes"
+        var skipFinalCommit = false
         if let interactiveInput = self.interactiveInput {
             let pendingDiff = (try? await manager.buildPendingCommitDiff()) ?? ""
             let suggestedFinalCommit = await generateCommitMessageSuggestion(
@@ -774,14 +829,23 @@ public actor AgentLoop {
                 fallback: finalCommitMessage,
                 context: "final commit"
             )
-            finalCommitMessage = await chooseEditableMessage(
+            let finalChoice = await chooseEditableMessage(
                 interactiveInput: interactiveInput,
                 title: "Final commit message",
-                suggested: suggestedFinalCommit
+                suggested: suggestedFinalCommit,
+                allowSkip: true
             )
+            finalCommitMessage = finalChoice.message
+            skipFinalCommit = finalChoice.skip
+            if skipFinalCommit {
+                renderer.printStatus("⏭️  Skipping final commit for now. Pending changes were kept.")
+            }
         }
 
-        let completionGuide = try await manager.onTaskComplete(finalCommitMessage: finalCommitMessage)
+        let completionGuide = try await manager.onTaskComplete(
+            finalCommitMessage: finalCommitMessage,
+            autoFinalCommit: !skipFinalCommit
+        )
         renderer.printStatus(completionGuide.formattedMessage)
 
         guard let interactiveInput = self.interactiveInput else { return }
@@ -806,7 +870,7 @@ public actor AgentLoop {
                     fallback: "feat: merge \(completionGuide.branchName)",
                     context: "squash merge commit"
                 )
-                let squashMessage = await chooseEditableMessage(
+                let squashChoice = await chooseEditableMessage(
                     interactiveInput: interactiveInput,
                     title: "Squash commit message",
                     suggested: suggestedSquashMessage
@@ -815,7 +879,7 @@ public actor AgentLoop {
                     mergeNow: true,
                     strategy: .squash,
                     cleanupWorktree: true,
-                    squashCommitMessage: squashMessage
+                    squashCommitMessage: squashChoice.message
                 )
             case 2:
                 outcome = try await manager.finalizeAfterUserApproval(
@@ -858,16 +922,23 @@ public actor AgentLoop {
     private func chooseEditableMessage(
         interactiveInput: InteractiveInput,
         title: String,
-        suggested: String
-    ) async -> String {
-        let options = ["Use this message", "No, suggest changes (esc)"]
+        suggested: String,
+        allowSkip: Bool = false
+    ) async -> (message: String, skip: Bool) {
+        renderer.printStatus("📝 Proposed \(title.lowercased()): \(suggested)")
+        let options = allowSkip
+            ? ["Use this message", "No, suggest changes (esc)", "Skip commit for now"]
+            : ["Use this message", "No, suggest changes (esc)"]
         if let selected = await interactiveInput.selectOption(
             prompt: "\(title) options",
             options: options,
             escSelectsLastOption: true
         ) {
+            if allowSkip && selected == 2 {
+                return (suggested, true)
+            }
             if selected == 1 {
-                return await interactiveInput.promptForText(
+                let edited = await interactiveInput.promptForText(
                     prompt: "[\(title.lowercased())] Blocked. Suggest changes (or press Enter to keep suggested):",
                     placeholder: suggested,
                     validate: { message in
@@ -882,9 +953,10 @@ public actor AgentLoop {
                         return true
                     }
                 ) ?? suggested
+                return (edited, false)
             }
         }
-        return suggested
+        return (suggested, false)
     }
 
     private func restoreWorkspaceToProjectRoot() async {
@@ -912,17 +984,19 @@ public actor AgentLoop {
     private func generateCommitMessageSuggestion(diff: String, fallback: String, context: String) async -> String {
         let trimmedDiff = diff.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedDiff.isEmpty else { return fallback }
-        _ = context // Reserved for future message-style tuning.
+        _ = context
+        // Deliberately avoid secondary model inference here because this path has shown
+        // runtime instability on some checkpoints after tool execution.
         return heuristicCommitMessage(from: trimmedDiff, fallback: fallback)
     }
 
     private func heuristicCommitMessage(from diff: String, fallback: String) -> String {
         let lower = diff.lowercased()
         if lower.contains("test") || lower.contains("spec") || lower.contains("xctest") {
-            return "test: update coverage for git workflow"
+            return "test: update coverage"
         }
         if lower.contains("readme") || lower.contains("/docs/") || lower.contains("changelog") {
-            return "docs: update workflow documentation"
+            return "docs: update documentation"
         }
         if lower.contains("fix") || lower.contains("error") || lower.contains("fatal") {
             return "fix: harden merge approval flow"
