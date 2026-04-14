@@ -267,6 +267,17 @@ public actor GitService {
         return output.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    /// Return working tree diff relative to HEAD in the selected working directory.
+    public func getWorkingTreeDiff(in workingDirectory: String? = nil) throws -> String {
+        guard isRepositoryInitialized() else {
+            throw GitError.repositoryNotInitialized
+        }
+
+        let cwd = resolveWorkingDirectory(workingDirectory)
+        let output = try runGitCommand(["diff", "HEAD"], cwd: cwd)
+        return output.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     /// Merge branch into base branch using `--squash`.
     public func mergeSquash(baseBranch: String, sourceBranch: String, commitMessage: String) throws -> String {
         guard isRepositoryInitialized() else {

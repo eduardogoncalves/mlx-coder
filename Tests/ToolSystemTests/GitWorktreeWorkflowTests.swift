@@ -274,6 +274,81 @@ final class GitWorktreeWorkflowTests: XCTestCase {
         XCTAssertTrue(contentOnMain.contains("cleanup-warning-change"))
     }
 
+    func testOnTaskCompleteUsesProvidedFinalCommitMessage() async throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("git-worktree-custom-final-message-tests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        try runGit(["init"], cwd: tempDir.path)
+        try runGit(["config", "user.email", "tests@mlx-coder.local"], cwd: tempDir.path)
+        try runGit(["config", "user.name", "MLX Coder Tests"], cwd: tempDir.path)
+
+        let file = tempDir.appendingPathComponent("README.md")
+        try "base\n".write(to: file, atomically: true, encoding: .utf8)
+        try runGit(["add", "."], cwd: tempDir.path)
+        try runGit(["commit", "-m", "chore: initial commit"], cwd: tempDir.path)
+        try runGit(["branch", "-M", "main"], cwd: tempDir.path)
+
+        let manager = try await GitOrchestrationManager.create(projectRoot: tempDir.path)
+        _ = try await manager.prepareTask(userMessage: "custom final commit message", shouldPromptForBaseBranch: false)
+        try await manager.createWorktreeNow()
+
+        guard let worktreePath = await manager.getWorktreePath() else {
+            XCTFail("Expected worktree path")
+            return
+        }
+
+        let worktreeFile = URL(fileURLWithPath: worktreePath).appendingPathComponent("README.md")
+        try "base\ncustom-final-message\n".write(to: worktreeFile, atomically: true, encoding: .utf8)
+
+        let customMessage = "feat: add custom final commit message"
+        let guide = try await manager.onTaskComplete(finalCommitMessage: customMessage)
+        XCTAssertTrue(guide.commits.contains(where: { $0.contains(customMessage) }))
+    }
+
+    func testFinalizeAfterApprovalUsesProvidedSquashCommitMessage() async throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("git-worktree-custom-squash-message-tests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        try runGit(["init"], cwd: tempDir.path)
+        try runGit(["config", "user.email", "tests@mlx-coder.local"], cwd: tempDir.path)
+        try runGit(["config", "user.name", "MLX Coder Tests"], cwd: tempDir.path)
+
+        let file = tempDir.appendingPathComponent("README.md")
+        try "base\n".write(to: file, atomically: true, encoding: .utf8)
+        try runGit(["add", "."], cwd: tempDir.path)
+        try runGit(["commit", "-m", "chore: initial commit"], cwd: tempDir.path)
+        try runGit(["branch", "-M", "main"], cwd: tempDir.path)
+
+        let manager = try await GitOrchestrationManager.create(projectRoot: tempDir.path)
+        _ = try await manager.prepareTask(userMessage: "custom squash commit message", shouldPromptForBaseBranch: false)
+        try await manager.createWorktreeNow()
+
+        guard let worktreePath = await manager.getWorktreePath() else {
+            XCTFail("Expected worktree path")
+            return
+        }
+
+        let worktreeFile = URL(fileURLWithPath: worktreePath).appendingPathComponent("README.md")
+        try "base\ncustom-squash-message\n".write(to: worktreeFile, atomically: true, encoding: .utf8)
+        _ = try await manager.onTaskComplete(finalCommitMessage: "feat: prep squash merge")
+
+        let squashMessage = "feat: use custom squash message"
+        _ = try await manager.finalizeAfterUserApproval(
+            mergeNow: true,
+            strategy: .squash,
+            cleanupWorktree: false,
+            squashCommitMessage: squashMessage
+        )
+
+        let latestMessage = try runGitCapture(["log", "-1", "--pretty=%s"], cwd: tempDir.path)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        XCTAssertEqual(latestMessage, squashMessage)
+    }
+
     private func runGit(_ arguments: [String], cwd: String) throws {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
@@ -294,5 +369,29 @@ final class GitWorktreeWorkflowTests: XCTestCase {
                 NSLocalizedDescriptionKey: "git \(arguments.joined(separator: " ")) failed: \(error)"
             ])
         }
+    }
+
+    private func runGitCapture(_ arguments: [String], cwd: String) throws -> String {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+        process.arguments = arguments
+        process.currentDirectoryURL = URL(fileURLWithPath: cwd)
+
+        let stdout = Pipe()
+        let stderr = Pipe()
+        process.standardOutput = stdout
+        process.standardError = stderr
+
+        try process.run()
+        process.waitUntilExit()
+
+        let output = String(data: stdout.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        guard process.terminationStatus == 0 else {
+            let error = String(data: stderr.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? "unknown"
+            throw NSError(domain: "GitWorktreeWorkflowTests", code: Int(process.terminationStatus), userInfo: [
+                NSLocalizedDescriptionKey: "git \(arguments.joined(separator: " ")) failed: \(error)"
+            ])
+        }
+        return output
     }
 }

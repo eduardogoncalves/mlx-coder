@@ -323,12 +323,20 @@ public actor GitOrchestrationManager {
         }
     }
     
+    /// Build pending changes diff (working tree vs HEAD) for commit-message generation.
+    public func buildPendingCommitDiff() async throws -> String {
+        try await gitService.getWorkingTreeDiff(in: currentWorktreePath)
+    }
+
     /// Called when task is complete
-    public func onTaskComplete() async throws -> TaskCompletionGuide {
+    public func onTaskComplete(finalCommitMessage: String = "Final changes") async throws -> TaskCompletionGuide {
         // Final commit if there are pending changes
         if !filesModifiedInCurrentSubtask.isEmpty {
             do {
-                _ = try await commitSubtask(description: "Final changes")
+                _ = try await gitService.commit(message: finalCommitMessage, in: currentWorktreePath)
+                await stateTracker.recordCommit(message: finalCommitMessage)
+                filesModifiedInCurrentSubtask.removeAll()
+                try await stateTracker.saveState()
             } catch GitError.nothingToCommit {
                 // Expected if no changes since last commit
             } catch {
@@ -340,8 +348,8 @@ public actor GitOrchestrationManager {
         var commits = try await gitService.getCommitsSince(baseBranch: baseBranch, in: currentWorktreePath)
         if commits.isEmpty {
             do {
-                _ = try await gitService.commit(message: "Final changes", in: currentWorktreePath)
-                await stateTracker.recordCommit(message: "Final changes")
+                _ = try await gitService.commit(message: finalCommitMessage, in: currentWorktreePath)
+                await stateTracker.recordCommit(message: finalCommitMessage)
                 filesModifiedInCurrentSubtask.removeAll()
                 try await stateTracker.saveState()
                 commits = try await gitService.getCommitsSince(baseBranch: baseBranch, in: currentWorktreePath)
@@ -397,7 +405,8 @@ public actor GitOrchestrationManager {
     public func finalizeAfterUserApproval(
         mergeNow: Bool,
         strategy: MergeStrategy = .squash,
-        cleanupWorktree: Bool = true
+        cleanupWorktree: Bool = true,
+        squashCommitMessage: String? = nil
     ) async throws -> MergeOutcome {
         guard let summary = pendingApprovalSummary else {
             throw GitError.mergeFailed(reason: "Task completion summary not prepared")
@@ -418,11 +427,17 @@ public actor GitOrchestrationManager {
         let mergeMessage: String
         switch strategy {
         case .squash:
-            let title = summary.commits.first?.split(separator: " ").dropFirst().joined(separator: " ")
-            let sanitizedTitle = title?.trimmingCharacters(in: .whitespacesAndNewlines)
-            mergeMessage = sanitizedTitle?.isEmpty == false
-                ? "feat: \(sanitizedTitle!)"
-                : "feat: merge \(summary.branchName)"
+            let sanitizedCustomMessage = squashCommitMessage?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if let custom = sanitizedCustomMessage, !custom.isEmpty {
+                mergeMessage = custom
+            } else {
+                let title = summary.commits.first?.split(separator: " ").dropFirst().joined(separator: " ")
+                let sanitizedTitle = title?.trimmingCharacters(in: .whitespacesAndNewlines)
+                mergeMessage = sanitizedTitle?.isEmpty == false
+                    ? "feat: \(sanitizedTitle!)"
+                    : "feat: merge \(summary.branchName)"
+            }
             _ = try await gitService.mergeSquash(
                 baseBranch: summary.baseBranch,
                 sourceBranch: summary.branchName,

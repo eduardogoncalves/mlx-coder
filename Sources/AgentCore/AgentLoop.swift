@@ -766,7 +766,22 @@ public actor AgentLoop {
     }
 
     private func presentMergeApprovalFlow(manager: GitOrchestrationManager) async throws {
-        let completionGuide = try await manager.onTaskComplete()
+        var finalCommitMessage = "chore: finalize task changes"
+        if let interactiveInput = self.interactiveInput {
+            let pendingDiff = (try? await manager.buildPendingCommitDiff()) ?? ""
+            let suggestedFinalCommit = await generateCommitMessageSuggestion(
+                diff: pendingDiff,
+                fallback: finalCommitMessage,
+                context: "final commit"
+            )
+            finalCommitMessage = await chooseEditableMessage(
+                interactiveInput: interactiveInput,
+                title: "Final commit message",
+                suggested: suggestedFinalCommit
+            )
+        }
+
+        let completionGuide = try await manager.onTaskComplete(finalCommitMessage: finalCommitMessage)
         renderer.printStatus(completionGuide.formattedMessage)
 
         guard let interactiveInput = self.interactiveInput else { return }
@@ -785,28 +800,43 @@ public actor AgentLoop {
             let outcome: MergeOutcome
             switch selected {
             case 1:
+                let diffArtifacts = try? await manager.buildDiffReview()
+                let suggestedSquashMessage = await generateCommitMessageSuggestion(
+                    diff: diffArtifacts?.fullDiff ?? "",
+                    fallback: "feat: merge \(completionGuide.branchName)",
+                    context: "squash merge commit"
+                )
+                let squashMessage = await chooseEditableMessage(
+                    interactiveInput: interactiveInput,
+                    title: "Squash commit message",
+                    suggested: suggestedSquashMessage
+                )
                 outcome = try await manager.finalizeAfterUserApproval(
                     mergeNow: true,
                     strategy: .squash,
-                    cleanupWorktree: true
+                    cleanupWorktree: true,
+                    squashCommitMessage: squashMessage
                 )
             case 2:
                 outcome = try await manager.finalizeAfterUserApproval(
                     mergeNow: true,
                     strategy: .mergeCommit,
-                    cleanupWorktree: true
+                    cleanupWorktree: true,
+                    squashCommitMessage: nil
                 )
             case 3:
                 outcome = try await manager.finalizeAfterUserApproval(
                     mergeNow: true,
                     strategy: .rebase,
-                    cleanupWorktree: true
+                    cleanupWorktree: true,
+                    squashCommitMessage: nil
                 )
             default:
                 outcome = try await manager.finalizeAfterUserApproval(
                     mergeNow: false,
                     strategy: .squash,
-                    cleanupWorktree: false
+                    cleanupWorktree: false,
+                    squashCommitMessage: nil
                 )
             }
             renderer.printStatus("✅ \(outcome.message)")
@@ -823,6 +853,38 @@ public actor AgentLoop {
                 }
             }
         }
+    }
+
+    private func chooseEditableMessage(
+        interactiveInput: InteractiveInput,
+        title: String,
+        suggested: String
+    ) async -> String {
+        let options = ["Use this message", "No, suggest changes (esc)"]
+        if let selected = await interactiveInput.selectOption(
+            prompt: "\(title) options",
+            options: options,
+            escSelectsLastOption: true
+        ) {
+            if selected == 1 {
+                return await interactiveInput.promptForText(
+                    prompt: "[\(title.lowercased())] Blocked. Suggest changes (or press Enter to keep suggested):",
+                    placeholder: suggested,
+                    validate: { message in
+                        let trimmed = message.trimmingCharacters(in: .whitespacesAndNewlines)
+                        if trimmed.isEmpty {
+                            throw NSError(
+                                domain: "AgentLoop",
+                                code: 3,
+                                userInfo: [NSLocalizedDescriptionKey: "\(title) cannot be empty"]
+                            )
+                        }
+                        return true
+                    }
+                ) ?? suggested
+            }
+        }
+        return suggested
     }
 
     private func restoreWorkspaceToProjectRoot() async {
@@ -845,6 +907,27 @@ public actor AgentLoop {
         if changeDirectory, !FileManager.default.changeCurrentDirectoryPath(normalizedPath) {
             renderer.printStatus("⚠️  Failed to switch current directory to: \(normalizedPath)")
         }
+    }
+
+    private func generateCommitMessageSuggestion(diff: String, fallback: String, context: String) async -> String {
+        let trimmedDiff = diff.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedDiff.isEmpty else { return fallback }
+        _ = context // Reserved for future message-style tuning.
+        return heuristicCommitMessage(from: trimmedDiff, fallback: fallback)
+    }
+
+    private func heuristicCommitMessage(from diff: String, fallback: String) -> String {
+        let lower = diff.lowercased()
+        if lower.contains("test") || lower.contains("spec") || lower.contains("xctest") {
+            return "test: update coverage for git workflow"
+        }
+        if lower.contains("readme") || lower.contains("/docs/") || lower.contains("changelog") {
+            return "docs: update workflow documentation"
+        }
+        if lower.contains("fix") || lower.contains("error") || lower.contains("fatal") {
+            return "fix: harden merge approval flow"
+        }
+        return fallback
     }
 
     private func extractPolicyTargetPath(from arguments: [String: Any]) -> String? {
