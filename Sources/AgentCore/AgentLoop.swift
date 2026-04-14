@@ -279,13 +279,17 @@ public actor AgentLoop {
                 
                 // Prompt for custom branch name
                 if let interactiveInput = self.interactiveInput {
-                    let branchOptions = ["Use this name", "Enter custom name"]
+                    let branchOptions = ["Use this name", "No, suggest changes (esc)"]
                     print("")
-                    if let selected = await interactiveInput.selectOption(prompt: "Branch name options", options: branchOptions) {
+                    if let selected = await interactiveInput.selectOption(
+                        prompt: "Branch name options",
+                        options: branchOptions,
+                        escSelectsLastOption: true
+                    ) {
                         if selected == 1 {
-                            // User wants to enter custom name
+                            // User wants to suggest an alternative branch name
                             if let customName = await interactiveInput.promptForText(
-                                prompt: "Enter custom branch name:",
+                                prompt: "[branch] Blocked. Suggest changes (or press Enter to keep proposed):",
                                 placeholder: branchName,
                                 validate: { name in
                                     if !BranchNamer.isValidCustomBranchName(name) {
@@ -2247,7 +2251,7 @@ public actor AgentLoop {
         // Restore terminal and show cursor
         tcsetattr(STDIN_FILENO, TCSANOW, &originalTermios)
         print("\u{1B}[?25h\n")
-        
+
         if finalSelection == 0 {
             await auditLogger?.logApprovalDecision(
                 toolName: name,
@@ -2269,6 +2273,14 @@ public actor AgentLoop {
             return await resumeCancelListeningAndReturn((true, nil))
         } else {
             // Option 3 or ESC: Suggest changes
+            TerminalKeyParser.drainAvailableInput()
+            var suggestionTerm = termios()
+            tcgetattr(STDIN_FILENO, &suggestionTerm)
+            var cookedTerm = suggestionTerm
+            cookedTerm.c_lflag |= tcflag_t(ECHO | ICANON | ISIG)
+            cookedTerm.c_cc.16 = 1
+            cookedTerm.c_cc.17 = 0
+            tcsetattr(STDIN_FILENO, TCSANOW, &cookedTerm)
             print("[\(name)] Blocked. Suggest changes (or press Enter to deny with no comment): ", terminator: "")
             fflush(stdout)
             guard let suggestion = readLine(strippingNewline: true)?.trimmingCharacters(in: .whitespacesAndNewlines), !suggestion.isEmpty else {
