@@ -187,4 +187,49 @@ final class AgentLoopTokenLookupTests: XCTestCase {
         XCTAssertEqual(state.nextStreak, 0)
         XCTAssertFalse(state.shouldBlock)
     }
+
+    func testApprovalCommandKeyForBashUsesSortedJSON() {
+        let key = AgentLoop.approvalCommandKey(
+            toolName: "bash",
+            arguments: [
+                "command": "echo hello",
+                "initial_wait": 30,
+                "mode": "sync"
+            ]
+        )
+
+        XCTAssertEqual(key, #"bash {"command":"echo hello","initial_wait":30,"mode":"sync"}"#)
+    }
+
+    func testApprovalCommandKeyFallsBackToDescriptionForNonJSONArguments() {
+        let key = AgentLoop.approvalCommandKey(
+            toolName: "bash",
+            arguments: [
+                "command": "echo hello",
+                "invalid": URL(fileURLWithPath: "/tmp/file")
+            ]
+        )
+
+        XCTAssertTrue(key.hasPrefix("bash ["))
+        XCTAssertTrue(key.contains("command"))
+        XCTAssertTrue(key.contains("invalid"))
+    }
+
+    func testApprovalCommandDisplayForBashIncludesCommandAndOtherArguments() {
+        let display = AgentLoop.approvalCommandDisplay(
+            toolName: "bash",
+            arguments: [
+                "command": "ls -la",
+                "mode": "sync",
+                "initial_wait": 10
+            ]
+        )
+
+        XCTAssertEqual(display, #"bash ls -la {"initial_wait":10,"mode":"sync"}"#)
+    }
+
+    func testSanitizeAuditFieldEscapesBackslashesAndControlCharacters() {
+        let sanitized = AgentLoop.sanitizeAuditField("line1\\nline2\nrow\rcol\tend")
+        XCTAssertEqual(sanitized, #"line1\\\\nline2\nrow\rcol\tend"#)
+    }
 }
