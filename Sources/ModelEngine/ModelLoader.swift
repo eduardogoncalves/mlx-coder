@@ -190,6 +190,10 @@ public final class ModelLoader: Sendable {
     /// LFS server, which is still faster than individual HTTP GETs
     /// because LFS can batch requests and resume partial transfers.
     ///
+    /// Progress output from both `git clone --progress` and `git lfs pull`
+    /// is captured from stderr and parsed to update the spinner with
+    /// percentage and download speed.
+    ///
     /// After a successful download the `.git` directory is removed to
     /// save disk space (the model directory becomes a plain folder).
     private static func gitShallowClone(
@@ -203,6 +207,10 @@ public final class ModelLoader: Sendable {
         let parentDir = destination.deletingLastPathComponent()
         try? fileManager.createDirectory(at: parentDir, withIntermediateDirectories: true)
 
+        // Prevent git-lfs from downloading during clone; we do it explicitly after.
+        var env = ProcessInfo.processInfo.environment
+        env["GIT_LFS_SKIP_SMUDGE"] = "1"
+
         // Step 1 — shallow clone without LFS blobs
         let cloneProcess = Process()
         cloneProcess.executableURL = URL(filePath: "/usr/bin/env")
@@ -211,17 +219,15 @@ public final class ModelLoader: Sendable {
             "--depth", "1",
             "--filter=blob:none",
             "--no-checkout",
+            "--progress",
             repoURL,
             destination.path
         ]
-
-        // Prevent git-lfs from downloading during clone; we do it explicitly after.
-        var env = ProcessInfo.processInfo.environment
-        env["GIT_LFS_SKIP_SMUDGE"] = "1"
         cloneProcess.environment = env
-
         cloneProcess.standardOutput = FileHandle.nullDevice
-        cloneProcess.standardError = FileHandle.nullDevice
+
+        let clonePipe = Pipe()
+        cloneProcess.standardError = clonePipe
 
         do {
             try cloneProcess.run()
@@ -229,12 +235,16 @@ public final class ModelLoader: Sendable {
             return false
         }
 
-        // Wait asynchronously so we don't block the cooperative thread pool.
+        // Parse clone progress in a background task
+        let cloneProgressTask = Task.detached { [spinner] in
+            Self.streamProgressFromPipe(clonePipe, prefix: "Cloning repo", spinner: spinner)
+        }
+
         await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
             cloneProcess.terminationHandler = { _ in cont.resume() }
         }
+        cloneProgressTask.cancel()
         guard cloneProcess.terminationStatus == 0 else {
-            // Clean up partial clone
             try? fileManager.removeItem(at: destination)
             return false
         }
@@ -267,7 +277,9 @@ public final class ModelLoader: Sendable {
         lfsProcess.executableURL = URL(filePath: "/usr/bin/env")
         lfsProcess.arguments = ["git", "-C", destination.path, "lfs", "pull"]
         lfsProcess.standardOutput = FileHandle.nullDevice
-        lfsProcess.standardError = FileHandle.nullDevice
+
+        let lfsPipe = Pipe()
+        lfsProcess.standardError = lfsPipe
 
         do {
             try lfsProcess.run()
@@ -276,9 +288,15 @@ public final class ModelLoader: Sendable {
             return false
         }
 
+        // Parse LFS progress in a background task
+        let lfsProgressTask = Task.detached { [spinner] in
+            Self.streamProgressFromPipe(lfsPipe, prefix: "Downloading weights", spinner: spinner)
+        }
+
         await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
             lfsProcess.terminationHandler = { _ in cont.resume() }
         }
+        lfsProgressTask.cancel()
         guard lfsProcess.terminationStatus == 0 else {
             try? fileManager.removeItem(at: destination)
             return false
@@ -289,6 +307,111 @@ public final class ModelLoader: Sendable {
         try? fileManager.removeItem(at: dotGit)
 
         return true
+    }
+
+    // MARK: - Git Progress Parsing
+
+    /// Reads stderr from a git process pipe and updates the spinner with
+    /// parsed progress information.
+    ///
+    /// Git and git-lfs write progress to stderr using `\r` to overwrite
+    /// the current line. Example outputs:
+    ///   git clone:  `Receiving objects:  42% (21/50), 1.20 MiB | 3.50 MiB/s`
+    ///   git lfs:    `Downloading LFS objects:  67% (4/6), 2.1 GB | 48.2 MB/s`
+    private static func streamProgressFromPipe(
+        _ pipe: Pipe,
+        prefix: String,
+        spinner: Spinner
+    ) {
+        let handle = pipe.fileHandleForReading
+        var buffer = Data()
+
+        while true {
+            let chunk = handle.availableData
+            if chunk.isEmpty { break }  // EOF
+            buffer.append(chunk)
+
+            // Git uses \r (carriage return) to overwrite progress lines.
+            // Split on both \r and \n to get the latest fragment.
+            guard let text = String(data: buffer, encoding: .utf8) else { continue }
+
+            // Find the last meaningful progress line
+            let lines = text.components(separatedBy: CharacterSet(charactersIn: "\r\n"))
+            if let lastLine = lines.last(where: { !$0.trimmingCharacters(in: .whitespaces).isEmpty }) {
+                let parsed = parseGitProgressLine(lastLine, prefix: prefix)
+                Task { await spinner.updateMessage(parsed) }
+            }
+
+            // Keep only the tail after the last separator to avoid unbounded growth
+            if let lastSep = text.lastIndex(where: { $0 == "\r" || $0 == "\n" }) {
+                let tail = String(text[text.index(after: lastSep)...])
+                buffer = tail.data(using: .utf8) ?? Data()
+            }
+        }
+    }
+
+    /// Extracts percentage, size, and speed from a git/git-lfs progress line.
+    ///
+    /// Input examples:
+    ///   `Receiving objects:  42% (21/50), 1.20 MiB | 3.50 MiB/s`
+    ///   `Downloading LFS objects:  67% (4/6), 2.1 GB | 48.2 MB/s`
+    ///   `Filtering content:  80% (8/10), 512.0 KB | 1.2 MB/s`
+    ///
+    /// Returns a human-readable string like:
+    ///   `Downloading weights: 67% (4/6 files) 2.1 GB at 48.2 MB/s`
+    private static func parseGitProgressLine(_ line: String, prefix: String) -> String {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+
+        // Try to extract percentage — matches "NN%" anywhere
+        var pctPart = ""
+        if let pctRange = trimmed.range(of: #"\d+%"#, options: .regularExpression) {
+            pctPart = String(trimmed[pctRange])
+        }
+
+        // Try to extract (N/M) counts
+        var countsPart = ""
+        if let countsRange = trimmed.range(of: #"\(\d+/\d+\)"#, options: .regularExpression) {
+            let raw = String(trimmed[countsRange])
+            // Turn (4/6) into "4/6 files"
+            let inner = raw.dropFirst().dropLast()
+            countsPart = "(\(inner) files)"
+        }
+
+        // Try to extract size info (everything after the counts/pct, before the pipe)
+        var sizePart = ""
+        if let pipeIndex = trimmed.firstIndex(of: "|") {
+            // Look for size between ) and |
+            let beforePipe: Substring
+            if let closeParen = trimmed.lastIndex(of: ")"), closeParen < pipeIndex {
+                beforePipe = trimmed[trimmed.index(after: closeParen)..<pipeIndex]
+            } else {
+                beforePipe = trimmed[trimmed.startIndex..<pipeIndex]
+            }
+            let sizeCandidate = beforePipe.trimmingCharacters(in: CharacterSet(charactersIn: ", "))
+            if !sizeCandidate.isEmpty && sizeCandidate.rangeOfCharacter(from: .decimalDigits) != nil {
+                sizePart = sizeCandidate
+            }
+        }
+
+        // Try to extract speed (everything after |)
+        var speedPart = ""
+        if let pipeIndex = trimmed.firstIndex(of: "|") {
+            let afterPipe = String(trimmed[trimmed.index(after: pipeIndex)...]).trimmingCharacters(in: .whitespaces)
+            if !afterPipe.isEmpty {
+                speedPart = "at \(afterPipe)"
+            }
+        }
+
+        // Build the spinner message
+        var parts = [prefix + ":"]
+        if !pctPart.isEmpty { parts.append(pctPart) }
+        if !countsPart.isEmpty { parts.append(countsPart) }
+        if !sizePart.isEmpty { parts.append(sizePart) }
+        if !speedPart.isEmpty { parts.append(speedPart) }
+
+        let result = parts.joined(separator: " ")
+        // If we couldn't parse anything meaningful, show the raw line
+        return result == prefix + ":" ? "\(prefix): \(trimmed)" : result
     }
 
     private static func pruneHuggingFaceCache(forModelID modelID: String) {
