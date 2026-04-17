@@ -35,10 +35,10 @@ public final class ModelLoader: Sendable {
         cacheLimit: Int? = nil
     ) async throws -> ModelContainer {
         let expandedPath = NSString(string: path).expandingTildeInPath
-        let modelURL = URL(filePath: expandedPath)
+        var modelURL = URL(filePath: expandedPath)
         let modelsBaseURL = URL(filePath: NSString(string: "~").expandingTildeInPath)
 
-        let usesLocalDirectory = FileManager.default.fileExists(atPath: expandedPath)
+        var usesLocalDirectory = FileManager.default.fileExists(atPath: expandedPath)
         let usesHubID = !usesLocalDirectory && looksLikeHubModelID(path)
 
         if !usesLocalDirectory && !usesHubID {
@@ -76,18 +76,70 @@ public final class ModelLoader: Sendable {
             Task { await spinner.stop() }
         }
 
+        // ── Local ~/models cache check ─────────────────────────────────────────
+        // When a Hub ID is requested, first check if the model already exists
+        // at ~/models/<org>/<model> from a prior download. If so, load from
+        // disk directly — no network call needed.
+        var resolvedFromLocalModels = false
+        if usesHubID {
+            let parts = path.split(separator: "/", maxSplits: 1)
+            let localModelPath = modelsBaseURL
+                .appendingPathComponent("models")
+                .appendingPathComponent(String(parts[0]))
+                .appendingPathComponent(String(parts[1]))
+
+            if FileManager.default.fileExists(atPath: localModelPath.path) {
+                modelURL = localModelPath
+                usesLocalDirectory = true
+                resolvedFromLocalModels = true
+            }
+        }
+
+        // ── Git-accelerated download ──────────────────────────────────────────
+        // When a Hub ID is requested and no local copy exists, try a shallow
+        // `git clone` first. Git transfers a single server-compressed pack-file,
+        // which is significantly faster than the MLX Hub's per-file HTTP
+        // downloads. Falls back to the standard Hub download if git isn't
+        // available or the clone fails for any reason.
+        var gitClonedLocally = false
+        if usesHubID && !resolvedFromLocalModels {
+            let parts = path.split(separator: "/", maxSplits: 1)
+            let localClonePath = modelsBaseURL
+                .appendingPathComponent("models")
+                .appendingPathComponent(String(parts[0]))
+                .appendingPathComponent(String(parts[1]))
+
+            if isGitAvailable() {
+                await spinner.updateMessage("Cloning \(path) via git (shallow, no history)...")
+                let cloneSuccess = await gitShallowClone(
+                    repoURL: "https://huggingface.co/\(path)",
+                    destination: localClonePath,
+                    spinner: spinner
+                )
+                if cloneSuccess {
+                    modelURL = localClonePath
+                    usesLocalDirectory = true
+                    gitClonedLocally = true
+                } else {
+                    await spinner.updateMessage("Git clone failed, falling back to Hugging Face Hub download...")
+                }
+            }
+        }
+
         // Ensure Gemma4 (and any other vendored model types) are registered before loading.
         await Gemma4Registration.shared.register()
 
         // Load using MLX-Swift-LM. If a Hub ID is passed, MLX downloads as needed.
         let configuration: ModelConfiguration
-        if usesHubID {
-            configuration = ModelConfiguration(id: path)
-        } else {
+        if usesLocalDirectory {
             configuration = ModelConfiguration(directory: modelURL)
+        } else {
+            configuration = ModelConfiguration(id: path)
         }
 
         let progressTracker = DownloadProgressTracker()
+
+        let skipHubProgress = gitClonedLocally || resolvedFromLocalModels
 
         // Use the MLXLMCommon free function which automatically routes through all registered
         // model factories (MLXVLM first, then MLXLLM), so VLMs and LLMs are handled uniformly.
@@ -95,17 +147,148 @@ public final class ModelLoader: Sendable {
             hub: .init(downloadBase: modelsBaseURL),
             configuration: configuration,
             progressHandler: { progress in
-                guard usesHubID else { return }
+                guard !skipHubProgress else { return }
                 let message = progressTracker.formattedStatus(for: progress)
                 Task { await spinner.updateMessage(message) }
             }
         )
 
-        if usesHubID {
+        if !gitClonedLocally && !resolvedFromLocalModels && usesHubID {
             pruneHuggingFaceCache(forModelID: path)
         }
 
         return container
+    }
+
+    // MARK: - Git-accelerated Download Helpers
+
+    /// Returns `true` when `git` and `git-lfs` are both reachable on $PATH.
+    private static func isGitAvailable() -> Bool {
+        func canRun(_ launchPath: String, _ args: [String]) -> Bool {
+            let process = Process()
+            process.executableURL = URL(filePath: "/usr/bin/env")
+            process.arguments = [launchPath] + args
+            process.standardOutput = FileHandle.nullDevice
+            process.standardError = FileHandle.nullDevice
+            do {
+                try process.run()
+                process.waitUntilExit()
+                return process.terminationStatus == 0
+            } catch {
+                return false
+            }
+        }
+        return canRun("git", ["--version"]) && canRun("git", ["lfs", "version"])
+    }
+
+    /// Performs a shallow `git clone` of a Hugging Face repo, then fetches
+    /// LFS objects.  Returns `true` on success.
+    ///
+    /// The clone uses `--depth 1` (no history) and `--filter=blob:none`
+    /// so the initial git transfer contains only tree/commit objects.
+    /// `git lfs pull` then fetches the actual weight files via the HF
+    /// LFS server, which is still faster than individual HTTP GETs
+    /// because LFS can batch requests and resume partial transfers.
+    ///
+    /// After a successful download the `.git` directory is removed to
+    /// save disk space (the model directory becomes a plain folder).
+    private static func gitShallowClone(
+        repoURL: String,
+        destination: URL,
+        spinner: Spinner
+    ) async -> Bool {
+        let fileManager = FileManager.default
+
+        // Ensure parent directory exists (e.g. ~/models/mlx-community)
+        let parentDir = destination.deletingLastPathComponent()
+        try? fileManager.createDirectory(at: parentDir, withIntermediateDirectories: true)
+
+        // Step 1 — shallow clone without LFS blobs
+        let cloneProcess = Process()
+        cloneProcess.executableURL = URL(filePath: "/usr/bin/env")
+        cloneProcess.arguments = [
+            "git", "clone",
+            "--depth", "1",
+            "--filter=blob:none",
+            "--no-checkout",
+            repoURL,
+            destination.path
+        ]
+
+        // Prevent git-lfs from downloading during clone; we do it explicitly after.
+        var env = ProcessInfo.processInfo.environment
+        env["GIT_LFS_SKIP_SMUDGE"] = "1"
+        cloneProcess.environment = env
+
+        cloneProcess.standardOutput = FileHandle.nullDevice
+        cloneProcess.standardError = FileHandle.nullDevice
+
+        do {
+            try cloneProcess.run()
+        } catch {
+            return false
+        }
+
+        // Wait asynchronously so we don't block the cooperative thread pool.
+        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+            cloneProcess.terminationHandler = { _ in cont.resume() }
+        }
+        guard cloneProcess.terminationStatus == 0 else {
+            // Clean up partial clone
+            try? fileManager.removeItem(at: destination)
+            return false
+        }
+
+        // Step 1b — checkout the working tree
+        let checkoutProcess = Process()
+        checkoutProcess.executableURL = URL(filePath: "/usr/bin/env")
+        checkoutProcess.arguments = ["git", "-C", destination.path, "checkout"]
+        checkoutProcess.environment = env
+        checkoutProcess.standardOutput = FileHandle.nullDevice
+        checkoutProcess.standardError = FileHandle.nullDevice
+        do {
+            try checkoutProcess.run()
+        } catch {
+            try? fileManager.removeItem(at: destination)
+            return false
+        }
+        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+            checkoutProcess.terminationHandler = { _ in cont.resume() }
+        }
+        guard checkoutProcess.terminationStatus == 0 else {
+            try? fileManager.removeItem(at: destination)
+            return false
+        }
+
+        // Step 2 — pull LFS objects (the actual weight files)
+        await spinner.updateMessage("Downloading model weights via git-lfs...")
+
+        let lfsProcess = Process()
+        lfsProcess.executableURL = URL(filePath: "/usr/bin/env")
+        lfsProcess.arguments = ["git", "-C", destination.path, "lfs", "pull"]
+        lfsProcess.standardOutput = FileHandle.nullDevice
+        lfsProcess.standardError = FileHandle.nullDevice
+
+        do {
+            try lfsProcess.run()
+        } catch {
+            try? fileManager.removeItem(at: destination)
+            return false
+        }
+
+        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+            lfsProcess.terminationHandler = { _ in cont.resume() }
+        }
+        guard lfsProcess.terminationStatus == 0 else {
+            try? fileManager.removeItem(at: destination)
+            return false
+        }
+
+        // Step 3 — remove .git to save disk space; model dir becomes a plain folder.
+        let dotGit = destination.appendingPathComponent(".git")
+        try? fileManager.removeItem(at: dotGit)
+
+        return true
     }
 
     private static func pruneHuggingFaceCache(forModelID modelID: String) {

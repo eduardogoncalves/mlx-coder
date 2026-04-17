@@ -10,7 +10,8 @@
 #    -m, --message MSG       Release commit message.  Optional.
 #    -n, --dry-run           Print all steps but do not modify anything.
 #    -k, --no-push           Tag locally but skip git pull and git push.
-#    -b, --build-only        Build-only mode: skips dependency updates, tests, and git/publish steps.
+#    -b, --build-only        Build-only mode (incremental, quiet): skips deps, tests, and git steps.
+#    -bc, --build-clean       Build-only mode (clean): nukes build caches before building (verbose).
 #    -h, --help              Show this help.
 #
 #  What it does:
@@ -55,6 +56,7 @@ RELEASE_MSG=""
 DRY_RUN=false
 NO_PUSH=false
 BUILD_ONLY=false
+BUILD_CLEAN=false
 DEP_CHANGES=""
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
@@ -78,6 +80,7 @@ while [[ $# -gt 0 ]]; do
     -n|--dry-run)  DRY_RUN=true;      shift   ;;
     -k|--no-push)  NO_PUSH=true;      shift   ;;
     -b|--build-only) BUILD_ONLY=true; shift   ;;
+    -bc|--build-clean) BUILD_ONLY=true; BUILD_CLEAN=true; shift ;;
     -h|--help)     usage ;;
     *) log_error "Unknown argument: $1"; exit 1 ;;
   esac
@@ -268,8 +271,11 @@ if $BUILD_ONLY; then
     sed -i '' "s/version: \".*\"/version: \"${VERSION}\"/g" "${REPO_ROOT}/Sources/MLXCoder/MLXCoderCLI.swift"
 
     log_info "Building release artifacts to source a known-good binary"
+    clean_env="0"
+    $BUILD_CLEAN && clean_env="1"
     run env METAL_DEVICE_WRAPPER_TYPE=1 MTL_SHADER_VALIDATION=1 \
       MLX_CODER_VERSION="${VERSION}" \
+      CLEAN_BUILD="${clean_env}" \
       "${REPO_ROOT}/build-and-release.sh" arm64
 
     BINARY_PATH="${REPO_ROOT}/.build/release/cli/mlx-coder"
@@ -357,9 +363,7 @@ BUILD_ENV=(
 )
 
 XCODE_DERIVED_DATA="${REPO_ROOT}/.build/xcode"
-
-log_info "Resetting Xcode derived data at: ${XCODE_DERIVED_DATA}"
-run rm -rf "${XCODE_DERIVED_DATA}"
+mkdir -p "${XCODE_DERIVED_DATA}"
 
 log_info "Resolving Swift package dependencies via xcodebuild"
 run xcodebuild \
@@ -367,7 +371,8 @@ run xcodebuild \
   -configuration Release \
   -destination 'platform=macOS,arch=arm64' \
   -derivedDataPath "${XCODE_DERIVED_DATA}" \
-  -resolvePackageDependencies
+  -resolvePackageDependencies \
+  -quiet
 
 if ! $DRY_RUN; then
   patch_mlx_swift_lm_for_swift6 "${XCODE_DERIVED_DATA}"
@@ -381,6 +386,7 @@ run env "${BUILD_ENV[@]}" \
     -destination 'platform=macOS,arch=arm64' \
     -derivedDataPath "${XCODE_DERIVED_DATA}" \
     SWIFT_ACTIVE_COMPILATION_CONDITIONS='MLX_PREWARM_SHADERS' \
+    -quiet \
     build
 
 if $DRY_RUN; then
