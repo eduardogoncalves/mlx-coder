@@ -359,15 +359,8 @@ public struct ParameterCorrectionService: Sendable {
                 corrected["path"] = path
             }
 
-            if path.hasPrefix("/") {
-                let relativePath = String(path.dropFirst())
-                if !relativePath.isEmpty {
-                    corrections.append("Converted absolute path to relative: '\(path)' -> '\(relativePath)'")
-                    corrected["path"] = relativePath
-                }
-            }
-
-            if path.hasPrefix("./") {
+            // Keep absolute paths intact for read_file. Permission checks decide what is allowed.
+            if !path.hasPrefix("/") && path.hasPrefix("./") {
                 let strippedPath = String(path.dropFirst(2))
                 if !strippedPath.isEmpty {
                     corrections.append("Stripped leading './' from path: '\(path)' -> '\(strippedPath)'")

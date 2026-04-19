@@ -32,7 +32,7 @@ public struct ReadFileTool: Tool {
 
         let resolvedPath: String
         do {
-            resolvedPath = try permissions.validatePath(path)
+            resolvedPath = try permissions.validateReadPath(path)
         } catch {
             return .error(error.localizedDescription)
         }

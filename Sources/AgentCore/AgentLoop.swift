@@ -262,12 +262,21 @@ public actor AgentLoop {
 
             // Get streamed tool calls from the writer
             let streamedCalls = writer.drainCompletedCalls()
+            let failedStreamedCalls = writer.drainFailedCalls()
 
             // Parse tool calls from text and remove ones already captured via streaming.
             let parsedToolCalls = ToolCallParser.parse(response)
             let toolCalls = deduplicateToolCalls(parsed: parsedToolCalls, streamed: streamedCalls)
+            let hasMalformedToolCall = !failedStreamedCalls.isEmpty ||
+                (toolCalls.isEmpty && streamedCalls.isEmpty && ToolCallParser.containsToolCall(response))
 
             if toolCalls.isEmpty && streamedCalls.isEmpty {
+                if hasMalformedToolCall {
+                    history.addAssistant(response)
+                    steeringQueue.append("Your previous tool call was malformed and could not be parsed. Re-emit only the tool call in valid JSON using the exact <tool_call>{\"name\":\"tool_name\",\"arguments\":{...}}</tool_call> format. Do not add explanation text.")
+                    continue
+                }
+
                 // No tool calls — this is the final response
                 history.addAssistant(response)
                 
@@ -471,17 +480,13 @@ public actor AgentLoop {
 
             guard hasStreamablePayload, let path else { return true }
 
-            guard !streamed.isEmpty else { return true }
-
             let key = normalizedToolCallKey(name: call.name, path: path)
             if let count = streamedCallCounts[key], count > 0 {
                 streamedCallCounts[key] = count - 1
                 return false
             }
 
-            // Safety net: if any streamed calls were captured this turn,
-            // suppress remaining parsed content-bearing calls to avoid duplicates.
-            return false
+            return true
         }
     }
 

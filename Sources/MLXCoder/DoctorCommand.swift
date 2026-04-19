@@ -159,6 +159,7 @@ func buildDoctorPayload(
     workspaceRoot: String,
     runtimeConfig: RuntimeConfig,
     cliMCPConfig: MCPClient.ServerConfig?,
+    includeHomeSkills: Bool = true,
     commandAvailable: (String) -> Bool = isCommandAvailable
 ) -> DoctorPayload {
     var checks: [DoctorCheck] = []
@@ -208,9 +209,9 @@ func buildDoctorPayload(
         checks.append(DoctorCheck(name: "ignore", status: .warn, message: "No .mlx-coder-ignore file found."))
     }
 
-    let discoveredSkills = discoverSkillFiles(workspaceRoot: workspaceRoot)
+    let discoveredSkills = discoverSkillFiles(workspaceRoot: workspaceRoot, includeHomeSkills: includeHomeSkills)
     if discoveredSkills.isEmpty {
-        checks.append(DoctorCheck(name: "skills", status: .warn, message: "No workspace skills discovered under .github/skills or skills."))
+        checks.append(DoctorCheck(name: "skills", status: .warn, message: "No skills discovered under .<dotdir>/skills, skills, or ~/skills."))
     } else {
         checks.append(DoctorCheck(name: "skills", status: .pass, message: "Discovered \(discoveredSkills.count) skill definition file(s)."))
     }

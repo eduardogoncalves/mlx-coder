@@ -345,7 +345,7 @@ public struct ConversationHistory: Sendable {
 
     /// Export conversation as a Markdown transcript.
     /// By default, excludes the initial system prompt. Set `includeSystemPrompt` to true to include it.
-    public func asMarkdownTranscript(includeSystemPrompt: Bool = false) -> String {
+    public func asMarkdownTranscript(includeSystemPrompt: Bool = true) -> String {
         var lines: [String] = []
         lines.append("# mlx-coder Session Transcript")
         lines.append("")
@@ -463,7 +463,7 @@ public struct ConversationHistory: Sendable {
 
     /// Export conversation messages as pretty-printed JSON.
     /// By default, excludes the initial system prompt. Set `includeSystemPrompt` to true to include it.
-    public func asJSONTranscript(includeSystemPrompt: Bool = false) throws -> String {
+    public func asJSONTranscript(includeSystemPrompt: Bool = true) throws -> String {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         let messagesToExport = includeSystemPrompt ? messages : messages.filter { $0.role != .system }

@@ -53,12 +53,25 @@ func loadIgnorePatterns(workspaceRoot: String) -> [String] {
         .filter { !$0.hasPrefix("#") }
 }
 
-func discoverSkillFiles(workspaceRoot: String) -> [String] {
+func discoverSkillFiles(workspaceRoot: String, includeHomeSkills: Bool = true) -> [String] {
     let fileManager = FileManager.default
-    let roots = [
-        workspaceRoot + "/.github/skills",
-        workspaceRoot + "/skills"
-    ]
+
+    // Dynamically discover any <workspace>/.<dotdir>/skills directories
+    // (e.g. .github/skills, .claude/skills, .copilot/skills, .codex/skills, etc.)
+    var roots: [String] = []
+    if let topLevel = try? fileManager.contentsOfDirectory(atPath: workspaceRoot) {
+        for entry in topLevel where entry.hasPrefix(".") {
+            let skillsPath = workspaceRoot + "/" + entry + "/skills"
+            var isDir: ObjCBool = false
+            if fileManager.fileExists(atPath: skillsPath, isDirectory: &isDir), isDir.boolValue {
+                roots.append(skillsPath)
+            }
+        }
+    }
+    roots.append(workspaceRoot + "/skills")
+    if includeHomeSkills {
+        roots.append(fileManager.homeDirectoryForCurrentUser.path + "/skills")
+    }
 
     var discovered: [String] = []
     for root in roots {

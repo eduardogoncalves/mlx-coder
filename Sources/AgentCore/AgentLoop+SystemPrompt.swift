@@ -54,6 +54,9 @@ extension AgentLoop {
         {"name": "tool_name", "arguments": {"param": "value"}}
         \(ToolCallPattern.toolCallClose)
 
+        The object inside <tool_call> must be valid JSON with "name" and "arguments" keys.
+        Do not write pseudo-JSON like {"tool_name", "path": "."} or function-style wrappers.
+
         You can call multiple tools in a single response. After tool results are returned, continue your reasoning.
         """
 

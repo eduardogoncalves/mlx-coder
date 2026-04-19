@@ -155,12 +155,13 @@ func buildListToolsPayload(
     isDotnetWorkspace: Bool,
     runtimeConfig: RuntimeConfig,
     cliMCPConfig: MCPClient.ServerConfig?,
+    includeHomeSkills: Bool = true,
     mcpIncludeOverride: String? = nil,
     mcpExcludeOverride: String? = nil,
     discoverMCPTools: @Sendable (MCPClient.ServerConfig) async throws -> [any Tool]
 ) async -> (payload: ListToolsPayload, mcpErrorMessages: [String]) {
     var tools = builtinToolCatalog(includeDotnetTools: isDotnetWorkspace)
-    let skillsRegistry = SkillsRegistry(workspaceRoot: workspaceRoot)
+    let skillsRegistry = SkillsRegistry(workspaceRoot: workspaceRoot, includeHomeSkills: includeHomeSkills)
     let skillMetadata = await skillsRegistry.listMetadata()
     let runtimeMCPConfigs = runtimeMCPServerConfigs(
         from: runtimeConfig,

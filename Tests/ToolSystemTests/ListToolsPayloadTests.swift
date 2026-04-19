@@ -62,6 +62,7 @@ final class ListToolsPayloadTests: XCTestCase {
             isDotnetWorkspace: false,
             runtimeConfig: runtimeConfig,
             cliMCPConfig: cliConfig,
+            includeHomeSkills: false,
             discoverMCPTools: { config in
                 await recorder.record(config)
                 return [
@@ -92,6 +93,7 @@ final class ListToolsPayloadTests: XCTestCase {
             isDotnetWorkspace: false,
             runtimeConfig: runtimeConfig,
             cliMCPConfig: nil,
+            includeHomeSkills: false,
             discoverMCPTools: { config in
                 throw MCPDiscoveryError(message: "unreachable-\(config.name)")
             }
@@ -127,6 +129,7 @@ final class ListToolsPayloadTests: XCTestCase {
             isDotnetWorkspace: false,
             runtimeConfig: runtimeConfig,
             cliMCPConfig: nil,
+            includeHomeSkills: false,
             discoverMCPTools: { config in
                 await recorder.record(config)
                 return [MockTool(name: "mcp_local_stdio_ping", description: "Ping stdio")]
@@ -158,6 +161,7 @@ final class ListToolsPayloadTests: XCTestCase {
             isDotnetWorkspace: false,
             runtimeConfig: RuntimeConfig(),
             cliMCPConfig: nil,
+            includeHomeSkills: false,
             discoverMCPTools: { _ in [] }
         )
 
@@ -172,6 +176,7 @@ final class ListToolsPayloadTests: XCTestCase {
             isDotnetWorkspace: false,
             runtimeConfig: RuntimeConfig(),
             cliMCPConfig: nil,
+            includeHomeSkills: false,
             discoverMCPTools: { _ in [] }
         )
 

@@ -94,7 +94,7 @@ enum LoopDetectionService {
         for scalar in value.unicodeScalars {
             switch scalar {
             case "\\":
-                sanitized += "\\\\"
+                sanitized += "\\\\\\\\"
             case "\r":
                 sanitized += "\\r"
             case "\n":
