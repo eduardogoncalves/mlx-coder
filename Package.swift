@@ -5,9 +5,9 @@ let package = Package(
     name: "mlx-coder",
     platforms: [.macOS("26.0")],
     dependencies: [
-        .package(url: "https://github.com/ml-explore/mlx-swift", .upToNextMinor(from: "0.31.1")),
+        .package(url: "https://github.com/ml-explore/mlx-swift", .upToNextMinor(from: "0.31.3")),
         .package(url: "https://github.com/ml-explore/mlx-swift-lm", exact: "2.31.3"),
-        .package(url: "https://github.com/apple/swift-argument-parser", from: "1.3.0"),
+        .package(url: "https://github.com/apple/swift-argument-parser", from: "1.7.1"),
         .package(url: "https://github.com/jpsim/Yams", from: "6.2.1"),
     ],
     targets: [
