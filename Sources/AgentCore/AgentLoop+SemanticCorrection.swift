@@ -106,14 +106,15 @@ extension AgentLoop {
                 let input = try AgentLoop.makeSafeTextLMInput(tokens: tokens)
 
                 var responseText = ""
-                for try await item in try MLXLMCommon.generateTokens(
+                let tokenStream = try MLXLMCommon.generateTokens(
                     input: input,
                     parameters: correctionConfig.generateParameters,
                     context: context
-                ) {
+                )
+                for await item in tokenStream {
                     if Task.isCancelled { throw CancellationError() }
                     if case .token(let id) = item {
-                        let decoded = tokenizer.decode(tokens: [id], skipSpecialTokens: false)
+                        let decoded = tokenizer.decode(tokenIds: [id], skipSpecialTokens: false)
                         responseText += decoded
                         // Early exit if we have enough text
                         if responseText.count > 2000 { break }

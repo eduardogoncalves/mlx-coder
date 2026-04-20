@@ -184,15 +184,16 @@ extension AgentLoop {
             }
             var responseText = ""
 
-            for try await item in try MLXLMCommon.generateTokens(
+            let tokenStream = try MLXLMCommon.generateTokens(
                 input: input,
                 parameters: extractionConfig.generateParameters,
                 context: context
-            ) {
+            )
+            for await item in tokenStream {
                 if Task.isCancelled { throw CancellationError() }
                 switch item {
                 case .token(let tokenId):
-                    responseText += context.tokenizer.decode(tokens: [tokenId], skipSpecialTokens: false)
+                    responseText += context.tokenizer.decode(tokenIds: [tokenId], skipSpecialTokens: false)
                 case .info:
                     break
                 }

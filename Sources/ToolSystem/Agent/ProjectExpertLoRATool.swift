@@ -2,11 +2,13 @@
 // Learn about the user's project by training a LoRA
 
 import Foundation
+import Hub
 import MLX
 import MLXLLM
 import MLXLMCommon
 import MLXNN
 import MLXOptimizers
+import Tokenizers
 
 public struct ProjectExpertLoRATool: Tool {
     public let name = "project_expert_lora"
@@ -91,7 +93,11 @@ public struct ProjectExpertLoRATool: Tool {
 
         // We must load a new fresh model context specifically for training to avoid memory fragmentation
         let configuration = ModelConfiguration(directory: URL(filePath: NSString(string: modelPath).expandingTildeInPath))
-        let trainContainer = try await LLMModelFactory.shared.loadContainer(hub: .init(), configuration: configuration)
+        let trainContainer = try await LLMModelFactory.shared.loadContainer(
+            from: MLXHubDownloader(),
+            using: MLXTokenizerLoader(),
+            configuration: configuration
+        )
         
         let progressMessage = try await trainContainer.perform { [dataset, validSet, p, learningRate, adapterURL, loraLayers] context -> String in
             var msg = ""

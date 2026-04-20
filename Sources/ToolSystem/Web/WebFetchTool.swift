@@ -269,15 +269,16 @@ extension WebFetchTool: ProgressReportingTool {
             
             var responseText = ""
             
-            for try await item in try MLXLMCommon.generateTokens(
+            let tokenStream = try MLXLMCommon.generateTokens(
                 input: input,
                 parameters: extractConfig.generateParameters,
                 context: context
-            ) {
+            )
+            for await item in tokenStream {
                 if Task.isCancelled { throw CancellationError() }
                 switch item {
                 case .token(let id):
-                    responseText += context.tokenizer.decode(tokens: [id])
+                    responseText += context.tokenizer.decode(tokenIds: [id])
                 case .info:
                     break
                 }
