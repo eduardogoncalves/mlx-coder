@@ -631,7 +631,8 @@ private struct MLXTokenizerBridge: MLXLMCommon.Tokenizer {
         upstream.encode(text: text, addSpecialTokens: addSpecialTokens)
     }
 
-    // swift-transformers uses `decode(tokens:)` label; MLXLMCommon uses `decode(tokenIds:)`.
+    // In swift-transformers 1.x, Tokenizers.Tokenizer uses `decode(tokens:)` as the
+    // parameter label, while MLXLMCommon 3.x uses `decode(tokenIds:)`. Bridge accordingly.
     func decode(tokenIds: [Int], skipSpecialTokens: Bool) -> String {
         upstream.decode(tokens: tokenIds, skipSpecialTokens: skipSpecialTokens)
     }
