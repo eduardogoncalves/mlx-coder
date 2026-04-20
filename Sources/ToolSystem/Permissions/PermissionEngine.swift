@@ -93,25 +93,35 @@ public struct PermissionEngine: Sendable {
         return workspaceRoot
     }
 
+    /// Resolve a path to an absolute, normalized, symlink-resolved location.
+    private func resolveAbsolutePath(_ path: String) -> String {
+        let expanded = NSString(string: path).expandingTildeInPath
+        let effectiveRoot = normalizeRootPath(effectiveWorkspaceRoot)
+        let resolved = expanded.hasPrefix("/") ? expanded : effectiveRoot + "/" + expanded
+        let normalizedPath = URL(filePath: resolved).standardized.path()
+        return URL(filePath: normalizedPath).resolvingSymlinksInPath().path()
+    }
+
+    private func normalizeRootPath(_ root: String) -> String {
+        guard root.count > 1 else { return root }
+        var normalized = root
+        while normalized.count > 1 && normalized.hasSuffix("/") {
+            normalized.removeLast()
+        }
+        return normalized
+    }
+
+    private func isPathWithinRoot(_ path: String, root: String) -> Bool {
+        let normalizedRoot = normalizeRootPath(root)
+        return path == normalizedRoot || path.hasPrefix(normalizedRoot + "/")
+    }
+
     /// Validate that a path is within the workspace root.
     public func validatePath(_ path: String) throws -> String {
-        let expanded = NSString(string: path).expandingTildeInPath
-        let resolved: String
-        let effectiveRoot = effectiveWorkspaceRoot
+        let effectiveRoot = normalizeRootPath(effectiveWorkspaceRoot)
+        let finalPath = resolveAbsolutePath(path)
 
-        if expanded.hasPrefix("/") {
-            resolved = expanded
-        } else {
-            resolved = effectiveRoot + "/" + expanded
-        }
-
-        let url = URL(filePath: resolved).standardized
-        let normalizedPath = url.path()
-        
-        let resolvedURL = URL(filePath: normalizedPath).resolvingSymlinksInPath()
-        let finalPath = resolvedURL.path()
-
-        guard finalPath.hasPrefix(effectiveRoot) else {
+        guard isPathWithinRoot(finalPath, root: effectiveRoot) else {
             throw PermissionError.pathOutsideWorkspace(
                 path: finalPath,
                 workspaceRoot: effectiveRoot
@@ -119,6 +129,32 @@ public struct PermissionEngine: Sendable {
         }
 
         return finalPath
+    }
+
+    /// Validate read-only access for a path.
+    ///
+    /// Reads are allowed inside the workspace and under `~/skills`.
+    public func validateReadPath(_ path: String) throws -> String {
+        let finalPath = resolveAbsolutePath(path)
+        let effectiveRoot = normalizeRootPath(effectiveWorkspaceRoot)
+        if isPathWithinRoot(finalPath, root: effectiveRoot) {
+            return finalPath
+        }
+
+        let homeSkills = URL(filePath: FileManager.default.homeDirectoryForCurrentUser.path)
+            .appending(path: "skills")
+            .standardized
+            .resolvingSymlinksInPath()
+            .path()
+        if isPathWithinRoot(finalPath, root: homeSkills) {
+            return finalPath
+        }
+
+        throw PermissionError.pathOutsideAllowedReadRoots(
+            path: finalPath,
+            workspaceRoot: effectiveRoot,
+            extraRoot: homeSkills
+        )
     }
 
     /// Check if a shell command is allowed.
@@ -192,11 +228,11 @@ public struct PermissionEngine: Sendable {
         }
 
         let relativePath: String
-        let effectiveRoot = effectiveWorkspaceRoot
-        if path.hasPrefix(effectiveRoot + "/") {
-            relativePath = String(path.dropFirst(effectiveRoot.count + 1))
-        } else if path == effectiveRoot {
+        let effectiveRoot = normalizeRootPath(effectiveWorkspaceRoot)
+        if path == effectiveRoot {
             relativePath = "."
+        } else if path.hasPrefix(effectiveRoot + "/") {
+            relativePath = String(path.dropFirst(effectiveRoot.count + 1))
         } else {
             relativePath = path
         }
@@ -219,12 +255,15 @@ public struct PermissionEngine: Sendable {
 
 public enum PermissionError: LocalizedError {
     case pathOutsideWorkspace(path: String, workspaceRoot: String)
+    case pathOutsideAllowedReadRoots(path: String, workspaceRoot: String, extraRoot: String)
     case commandDenied(command: String)
 
     public var errorDescription: String? {
         switch self {
         case .pathOutsideWorkspace(let path, let root):
             return "Path '\(path)' is outside workspace root '\(root)'"
+        case .pathOutsideAllowedReadRoots(let path, let root, let extraRoot):
+            return "Path '\(path)' is outside allowed read roots '\(root)' and '\(extraRoot)'"
         case .commandDenied(let command):
             return "Command denied by permission rules: \(command)"
         }

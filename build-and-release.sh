@@ -15,6 +15,7 @@ set -euo pipefail
 
 ARCH="${1:-arm64}"
 VERSION="${MLX_CODER_VERSION:-0.1.0}"
+CLEAN="${CLEAN_BUILD:-0}"
 
 APP_NAME="mlx-coder"
 SCHEME_NAME="MLXCoder"
@@ -95,9 +96,16 @@ build_arch() {
     local derived_data="$2"
 
     log "Building ${APP_NAME} for ${target_arch}"
-    rm -rf "$derived_data"
-    rm -rf "$PACKAGE_CHECKOUTS_DIR"
-    mkdir -p "$PACKAGE_CHECKOUTS_DIR"
+
+    if [[ "$CLEAN" == "1" ]]; then
+        log "Clean build: removing derived data and package checkouts"
+        rm -rf "$derived_data" "$PACKAGE_CHECKOUTS_DIR"
+    fi
+    mkdir -p "$derived_data" "$PACKAGE_CHECKOUTS_DIR"
+
+    # Use -quiet for incremental builds, verbose for clean builds
+    local quiet_flag=()
+    [[ "$CLEAN" != "1" ]] && quiet_flag=(-quiet)
 
     log "Resolving Swift package dependencies"
     if ! xcodebuild \
@@ -106,7 +114,8 @@ build_arch() {
         -destination "platform=macOS,arch=${target_arch}" \
         -derivedDataPath "$derived_data" \
         -clonedSourcePackagesDirPath "$PACKAGE_CHECKOUTS_DIR" \
-        -resolvePackageDependencies >&2; then
+        -resolvePackageDependencies \
+        "${quiet_flag[@]}" >&2; then
         fail "xcodebuild failed while resolving package dependencies for architecture ${target_arch}"
     fi
 
@@ -120,6 +129,7 @@ build_arch() {
         -clonedSourcePackagesDirPath "$PACKAGE_CHECKOUTS_DIR" \
         -disableAutomaticPackageResolution \
         -onlyUsePackageVersionsFromResolvedFile \
+        "${quiet_flag[@]}" \
         build >&2; then
         fail "xcodebuild failed for architecture ${target_arch}"
     fi

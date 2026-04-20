@@ -20,7 +20,7 @@ final class SkillsRegistryTests: XCTestCase {
         """
         try skillBody.write(toFile: skillFile, atomically: true, encoding: .utf8)
 
-        let registry = SkillsRegistry(workspaceRoot: workspace)
+        let registry = SkillsRegistry(workspaceRoot: workspace, includeHomeSkills: false)
         let metadata = await registry.listMetadata()
 
         XCTAssertEqual(metadata.count, 1)

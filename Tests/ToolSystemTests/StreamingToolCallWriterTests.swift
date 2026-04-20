@@ -106,4 +106,25 @@ final class StreamingToolCallWriterTests: XCTestCase {
 
         writer.cleanupAllTmpFiles()
     }
+
+    func testIgnoresToolCallsInsideThinkUntilThinkIsClosed() {
+        let writer = StreamingToolCallWriter(
+            toolCallOpen: "<tool_call>",
+            toolCallClose: "</tool_call>"
+        )
+
+        let chunk1 = "<think>still reasoning <tool_call>{\"name\":\"list_dir\",\"arguments\":{\"path\":\".\"}}</tool_call>"
+        let result1 = writer.process(chunk1)
+        XCTAssertTrue(result1.displayText.contains("<tool_call>"))
+        XCTAssertTrue(writer.drainCompletedCalls().isEmpty)
+
+        let chunk2 = "</think><tool_call>{\"name\":\"read_file\",\"arguments\":{\"path\":\"README.md\"}}</tool_call>"
+        _ = writer.process(chunk2)
+        let calls = writer.drainCompletedCalls()
+        XCTAssertEqual(calls.count, 1)
+        XCTAssertEqual(calls[0].toolName, "read_file")
+        XCTAssertEqual(calls[0].path, "README.md")
+
+        writer.cleanupAllTmpFiles()
+    }
 }

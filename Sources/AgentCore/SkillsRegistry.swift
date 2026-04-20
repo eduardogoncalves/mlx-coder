@@ -23,8 +23,11 @@ public actor SkillsRegistry {
     private var entriesByName: [String: SkillEntry] = [:]
     private var cachedBodies: [String: String] = [:]
 
-    public init(workspaceRoot: String) {
-        let discovered = SkillsRegistry.discoverSkills(workspaceRoot: workspaceRoot)
+    public init(workspaceRoot: String, includeHomeSkills: Bool = true) {
+        let discovered = SkillsRegistry.discoverSkills(
+            workspaceRoot: workspaceRoot,
+            includeHomeSkills: includeHomeSkills
+        )
         var map: [String: SkillEntry] = [:]
         for entry in discovered {
             map[entry.metadata.name] = entry
@@ -52,12 +55,28 @@ public actor SkillsRegistry {
         return body
     }
 
-    private static func discoverSkills(workspaceRoot: String) -> [SkillEntry] {
+    private static func discoverSkills(
+        workspaceRoot: String,
+        includeHomeSkills: Bool
+    ) -> [SkillEntry] {
         let fm = FileManager.default
-        let candidateRoots = [
-            workspaceRoot + "/.github/skills",
-            workspaceRoot + "/skills"
-        ]
+
+        // Dynamically discover any <workspace>/.<dotdir>/skills directories
+        // (e.g. .github/skills, .claude/skills, .copilot/skills, .codex/skills, etc.)
+        var candidateRoots: [String] = []
+        if let topLevel = try? fm.contentsOfDirectory(atPath: workspaceRoot) {
+            for entry in topLevel where entry.hasPrefix(".") {
+                let skillsPath = workspaceRoot + "/" + entry + "/skills"
+                var isDir: ObjCBool = false
+                if fm.fileExists(atPath: skillsPath, isDirectory: &isDir), isDir.boolValue {
+                    candidateRoots.append(skillsPath)
+                }
+            }
+        }
+        candidateRoots.append(workspaceRoot + "/skills")
+        if includeHomeSkills {
+            candidateRoots.append(FileManager.default.homeDirectoryForCurrentUser.path + "/skills")
+        }
 
         var entries: [SkillEntry] = []
 

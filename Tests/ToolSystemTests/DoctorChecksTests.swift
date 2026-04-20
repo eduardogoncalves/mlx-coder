@@ -68,7 +68,8 @@ final class DoctorChecksTests: XCTestCase {
         let payload = buildDoctorPayload(
             workspaceRoot: tempDir.path,
             runtimeConfig: RuntimeConfig(),
-            cliMCPConfig: nil
+            cliMCPConfig: nil,
+            includeHomeSkills: false
         )
 
         XCTAssertEqual(payload.workspace, tempDir.path)
@@ -93,7 +94,8 @@ final class DoctorChecksTests: XCTestCase {
         let payload = buildDoctorPayload(
             workspaceRoot: tempDir.path,
             runtimeConfig: RuntimeConfig(),
-            cliMCPConfig: nil
+            cliMCPConfig: nil,
+            includeHomeSkills: false
         )
 
         XCTAssertTrue(payload.checks.contains { $0.name == "skills" && $0.status == .pass })
@@ -120,7 +122,8 @@ final class DoctorChecksTests: XCTestCase {
         let payload = buildDoctorPayload(
             workspaceRoot: tempDir.path,
             runtimeConfig: runtimeConfig,
-            cliMCPConfig: MCPClient.ServerConfig(name: "broken", command: "nope", endpointURL: "not-a-url", timeoutSeconds: 10)
+            cliMCPConfig: MCPClient.ServerConfig(name: "broken", command: "nope", endpointURL: "not-a-url", timeoutSeconds: 10),
+            includeHomeSkills: false
         )
 
         XCTAssertGreaterThanOrEqual(payload.failCount, 2)
@@ -143,6 +146,7 @@ final class DoctorChecksTests: XCTestCase {
                 endpointURL: nil,
                 timeoutSeconds: 10
             ),
+            includeHomeSkills: false,
             commandAvailable: { _ in false }
         )
 
@@ -166,6 +170,7 @@ final class DoctorChecksTests: XCTestCase {
                 endpointURL: nil,
                 timeoutSeconds: 10
             ),
+            includeHomeSkills: false,
             commandAvailable: { _ in true }
         )
 
@@ -207,7 +212,8 @@ final class DoctorChecksTests: XCTestCase {
         let payload = buildDoctorPayload(
             workspaceRoot: tempDir.path,
             runtimeConfig: runtimeConfig,
-            cliMCPConfig: MCPClient.ServerConfig(name: "docs", command: "http://127.0.0.1:8080", endpointURL: "http://127.0.0.1:8080", timeoutSeconds: 10)
+            cliMCPConfig: MCPClient.ServerConfig(name: "docs", command: "http://127.0.0.1:8080", endpointURL: "http://127.0.0.1:8080", timeoutSeconds: 10),
+            includeHomeSkills: false
         )
 
         XCTAssertEqual(payload.failCount, 0)
@@ -237,7 +243,8 @@ final class DoctorChecksTests: XCTestCase {
         let payload = buildDoctorPayload(
             workspaceRoot: tempDir.path,
             runtimeConfig: runtimeConfig,
-            cliMCPConfig: nil
+            cliMCPConfig: nil,
+            includeHomeSkills: false
         )
 
         XCTAssertTrue(payload.checks.contains { $0.name == "audit-log" && $0.status == .pass })
@@ -264,7 +271,8 @@ final class DoctorChecksTests: XCTestCase {
         let payload = buildDoctorPayload(
             workspaceRoot: tempDir.path,
             runtimeConfig: runtimeConfig,
-            cliMCPConfig: nil
+            cliMCPConfig: nil,
+            includeHomeSkills: false
         )
 
         XCTAssertTrue(payload.checks.contains { $0.name == "audit-log" && $0.status == .fail })

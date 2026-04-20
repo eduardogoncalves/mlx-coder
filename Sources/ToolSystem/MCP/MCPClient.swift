@@ -380,25 +380,32 @@ public struct MCPClient: Sendable {
     }
 
     private static func resolveTransport(config: ServerConfig) throws -> Transport {
-        let raw: String
-        if let endpoint = config.endpointURL, !endpoint.isEmpty {
-            raw = endpoint
-        } else if config.command.lowercased().hasPrefix("http://") || config.command.lowercased().hasPrefix("https://") {
-            raw = config.command
-        } else {
-            if config.command.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                throw Error.unsupportedTransport(configName: config.name)
+        if let endpoint = config.endpointURL?.trimmingCharacters(in: .whitespacesAndNewlines), !endpoint.isEmpty {
+            guard let url = URL(string: endpoint), let scheme = url.scheme?.lowercased() else {
+                throw Error.invalidEndpoint(endpoint)
             }
-            return .stdio
+            guard scheme == "http" || scheme == "https" else {
+                throw Error.invalidEndpoint(endpoint)
+            }
+            return .http(url)
         }
 
-        guard let url = URL(string: raw) else {
-            throw Error.invalidEndpoint(raw)
+        let command = config.command.trimmingCharacters(in: .whitespacesAndNewlines)
+        if command.lowercased().hasPrefix("http://") || command.lowercased().hasPrefix("https://") {
+            guard let url = URL(string: command), let scheme = url.scheme?.lowercased() else {
+                throw Error.invalidEndpoint(command)
+            }
+            guard scheme == "http" || scheme == "https" else {
+                throw Error.invalidEndpoint(command)
+            }
+            return .http(url)
         }
-        guard let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https" else {
-            throw Error.invalidEndpoint("Only http and https endpoints are supported; got '\(url.scheme ?? "(none)")'")
+
+        guard !command.isEmpty else {
+            throw Error.unsupportedTransport(configName: config.name)
         }
-        return .http(url)
+
+        return .stdio
     }
 
     private static func writeFramedJSON(_ payload: [String: Any], to handle: FileHandle) throws {
