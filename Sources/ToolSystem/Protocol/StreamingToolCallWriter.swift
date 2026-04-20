@@ -60,6 +60,8 @@ public final class StreamingToolCallWriter: @unchecked Sendable {
     private let toolCallOpen: String
     private let toolCallClose: String
     private let onStatusChange: (@Sendable (String) -> Void)?
+    private var inThinkBlock = false
+    private var thinkBuffer = ""
 
     public var hasActiveStream: Bool {
         switch state {
@@ -100,6 +102,57 @@ public final class StreamingToolCallWriter: @unchecked Sendable {
     // MARK: - Processing
 
     public func process(_ text: String) -> StreamProcessResult {
+        thinkBuffer += text
+        var displayText = ""
+
+        while !thinkBuffer.isEmpty {
+            if inThinkBlock {
+                if let closeRange = thinkBuffer.range(of: ToolCallPattern.thinkClose) {
+                    let beforeClose = String(thinkBuffer[..<closeRange.lowerBound])
+                    if !beforeClose.isEmpty {
+                        displayText += beforeClose
+                    }
+                    displayText += ToolCallPattern.thinkClose
+                    thinkBuffer = String(thinkBuffer[closeRange.upperBound...])
+                    inThinkBlock = false
+                    continue
+                }
+
+                let keep = trailingPossibleTagPrefix(in: thinkBuffer, for: ToolCallPattern.thinkClose)
+                let emitCount = max(0, thinkBuffer.count - keep.count)
+                if emitCount > 0 {
+                    let split = thinkBuffer.index(thinkBuffer.startIndex, offsetBy: emitCount)
+                    displayText += String(thinkBuffer[..<split])
+                    thinkBuffer = String(thinkBuffer[split...])
+                }
+                break
+            }
+
+            if let openRange = thinkBuffer.range(of: ToolCallPattern.thinkOpen) {
+                let beforeThink = String(thinkBuffer[..<openRange.lowerBound])
+                if !beforeThink.isEmpty {
+                    displayText += processOutsideThinking(beforeThink)
+                }
+                displayText += ToolCallPattern.thinkOpen
+                thinkBuffer = String(thinkBuffer[openRange.upperBound...])
+                inThinkBlock = true
+                continue
+            }
+
+            let keep = trailingPossibleTagPrefix(in: thinkBuffer, for: ToolCallPattern.thinkOpen)
+            let emitCount = max(0, thinkBuffer.count - keep.count)
+            if emitCount > 0 {
+                let split = thinkBuffer.index(thinkBuffer.startIndex, offsetBy: emitCount)
+                displayText += processOutsideThinking(String(thinkBuffer[..<split]))
+                thinkBuffer = String(thinkBuffer[split...])
+            }
+            break
+        }
+
+        return StreamProcessResult(displayText: displayText)
+    }
+
+    private func processOutsideThinking(_ text: String) -> String {
         var displayText = ""
         var remaining = text
 
@@ -231,7 +284,7 @@ public final class StreamingToolCallWriter: @unchecked Sendable {
             }
         }
 
-        return StreamProcessResult(displayText: displayText)
+        return displayText
     }
 
     // MARK: - JSON handling
@@ -301,6 +354,22 @@ public final class StreamingToolCallWriter: @unchecked Sendable {
     }
 
     // MARK: - Helpers
+
+    private func trailingPossibleTagPrefix(in text: String, for tag: String) -> String {
+        guard !text.isEmpty else { return "" }
+
+        let maxPrefix = min(text.count, max(0, tag.count - 1))
+        guard maxPrefix > 0 else { return "" }
+
+        for length in stride(from: maxPrefix, through: 1, by: -1) {
+            let candidate = String(text.suffix(length))
+            if tag.hasPrefix(candidate) {
+                return candidate
+            }
+        }
+
+        return ""
+    }
 
     private func detectContentField(_ buffer: String) -> (key: String, afterKey: String.Index)? {
         let fields = ["content", "file_content", "new_text"]

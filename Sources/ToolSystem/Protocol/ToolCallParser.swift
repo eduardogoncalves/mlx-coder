@@ -27,32 +27,60 @@ public struct ToolCallParser: Sendable {
         var results: [ParsedToolCall] = []
         var searchRange = text.startIndex..<text.endIndex
 
-        while let openRange = text.range(of: ToolCallPattern.toolCallOpen, range: searchRange) {
-            let closeRange = text.range(of: ToolCallPattern.toolCallClose, range: openRange.upperBound..<text.endIndex)
+        while !searchRange.isEmpty {
+            if let thinkOpen = text.range(of: ToolCallPattern.thinkOpen, range: searchRange) {
+                if let toolOpen = text.range(of: ToolCallPattern.toolCallOpen, range: searchRange),
+                   toolOpen.lowerBound < thinkOpen.lowerBound {
+                    searchRange = parseToolCall(in: text, openRange: toolOpen, appendTo: &results)
+                    continue
+                }
 
-            let jsonString: String
-            let nextSearchIndex: String.Index
-
-            if let closeRange {
-                jsonString = String(text[openRange.upperBound..<closeRange.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
-                nextSearchIndex = closeRange.upperBound
-            } else {
-                jsonString = String(text[openRange.upperBound..<text.endIndex]).trimmingCharacters(in: .whitespacesAndNewlines)
-                nextSearchIndex = text.endIndex
+                // Ignore any tool tags inside thinking. If think is unclosed, the
+                // remainder is still thinking and must be ignored for tool execution.
+                if let thinkClose = text.range(of: ToolCallPattern.thinkClose, range: thinkOpen.upperBound..<text.endIndex) {
+                    searchRange = thinkClose.upperBound..<text.endIndex
+                    continue
+                }
+                break
             }
 
-            if let call = parseJSON(jsonString) {
-                results.append(call)
+            guard let toolOpen = text.range(of: ToolCallPattern.toolCallOpen, range: searchRange) else {
+                break
             }
 
-            searchRange = nextSearchIndex..<text.endIndex
+            searchRange = parseToolCall(in: text, openRange: toolOpen, appendTo: &results)
         }
 
         return results
     }
 
     public static func containsToolCall(_ text: String) -> Bool {
-        text.contains(ToolCallPattern.toolCallOpen) && text.contains(ToolCallPattern.toolCallClose)
+        !parse(text).isEmpty
+    }
+
+    private static func parseToolCall(
+        in text: String,
+        openRange: Range<String.Index>,
+        appendTo results: inout [ParsedToolCall]
+    ) -> Range<String.Index> {
+        let closeRange = text.range(of: ToolCallPattern.toolCallClose, range: openRange.upperBound..<text.endIndex)
+
+        let jsonString: String
+        let nextSearchIndex: String.Index
+
+        if let closeRange {
+            jsonString = String(text[openRange.upperBound..<closeRange.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
+            nextSearchIndex = closeRange.upperBound
+        } else {
+            jsonString = String(text[openRange.upperBound..<text.endIndex]).trimmingCharacters(in: .whitespacesAndNewlines)
+            nextSearchIndex = text.endIndex
+        }
+
+        if let call = parseJSON(jsonString) {
+            results.append(call)
+        }
+
+        return nextSearchIndex..<text.endIndex
     }
 
     public static func extractNonToolText(_ text: String) -> String {

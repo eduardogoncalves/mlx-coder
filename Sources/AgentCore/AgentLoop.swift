@@ -53,6 +53,7 @@ public actor AgentLoop {
     let projectWorkspaceRoot: String
     let buildCheckManager: BuildCheckManager
     var gitOrchestrationManager: GitOrchestrationManager?
+    var skipGitOrchestrationInitialization: Bool = false
     
     // Tracking parameters to avoid unnecessary reloads
     var loadedModelPath: String?
@@ -228,7 +229,7 @@ public actor AgentLoop {
         await applyDeterministicContextCompactionIfNeeded(reason: "after_user_message")
         
         // Initialize git orchestration for coding tasks
-        if taskType == .coding && gitOrchestrationManager == nil {
+        if taskType == .coding && gitOrchestrationManager == nil && !skipGitOrchestrationInitialization {
             await initializeGitOrchestration(userMessage: message)
         }
 
@@ -241,6 +242,10 @@ public actor AgentLoop {
             pendingReload = false
         }
 
+        let turnHistorySnapshot = history
+        let turnPendingImagesSnapshot = pendingImages
+        let turnPreservedEditTmpFilesSnapshot = preservedEditTmpFiles
+
         var iterations = 0
         var fileModificationToolsExecuted = false
         var modifiedFilePaths = Set<String>()
@@ -250,13 +255,33 @@ public actor AgentLoop {
         var lastReadOnlyToolSignature: String?
         var sameReadOnlyToolStreak = 0
         var readOnlyLoopSteeredSignatures = Set<String>()
+        var hasRetriedFailedTurn = false
 
         while iterations < maxToolIterations {
             iterations += 1
             await applyDeterministicContextCompactionIfNeeded(reason: "before_generation")
 
             // Generate response
-            let generationResult = try await generateResponse()
+            let generationResult: (text: String, writer: StreamingToolCallWriter)
+            do {
+                generationResult = try await generateResponse()
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                if !hasRetriedFailedTurn {
+                    hasRetriedFailedTurn = true
+                    renderer.printStatus("⚠️  Generation failed: \(error.localizedDescription). Retrying the current turn once.")
+                    pendingImages = images
+                    continue
+                }
+
+                renderer.printError("Generation failed again: \(error.localizedDescription)")
+                history = turnHistorySnapshot
+                pendingImages = turnPendingImagesSnapshot
+                preservedEditTmpFiles = turnPreservedEditTmpFilesSnapshot
+                return
+            }
+
             let response = generationResult.text
             let writer = generationResult.writer
 
@@ -366,59 +391,143 @@ public actor AgentLoop {
     /// Initializes git orchestration for coding tasks.
     private func initializeGitOrchestration(userMessage: String) async {
         do {
-            self.gitOrchestrationManager = try await GitOrchestrationManager.create(projectRoot: projectWorkspaceRoot)
-            let (branchName, baseBranch, warning) = try await gitOrchestrationManager!.prepareTask(userMessage: userMessage)
-            renderer.printStatus("📋 Proposed branch: \(branchName) (base: \(baseBranch))")
-            
-            // Prompt for custom branch name
-            if let interactiveInput = self.interactiveInput {
-                let branchOptions = ["Use this name", "No, suggest changes (esc)"]
-                print("")
-                if let selected = await interactiveInput.selectOption(
-                    prompt: "Branch name options",
-                    options: branchOptions,
-                    escSelectsLastOption: true
-                ) {
-                    if selected == 1 {
-                        // User wants to suggest an alternative branch name
-                        if let customName = await interactiveInput.promptForText(
-                            prompt: "[branch] Blocked. Suggest changes (or press Enter to keep proposed):",
-                            placeholder: branchName,
-                            validate: { name in
-                                if !BranchNamer.isValidCustomBranchName(name) {
-                                    throw GitError.invalidCustomBranchName(name)
-                                }
-                                return true
-                            }
-                        ) {
-                            try await gitOrchestrationManager!.updateBranchName(customName)
-                            renderer.printStatus("✅ Using custom branch: \(customName)")
-                        } else {
-                            renderer.printStatus("Using proposed branch: \(branchName)")
-                        }
-                    } else {
-                        renderer.printStatus("Using branch: \(branchName)")
-                    }
+            let manager = try await GitOrchestrationManager.create(projectRoot: projectWorkspaceRoot)
+
+            guard let interactiveInput = self.interactiveInput else {
+                let setup = try await manager.prepareTask(userMessage: userMessage)
+                try await finalizePreparedGitSetup(
+                    manager: manager,
+                    preferredBranchName: setup.branchName,
+                    warning: setup.warning
+                )
+                return
+            }
+
+            print("")
+            let setupOptions = [
+                "Continue from existing worktree branch",
+                "Create a new branch (auto name)",
+                "Create a new branch (custom name)",
+                "Continue without creating a branch"
+            ]
+
+            guard let selected = await interactiveInput.selectOption(
+                prompt: "Coding mode git setup",
+                options: setupOptions,
+                escSelectsLastOption: true
+            ) else {
+                renderer.printStatus("⚠️  Git setup skipped (no option selected).")
+                return
+            }
+
+            switch selected {
+            case 0:
+                let worktrees = try await manager.listAvailableWorktrees()
+                guard !worktrees.isEmpty else {
+                    renderer.printStatus("⚠️  No git worktrees found. Falling back to auto-named branch creation.")
+                    let setup = try await manager.prepareTask(userMessage: userMessage)
+                    try await finalizePreparedGitSetup(
+                        manager: manager,
+                        preferredBranchName: setup.branchName,
+                        warning: setup.warning
+                    )
+                    return
                 }
-            }
-            
-            // Create worktree immediately
-            try await gitOrchestrationManager!.createWorktreeNow()
-            let currentBranch = await gitOrchestrationManager!.getCurrentBranchName() ?? branchName
-            let worktreePath = await gitOrchestrationManager!.getWorktreePath() ?? "current directory"
-            renderer.printStatus("🌿 Worktree created at: \(worktreePath) (branch: \(currentBranch))")
-            
-            // Update permissions to use worktree as effective workspace
-            if let worktreePath = await gitOrchestrationManager!.getWorktreePath() {
-                await switchSessionWorkspace(to: worktreePath, changeDirectory: false)
-                renderer.printStatus("📁 Files will be edited in worktree")
-            }
-            
-            if let warning, !warning.isEmpty {
-                renderer.printStatus("⚠️  Git setup warning: \(warning)")
+
+                let currentDir = URL(filePath: FileManager.default.currentDirectoryPath).standardized.path()
+                let options = worktrees.map { info in
+                    let normalizedPath = URL(filePath: info.path).standardized.path()
+                    let branch = info.branch ?? "detached HEAD"
+                    let marker = normalizedPath == currentDir ? " (current)" : ""
+                    return "\(branch) — \(normalizedPath)\(marker)"
+                }
+
+                guard let worktreeIndex = await interactiveInput.selectOption(
+                    prompt: "Select existing worktree branch",
+                    options: options,
+                    escSelectsLastOption: true
+                ) else {
+                    renderer.printStatus("⚠️  Worktree selection cancelled.")
+                    return
+                }
+
+                let selectedWorktree = worktrees[worktreeIndex]
+                let connected = try await manager.connectToExistingWorktree(path: selectedWorktree.path)
+                skipGitOrchestrationInitialization = false
+                gitOrchestrationManager = manager
+                let normalizedPath = URL(filePath: connected.path).standardized.path()
+                await switchSessionWorkspace(to: normalizedPath, changeDirectory: false)
+                renderer.printStatus("📁 Using existing worktree: \(normalizedPath)")
+                renderer.printStatus("🌿 Active branch: \(connected.branch)")
+
+            case 1:
+                let setup = try await manager.prepareTask(userMessage: userMessage)
+                try await finalizePreparedGitSetup(
+                    manager: manager,
+                    preferredBranchName: setup.branchName,
+                    warning: setup.warning
+                )
+
+            case 2:
+                let setup = try await manager.prepareTask(userMessage: userMessage)
+                renderer.printStatus("📋 Proposed branch: \(setup.branchName) (base: \(setup.baseBranch))")
+
+                let customBranch = await interactiveInput.promptForText(
+                    prompt: "Branch name (or Enter to keep proposed):",
+                    placeholder: setup.branchName,
+                    validate: { name in
+                        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+                        if trimmed.isEmpty {
+                            return true
+                        }
+                        if !BranchNamer.isValidCustomBranchName(trimmed) {
+                            throw GitError.invalidCustomBranchName(trimmed)
+                        }
+                        return true
+                    }
+                )?.trimmingCharacters(in: .whitespacesAndNewlines)
+
+                let finalBranch = (customBranch?.isEmpty == false) ? customBranch! : setup.branchName
+                if finalBranch != setup.branchName {
+                    try await manager.updateBranchName(finalBranch)
+                }
+
+                try await finalizePreparedGitSetup(
+                    manager: manager,
+                    preferredBranchName: finalBranch,
+                    warning: setup.warning
+                )
+
+            default:
+                skipGitOrchestrationInitialization = true
+                gitOrchestrationManager = nil
+                renderer.printStatus("⏭️  Continuing without git orchestration. No branch/worktree was created.")
             }
         } catch {
             renderer.printStatus("⚠️  Git initialization failed: \(error.localizedDescription)")
+        }
+    }
+
+    private func finalizePreparedGitSetup(
+        manager: GitOrchestrationManager,
+        preferredBranchName: String,
+        warning: String?
+    ) async throws {
+        try await manager.createWorktreeNow()
+        skipGitOrchestrationInitialization = false
+        gitOrchestrationManager = manager
+
+        let currentBranch = await manager.getCurrentBranchName() ?? preferredBranchName
+        let worktreePath = await manager.getWorktreePath() ?? "current directory"
+        renderer.printStatus("🌿 Worktree created at: \(worktreePath) (branch: \(currentBranch))")
+
+        if let resolvedWorktree = await manager.getWorktreePath() {
+            await switchSessionWorkspace(to: resolvedWorktree, changeDirectory: false)
+            renderer.printStatus("📁 Files will be edited in worktree")
+        }
+
+        if let warning, !warning.isEmpty {
+            renderer.printStatus("⚠️  Git setup warning: \(warning)")
         }
     }
 

@@ -114,5 +114,34 @@ final class ToolCallParserTests: XCTestCase {
         XCTAssertEqual(calls[0].name, "write_file")
         XCTAssertEqual(calls[0].arguments["path"] as? String, "index.html")
     }
+
+    func testIgnoresToolCallsInsideThinkBlock() {
+        let text = """
+        <think>
+        <tool_call>
+        {"name":"list_dir","arguments":{"path":"."}}
+        </tool_call>
+        </think>
+        <tool_call>
+        {"name":"read_file","arguments":{"path":"README.md"}}
+        </tool_call>
+        """
+
+        let calls = ToolCallParser.parse(text)
+        XCTAssertEqual(calls.count, 1)
+        XCTAssertEqual(calls[0].name, "read_file")
+    }
+
+    func testUnclosedThinkSuppressesSubsequentToolTags() {
+        let text = """
+        prefix
+        <think>
+        still thinking
+        <tool_call>{"name":"read_file","arguments":{"path":"README.md"}}</tool_call>
+        """
+
+        XCTAssertTrue(ToolCallParser.parse(text).isEmpty)
+        XCTAssertFalse(ToolCallParser.containsToolCall(text))
+    }
 }
 

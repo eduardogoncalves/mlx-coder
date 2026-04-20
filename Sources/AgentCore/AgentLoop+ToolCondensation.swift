@@ -154,11 +154,9 @@ extension AgentLoop {
         """
 
         let modelContainer = try requireLoadedModelContainer()
-        // Some VLM checkpoints require processor-driven prompt formatting even on
-        // text-only turns (e.g. summarization). Guard with processor-config presence
-        // so local checkpoints missing processor metadata still use direct tokenization.
-        let isVLM = await modelContainer.isVLM
-        let shouldUseProcessorPath = isVLM && modelHasProcessorConfig(modelPath)
+        // Tool condensation is text-only. Keep it on direct tokenization to avoid
+        // processor-side empty tensor crashes on certain VLM checkpoints.
+        let shouldUseProcessorPath = false
         let extracted = try await modelContainer.perform { [shouldUseProcessorPath] context in
             if Task.isCancelled { throw CancellationError() }
 
@@ -174,9 +172,7 @@ extension AgentLoop {
                         fallbackTexts: [userPrompt, "hi", "a"],
                         using: context.tokenizer.encode(text:)
                     )
-                    let tokenArray = MLXArray(tokens).expandedDimensions(axis: 0)
-                    let mask = ones(like: tokenArray).asType(.int8)
-                    input = LMInput(text: .init(tokens: tokenArray, mask: mask), image: nil)
+                    input = try AgentLoop.makeSafeTextLMInput(tokens: tokens)
                 }
             } else {
                 let tokens = try AgentLoop.encodeNonEmptyTokens(
@@ -184,9 +180,7 @@ extension AgentLoop {
                     fallbackTexts: [userPrompt, "hi", "a"],
                     using: context.tokenizer.encode(text:)
                 )
-                let tokenArray = MLXArray(tokens).expandedDimensions(axis: 0)
-                let mask = ones(like: tokenArray).asType(.int8)
-                input = LMInput(text: .init(tokens: tokenArray, mask: mask), image: nil)
+                input = try AgentLoop.makeSafeTextLMInput(tokens: tokens)
             }
             var responseText = ""
 

@@ -35,10 +35,9 @@ extension AgentLoop {
         // Some local checkpoints report VLM capability but ship without processor metadata.
         // In that case, forcing processor.prepare() on text-only turns can crash at runtime.
         let hasProcessorConfig = modelHasProcessorConfig(modelPath)
-        // Prefer processor path for VLM checkpoints with processor metadata, including
-        // text-only turns, because some VLM models require processor-formatted prompts.
-        // Checkpoints without processor config stay on direct tokenization.
-        let shouldUseProcessorPath = isVLM && hasProcessorConfig
+        // Keep text-only turns on direct tokenization. Processor prep is used only for
+        // image-attached turns to avoid VLM runtime crashes on empty text tensors.
+        let shouldUseProcessorPath = isVLM && hasProcessorConfig && !imageURLs.isEmpty
         let enableThinking = thinkingLevel != .fast && !isGemma4Model
         let chatML = history.formatChatML(messages: transformedMessages, enableThinking: enableThinking)
 
@@ -90,7 +89,7 @@ extension AgentLoop {
                         fallbackTexts: ["hi", "a"],
                         using: tokenizer.encode(text:)
                     )
-                    input = LMInput(tokens: MLXArray(tokens))
+                    input = try AgentLoop.makeSafeTokenLMInput(tokens: tokens)
                 } else {
                     throw NSError(
                         domain: "AgentLoop",
@@ -104,7 +103,7 @@ extension AgentLoop {
                     fallbackTexts: ["hi", "a"],
                     using: tokenizer.encode(text:)
                 )
-                input = LMInput(tokens: MLXArray(tokens))
+                input = try AgentLoop.makeSafeTokenLMInput(tokens: tokens)
             }
 
             // Clean up stale .tmp files from previous crashed/interrupted sessions.

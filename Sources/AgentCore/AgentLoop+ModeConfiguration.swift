@@ -85,6 +85,9 @@ extension AgentLoop {
     /// Sets the task type (general/coding/reasoning) and updates generation parameters.
     public func setTaskType(_ type: TaskType) async {
         self.taskType = type
+        if type != .coding {
+            skipGitOrchestrationInitialization = false
+        }
         syncCurrentModeFromSettings()
         updateGenerationConfig()
         

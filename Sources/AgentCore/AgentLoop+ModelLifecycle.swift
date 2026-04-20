@@ -133,4 +133,19 @@ extension AgentLoop {
         let mask = ones(like: tokenArray).asType(.int8)
         return LMInput(text: .init(tokens: tokenArray, mask: mask), image: nil)
     }
+
+    static func makeSafeTokenLMInput(tokens: [Int]) throws -> LMInput {
+        guard !tokens.isEmpty else {
+            throw NSError(
+                domain: "AgentLoop",
+                code: 7,
+                userInfo: [
+                    NSLocalizedDescriptionKey:
+                        "Refusing to construct token LMInput from an empty token sequence."
+                ]
+            )
+        }
+
+        return LMInput(tokens: MLXArray(tokens))
+    }
 }
