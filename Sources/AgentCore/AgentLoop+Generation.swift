@@ -35,9 +35,10 @@ extension AgentLoop {
         // Some local checkpoints report VLM capability but ship without processor metadata.
         // In that case, forcing processor.prepare() on text-only turns can crash at runtime.
         let hasProcessorConfig = modelHasProcessorConfig(modelPath)
-        // Keep text-only turns on direct tokenization. Processor prep is used only for
-        // image-attached turns to avoid VLM runtime crashes on empty text tensors.
-        let shouldUseProcessorPath = isVLM && hasProcessorConfig && !imageURLs.isEmpty
+        // For VLMs with processor metadata, prefer the processor path even for text-only
+        // turns. Some VLM checkpoints require processor-driven preparation to ensure
+        // auxiliary tensors (e.g. image/video masks) stay consistent with prompt length.
+        let shouldUseProcessorPath = isVLM && hasProcessorConfig
         let enableThinking = thinkingLevel != .fast && !isGemma4Model
         let chatML = history.formatChatML(messages: transformedMessages, enableThinking: enableThinking)
 
@@ -56,7 +57,7 @@ extension AgentLoop {
         let spinner = Spinner(message: "Processing...")
         await spinner.start()
 
-        let result = try await modelContainer.perform { [currentGenerationConfig, renderer, chatML, imageURLs, vlmMessageData, vlmLastUserIndex, shouldUseProcessorPath] context in
+        let result = try await modelContainer.perform { [currentGenerationConfig, renderer, chatML, imageURLs, vlmMessageData, vlmLastUserIndex, shouldUseProcessorPath, isVLM] context in
             if Task.isCancelled { throw CancellationError() }
 
             // Processor path: for image turns and model families that require processor-driven
@@ -80,22 +81,34 @@ extension AgentLoop {
                     }
                 }
                 let userInput = UserInput(chat: chatMessages)
-                let prepared = try await context.processor.prepare(input: userInput)
-                if prepared.text.tokens.size > 0 {
-                    input = prepared
-                } else if imageURLs.isEmpty {
+                do {
+                    let prepared = try await context.processor.prepare(input: userInput)
+                    if prepared.text.tokens.size > 0 {
+                        input = prepared
+                    } else if imageURLs.isEmpty {
+                        let tokens = try AgentLoop.encodeNonEmptyTokens(
+                            primaryText: chatML,
+                            fallbackTexts: ["hi", "a"],
+                            using: tokenizer.encode(text:)
+                        )
+                        input = try AgentLoop.makeSafeTextLMInput(tokens: tokens)
+                    } else {
+                        throw NSError(
+                            domain: "AgentLoop",
+                            code: 5,
+                            userInfo: [NSLocalizedDescriptionKey: "Processor produced empty prompt tokens for an image input."]
+                        )
+                    }
+                } catch {
+                    // If processor preparation fails on a text-only turn, fall back to
+                    // direct tokenization so the user still gets a response.
+                    guard imageURLs.isEmpty else { throw error }
                     let tokens = try AgentLoop.encodeNonEmptyTokens(
                         primaryText: chatML,
                         fallbackTexts: ["hi", "a"],
                         using: tokenizer.encode(text:)
                     )
-                    input = try AgentLoop.makeSafeTokenLMInput(tokens: tokens)
-                } else {
-                    throw NSError(
-                        domain: "AgentLoop",
-                        code: 5,
-                        userInfo: [NSLocalizedDescriptionKey: "Processor produced empty prompt tokens for an image input."]
-                    )
+                    input = try AgentLoop.makeSafeTextLMInput(tokens: tokens)
                 }
             } else {
                 let tokens = try AgentLoop.encodeNonEmptyTokens(
@@ -103,7 +116,11 @@ extension AgentLoop {
                     fallbackTexts: ["hi", "a"],
                     using: tokenizer.encode(text:)
                 )
-                input = try AgentLoop.makeSafeTokenLMInput(tokens: tokens)
+                if isVLM {
+                    input = try AgentLoop.makeSafeTextLMInput(tokens: tokens)
+                } else {
+                    input = try AgentLoop.makeSafeTokenLMInput(tokens: tokens)
+                }
             }
 
             // Clean up stale .tmp files from previous crashed/interrupted sessions.
