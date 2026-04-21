@@ -146,6 +146,25 @@ extension AgentLoop {
             )
         }
 
+        // Keep the token-only initializer for pure-text LLM checkpoints, which
+        // historically expect a 1D token vector.
         return LMInput(tokens: MLXArray(tokens))
+    }
+
+    static func makeSafeBatchedTokenLMInput(tokens: [Int]) throws -> LMInput {
+        guard !tokens.isEmpty else {
+            throw NSError(
+                domain: "AgentLoop",
+                code: 8,
+                userInfo: [
+                    NSLocalizedDescriptionKey:
+                        "Refusing to construct batched token LMInput from an empty token sequence."
+                ]
+            )
+        }
+
+        let tokenArray = MLXArray(tokens).expandedDimensions(axis: 0)
+        let mask = ones(like: tokenArray).asType(.int8)
+        return LMInput(tokens: tokenArray, mask: mask)
     }
 }
