@@ -2,11 +2,12 @@
 // Loads LLM from a local directory using MLX-Swift-LM
 
 import Foundation
+import Hub
 import MLX
 import MLXLLM
 import MLXLMCommon
 import MLXVLM
-import VendoredVLM
+import Tokenizers
 
 /// Loads a model from a local filesystem path.
 /// The model runs in-process — no HTTP server, no external API.
@@ -126,9 +127,6 @@ public final class ModelLoader: Sendable {
             }
         }
 
-        // Ensure Gemma4 (and any other vendored model types) are registered before loading.
-        await Gemma4Registration.shared.register()
-
         // Load using MLX-Swift-LM. If a Hub ID is passed, MLX downloads as needed.
         let configuration: ModelConfiguration
         if usesLocalDirectory {
@@ -144,7 +142,8 @@ public final class ModelLoader: Sendable {
         // Use the MLXLMCommon free function which automatically routes through all registered
         // model factories (MLXVLM first, then MLXLLM), so VLMs and LLMs are handled uniformly.
         let container = try await loadModelContainer(
-            hub: .init(downloadBase: modelsBaseURL),
+            from: MLXHubDownloader(downloadBase: modelsBaseURL),
+            using: MLXTokenizerLoader(),
             configuration: configuration,
             progressHandler: { progress in
                 guard !skipHubProgress else { return }
@@ -615,5 +614,84 @@ public enum ModelLoaderError: LocalizedError {
         case .modelDirectoryNotFound(let path):
             return "Model directory not found: \(path)"
         }
+    }
+}
+
+// MARK: - Downloader / TokenizerLoader bridges for mlx-swift-lm 3.x
+
+/// Adapts `Tokenizers.Tokenizer` (from swift-transformers) to `MLXLMCommon.Tokenizer`.
+private struct MLXTokenizerBridge: MLXLMCommon.Tokenizer {
+    private let upstream: any Tokenizers.Tokenizer
+
+    init(_ upstream: any Tokenizers.Tokenizer) {
+        self.upstream = upstream
+    }
+
+    func encode(text: String, addSpecialTokens: Bool) -> [Int] {
+        upstream.encode(text: text, addSpecialTokens: addSpecialTokens)
+    }
+
+    // In swift-transformers 1.x, Tokenizers.Tokenizer uses `decode(tokens:)` as the
+    // parameter label, while MLXLMCommon 3.x uses `decode(tokenIds:)`. Bridge accordingly.
+    func decode(tokenIds: [Int], skipSpecialTokens: Bool) -> String {
+        upstream.decode(tokens: tokenIds, skipSpecialTokens: skipSpecialTokens)
+    }
+
+    func convertTokenToId(_ token: String) -> Int? {
+        upstream.convertTokenToId(token)
+    }
+
+    func convertIdToToken(_ id: Int) -> String? {
+        upstream.convertIdToToken(id)
+    }
+
+    var bosToken: String? { upstream.bosToken }
+    var eosToken: String? { upstream.eosToken }
+    var unknownToken: String? { upstream.unknownToken }
+
+    func applyChatTemplate(
+        messages: [[String: any Sendable]],
+        tools: [[String: any Sendable]]?,
+        additionalContext: [String: any Sendable]?
+    ) throws -> [Int] {
+        do {
+            return try upstream.applyChatTemplate(
+                messages: messages, tools: tools, additionalContext: additionalContext)
+        } catch Tokenizers.TokenizerError.missingChatTemplate {
+            throw MLXLMCommon.TokenizerError.missingChatTemplate
+        }
+    }
+}
+
+/// Loads a tokenizer from a local directory using `Tokenizers.AutoTokenizer`.
+struct MLXTokenizerLoader: MLXLMCommon.TokenizerLoader {
+    func load(from directory: URL) async throws -> any MLXLMCommon.Tokenizer {
+        let upstream = try await AutoTokenizer.from(modelFolder: directory)
+        return MLXTokenizerBridge(upstream)
+    }
+}
+
+/// Downloads model snapshots from Hugging Face Hub using `Hub.HubApi`.
+struct MLXHubDownloader: MLXLMCommon.Downloader {
+    private let hubApi: HubApi
+
+    init(downloadBase: URL? = nil) {
+        self.hubApi = HubApi(downloadBase: downloadBase)
+    }
+
+    func download(
+        id: String,
+        revision: String?,
+        matching patterns: [String],
+        useLatest: Bool,
+        progressHandler: @Sendable @escaping (Progress) -> Void
+    ) async throws -> URL {
+        let rev = revision ?? "main"
+        return try await hubApi.snapshot(
+            from: id,
+            revision: rev,
+            matching: patterns,
+            progressHandler: progressHandler
+        )
     }
 }

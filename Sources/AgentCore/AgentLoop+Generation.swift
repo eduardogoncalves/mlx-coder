@@ -182,12 +182,13 @@ extension AgentLoop {
             var segmentTokens = [Int]()
             var segment = ""
             
-            for try await item in try MLXLMCommon.generateTokens(
+            let tokenStream = try MLXLMCommon.generateTokens(
                 input: input,
                 cache: tqCache,
                 parameters: generationParameters,
                 context: context
-            ) {
+            )
+            for await item in tokenStream {
                 if Task.isCancelled {
                     Task { await spinner.stop(clearLine: true) }
                     throw CancellationError()
@@ -196,7 +197,7 @@ extension AgentLoop {
                 switch item {
                 case .token(let id):
                     segmentTokens.append(id)
-                    let newSegment = tokenizer.decode(tokens: segmentTokens, skipSpecialTokens: false)
+                    let newSegment = tokenizer.decode(tokenIds: segmentTokens, skipSpecialTokens: false)
                     
                     // Skip yielding if incomplete multi-byte sequence
                     if newSegment.last == "\u{fffd}" {
@@ -214,7 +215,7 @@ extension AgentLoop {
                     if newText.hasSuffix("\n") {
                         if let lastToken = segmentTokens.last {
                             segmentTokens = [lastToken]
-                            segment = tokenizer.decode(tokens: segmentTokens, skipSpecialTokens: false)
+                            segment = tokenizer.decode(tokenIds: segmentTokens, skipSpecialTokens: false)
                         }
                     } else {
                         segment = newSegment
