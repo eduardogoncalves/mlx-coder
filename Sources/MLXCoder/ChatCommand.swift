@@ -145,6 +145,7 @@ struct ChatCommand: AsyncParsableCommand {
             modelPath: selectedModel,
             workspace: absWorkspace,
             useSandbox: args.sandbox,
+            useShadowContextForToolResults: args.shadowContext,
             auditLogger: auditLogger,
             dryRun: effectiveDryRun,
             hooks: hooks,

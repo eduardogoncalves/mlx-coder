@@ -144,6 +144,7 @@ struct RunCommand: AsyncParsableCommand {
             modelPath: selectedModel,
             workspace: absWorkspace,
             useSandbox: effectiveSandbox,
+            useShadowContextForToolResults: args.shadowContext,
             auditLogger: auditLogger,
             dryRun: effectiveDryRun,
             hooks: hooks,

@@ -84,6 +84,9 @@ struct ModelArguments: ParsableArguments, Sendable {
     @Flag(name: .long, inversion: .prefixedNo, help: "Enable macOS seatbelt sandboxing for shell commands")
     var sandbox: Bool = true
 
+    @Flag(name: .long, inversion: .prefixedNo, help: "Use shadow context to summarize large tool outputs before storing them in main history")
+    var shadowContext: Bool = true
+
     @Option(name: .long, help: "Approval mode for destructive tools: default, auto-edit, yolo")
     var approvalMode: String = "default"
 

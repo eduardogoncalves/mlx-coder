@@ -44,6 +44,7 @@ public actor AgentLoop {
     let memoryLimit: Int?
     let cacheLimit: Int?
     let dryRun: Bool
+    let useShadowContextForToolResults: Bool
     let hooks: HookPipeline
     let memoryPromptSection: String?
     let customizationPromptSection: String?
@@ -107,6 +108,7 @@ public actor AgentLoop {
         modelPath: String,
         workspace: String = ".",
         useSandbox: Bool = false,
+        useShadowContextForToolResults: Bool = true,
         auditLogger: ToolAuditLogger? = nil,
         dryRun: Bool = false,
         hooks: HookPipeline = HookPipeline(),
@@ -132,6 +134,7 @@ public actor AgentLoop {
         self.buildCheckManager = BuildCheckManager()
         self.useSandbox = useSandbox
         self.dryRun = dryRun
+        self.useShadowContextForToolResults = useShadowContextForToolResults
         self.hooks = hooks
         self.memoryPromptSection = memoryPromptSection
         self.customizationPromptSection = customizationPromptSection
