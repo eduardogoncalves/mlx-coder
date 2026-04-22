@@ -51,5 +51,10 @@ let package = Package(
             dependencies: ["MLXCoder"],
             path: "Tests/ProjectDetectorTests"
         ),
+        .testTarget(
+            name: "MemoryTests",
+            dependencies: ["MLXCoder"],
+            path: "Tests/MemoryTests"
+        ),
     ]
 )

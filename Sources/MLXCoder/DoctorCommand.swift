@@ -143,6 +143,26 @@ func doctorShouldFail(payload: DoctorPayload, strict: Bool) -> Bool {
     return false
 }
 
+// MARK: - Memory Doctor Check
+
+func memoryDoctorCheck() async -> DoctorCheck {
+    let store = KnowledgeStore.shared
+    
+    do {
+        try await store.initialize()
+        let stats = try await store.stats()
+        
+        // Check if DB is accessible and has reasonable size
+        let dbSizeMB = Double(stats.dbSizeBytes) / 1_000_000.0
+        let message = "Memory store accessible: \(stats.entryCount) entries, \(String(format: "%.2f", dbSizeMB)) MB"
+        
+        return DoctorCheck(name: "memory", status: .pass, message: message)
+    } catch {
+        return DoctorCheck(name: "memory", status: .warn, message: "Memory store not accessible: \(error.localizedDescription)")
+    }
+}
+
+
 func lspDoctorCheck(isDotnetWorkspace: Bool, csharpLSAvailable: Bool) -> DoctorCheck {
     if !isDotnetWorkspace {
         return DoctorCheck(name: "lsp", status: .pass, message: "Workspace is not .NET; LSP readiness check skipped.")
@@ -281,6 +301,10 @@ func buildDoctorPayload(
             checks.append(DoctorCheck(name: "mcp", status: .fail, message: invalidEndpoints.joined(separator: " | ")))
         }
     }
+
+    // Memory subsystem check
+    let memoryCheck = await memoryDoctorCheck()
+    checks.append(memoryCheck)
 
     let passCount = checks.filter { $0.status == .pass }.count
     let warnCount = checks.filter { $0.status == .warn }.count
