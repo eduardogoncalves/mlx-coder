@@ -54,7 +54,7 @@ jobs:
   build-cli-branch:
     if: |
       (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/') && github.ref_name != 'main') ||
-      (github.event_name == 'pull_request' && github.head_ref != 'main')
+      github.event_name == 'pull_request'
     name: Build CLI (branch/PR)
     runs-on: macos-latest
 
@@ -74,7 +74,7 @@ jobs:
             branch="$HEAD_REF"
           fi
 
-          normalized_branch="$(echo "$branch" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//')"
+          normalized_branch="$(echo "$branch" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/-+/-/g; s/^-+//; s/-+$//')"
           if [[ -z "$normalized_branch" ]]; then
             normalized_branch="branch"
           fi
