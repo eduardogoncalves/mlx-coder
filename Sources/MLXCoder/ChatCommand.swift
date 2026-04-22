@@ -121,17 +121,22 @@ struct ChatCommand: AsyncParsableCommand {
         let toolCount = await registry.count
         renderer.printStatus("Registered \(toolCount) tools")
 
-        // Build layered system prompt with optional skills metadata.
+        // Build layered system prompt with optional skills metadata and memory restoration.
         let skillsRegistry = SkillsRegistry(workspaceRoot: absWorkspace)
         let skillMetadata = await skillsRegistry.listMetadata()
         let hooks = HookPipeline()
         await hooks.register(AuditHook(logger: auditLogger))
+        
+        // Restore memory from previous sessions
+        let memorySection = await restoreMemorySection(workspaceRoot: absWorkspace, renderer: renderer)
+        
         let promptComposition = await AgentLoop.buildSystemPromptComposition(
             registry: registry,
             maxTokens: args.maxTokens,
             mode: .plan,
             thinkingLevel: .low,
             taskType: .general,
+            memorySection: memorySection,
             skillsMetadata: skillMetadata
         )
 
@@ -212,7 +217,7 @@ struct ChatCommand: AsyncParsableCommand {
                 continue
             }
             if trimmed == "/clear" {
-                await agentLoop.clearHistory()
+                await agentLoop.clearHistoryWithCheckpoint()
                 continue
             }
             if trimmed.hasPrefix("/model") {
@@ -573,3 +578,51 @@ func printREPLHelp() {
       
     """)
 }
+
+// MARK: - Memory Restoration
+
+func restoreMemorySection(workspaceRoot: String, renderer: StreamRenderer) async -> String? {
+    let store = KnowledgeStore.shared
+    
+    // Initialize store (safe to call multiple times)
+    do {
+        try await store.initialize()
+    } catch {
+        // Silently fail - memory is optional
+        return nil
+    }
+    
+    // Prune expired entries
+    do {
+        try await store.pruneExpired()
+    } catch {
+        // Non-fatal
+    }
+    
+    // Detect surface
+    let surface = SurfaceDetector.detectSurface(workspacePath: workspaceRoot)
+    let branch = SurfaceDetector.currentBranch(in: workspaceRoot)
+    
+    // Build restore context
+    let context = RestoreContext(
+        projectRoot: workspaceRoot,
+        surface: surface,
+        branch: branch
+    )
+    
+    // Retrieve entries
+    do {
+        let result = try await KnowledgeRetriever.retrieve(from: store, context: context)
+        
+        if !result.entries.isEmpty {
+            renderer.printStatus("Restored \(result.entries.count) knowledge entries (\(result.tokenEstimate) tokens)")
+            return MemoryFormatter.formatRestoredContext(result)
+        }
+        
+        return nil
+    } catch {
+        // Non-fatal
+        return nil
+    }
+}
+
