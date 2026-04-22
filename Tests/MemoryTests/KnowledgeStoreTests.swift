@@ -156,10 +156,3 @@ final class KnowledgeStoreTests: XCTestCase {
         XCTAssertEqual(entry.tags, ["build", "test"])
     }
 }
-
-// Make KnowledgeStore initializable with custom path for testing
-extension KnowledgeStore {
-    convenience init(dbPath: String) {
-        self.init(dbPath: dbPath as String?)
-    }
-}

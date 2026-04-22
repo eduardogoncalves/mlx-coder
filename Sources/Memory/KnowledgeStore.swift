@@ -2,7 +2,7 @@
 // SQLite-backed persistent storage for knowledge entries with FTS5 search.
 
 import Foundation
-import SQLite3
+import CSQLite
 import CryptoKit
 
 /// Thread-safe persistent store for knowledge entries using SQLite with WAL mode and FTS5.
@@ -35,7 +35,7 @@ public actor KnowledgeStore {
         }
     }
     
-    private init(dbPath: String? = nil) {
+    public init(dbPath: String? = nil) {
         // Default to ~/.mlx-coder/knowledge.db
         if let dbPath {
             self.dbPath = dbPath
