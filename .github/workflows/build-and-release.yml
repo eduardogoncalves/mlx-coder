@@ -2,10 +2,10 @@ name: Build and Release macOS CLI
 
 on:
   push:
-    branches-ignore:
-      - main
     tags:
       - "v*"
+    branches:
+      - "**"
   pull_request:
   workflow_dispatch:
     inputs:
@@ -27,6 +27,16 @@ jobs:
 
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Verify tag is on the main branch
+        run: |
+          git fetch origin main
+          if ! git merge-base --is-ancestor HEAD origin/main; then
+            echo "::error::Release tags must point to a commit on the main branch."
+            exit 1
+          fi
 
       - name: Determine version from tag
         id: vars
@@ -53,7 +63,7 @@ jobs:
 
   build-cli-branch:
     if: |
-      (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/') && github.ref_name != 'main') ||
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/')) ||
       github.event_name == 'pull_request'
     name: Build CLI (branch/PR)
     runs-on: macos-latest
