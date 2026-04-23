@@ -176,7 +176,7 @@ struct ChatCommand: AsyncParsableCommand {
 
         let interactiveInput = InteractiveInput()
         interactiveInput.voiceSilenceTimeout = args.voiceSilenceTimeout
-        interactiveInput.voiceLocale = args.voiceLocale.map { Locale(identifier: $0) }
+        interactiveInput.voiceLocale = args.resolvedVoiceLocale
         var sandboxEnabled = effectiveSandbox
         var announcedGeneralFastFoundationRoute = false
         
@@ -322,7 +322,7 @@ struct ChatCommand: AsyncParsableCommand {
                 #if canImport(Speech)
                 renderer.printStatus("🎤 Starting voice input…")
                 do {
-                    let voiceLocale = args.voiceLocale.map { Locale(identifier: $0) }
+                    let voiceLocale = args.resolvedVoiceLocale
                     let transcription = try await VoiceInput.transcribe(
                         silenceTimeout: args.voiceSilenceTimeout,
                         locale: voiceLocale

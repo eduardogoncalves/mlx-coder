@@ -40,7 +40,7 @@ struct RunCommand: AsyncParsableCommand {
             #if canImport(Speech)
             renderer.printStatus("🎤 Starting voice input…")
             do {
-                let voiceLocale = args.voiceLocale.map { Locale(identifier: $0) }
+                let voiceLocale = args.resolvedVoiceLocale
                 let transcription = try await VoiceInput.transcribe(
                     silenceTimeout: args.voiceSilenceTimeout,
                     locale: voiceLocale

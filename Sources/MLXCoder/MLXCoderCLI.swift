@@ -132,5 +132,8 @@ struct ModelArguments: ParsableArguments, Sendable {
     @Option(name: .long, help: "BCP 47 locale tag for speech recognition, e.g. en-US, fr-FR (default: device locale, then en-US)")
     var voiceLocale: String?
 
+    /// Resolved `Locale` for speech recognition, or `nil` to use the device locale with an `en-US` fallback.
+    var resolvedVoiceLocale: Locale? { voiceLocale.map { Locale(identifier: $0) } }
+
     @OptionGroup var testAbsorber: TestAbsorber
 }
