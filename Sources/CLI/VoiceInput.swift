@@ -107,7 +107,7 @@ public enum VoiceInput {
             let text = result.bestTranscription.formattedString
             state.update(text: text)
             // Overwrite the current terminal line with the latest partial result.
-            print("\r\u{001B}[K  🎤 \u{001B}[36m\(text)\u{001B}[0m", terminator: "")
+            print("\r\u{1B}[K  🎤 \u{1B}[36m\(text)\u{1B}[0m", terminator: "")
             fflush(stdout)
         }
 
@@ -136,7 +136,19 @@ public enum VoiceInput {
         rawTerm.c_cc.17 = 0 // VTIME = 0
         tcsetattr(STDIN_FILENO, TCSANOW, &rawTerm)
 
-        print("  🎤 \u{001B}[2mListening… press Enter to finish\u{001B}[0m")
+        // Ensure the terminal and audio engine are always cleaned up, even on
+        // cancellation or error.
+        defer {
+            tcsetattr(STDIN_FILENO, TCSANOW, &originalTerm)
+            audioEngine.stop()
+            inputNode.removeTap(onBus: 0)
+            request.endAudio()
+            recognitionTask.cancel()
+            print("\r\u{1B}[K", terminator: "") // clear partial transcription line
+            fflush(stdout)
+        }
+
+        print("  🎤 \u{1B}[2mListening… press Enter to finish\u{1B}[0m")
         fflush(stdout)
 
         // Poll loop: stop on Enter / Ctrl-C / Ctrl-D, or after silence timeout.
@@ -154,18 +166,10 @@ public enum VoiceInput {
                 shouldStop = true
                 continue
             }
-            // Yield to avoid spinning a core.
-            try? await Task.sleep(nanoseconds: 40_000_000) // 40 ms
+            // Yield to avoid spinning a core; propagate cancellation if the
+            // enclosing Task is cancelled.
+            try await Task.sleep(nanoseconds: 40_000_000) // 40 ms
         }
-
-        // Restore terminal, stop audio, and clean up.
-        tcsetattr(STDIN_FILENO, TCSANOW, &originalTerm)
-        audioEngine.stop()
-        inputNode.removeTap(onBus: 0)
-        request.endAudio()
-        recognitionTask.cancel()
-        print("\r\u{001B}[K", terminator: "") // clear partial transcription line
-        fflush(stdout)
 
         let finalText = state.snapshot.text
         if finalText.isEmpty {

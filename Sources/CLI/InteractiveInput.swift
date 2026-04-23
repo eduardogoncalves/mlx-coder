@@ -318,7 +318,7 @@ public final class InteractiveInput: @unchecked Sendable {
                     // Flush the Enter key pressed to stop recording.
                     tcflush(STDIN_FILENO, TCIFLUSH)
                 } catch {
-                    print("\u{001B}[31m⚠️  Voice: \(error.localizedDescription)\u{001B}[0m")
+                    print("\u{1B}[31m⚠️  Voice: \(error.localizedDescription)\u{1B}[0m")
                     fflush(stdout)
                 }
                 isInitialDraw = true
