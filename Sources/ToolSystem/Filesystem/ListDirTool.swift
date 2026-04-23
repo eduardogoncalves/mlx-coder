@@ -31,7 +31,7 @@ public struct ListDirTool: Tool {
         }
 
         let recursive = arguments["recursive"] as? Bool ?? false
-        let maxDepth = arguments["max_depth"] as? Int ?? 3
+        let maxDepth = max(0, arguments["max_depth"] as? Int ?? 3)
 
         let resolvedPath: String
         do {
@@ -102,7 +102,7 @@ public struct ListDirTool: Tool {
             }
         }
 
-        listContents(at: resolvedPath, depth: 1)
+        listContents(at: resolvedPath, depth: 0)
 
         if entries.isEmpty {
             return .success("(empty directory)")

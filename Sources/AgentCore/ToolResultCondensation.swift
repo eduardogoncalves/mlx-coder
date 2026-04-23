@@ -122,4 +122,39 @@ enum ToolResultCondensationPolicy {
         [... \(omitted) characters omitted ...]
         """
     }
+
+    static func instructionTemplate(for toolName: String) -> String {
+        switch toolName {
+        case "read_file", "read_many":
+            return """
+            - Prefer a short structural snapshot first (what file(s), relevant sections).
+            - Call out exact symbol names and line ranges when present.
+            - Keep only code facts that directly affect the goal.
+            """
+        case "bash", "task":
+            return """
+            - Prioritize final status (success/failure), key diagnostics, and actionable next step.
+            - Keep exact command output snippets only when they are error-defining.
+            - Omit progress spam, repeated lines, and non-actionable noise.
+            """
+        case "grep", "code_search", "glob", "list_dir":
+            return """
+            - Keep only matches that are likely relevant to the goal.
+            - Include concrete file paths and symbols, not full result dumps.
+            - Report counts briefly when useful.
+            """
+        case "web_fetch", "web_search":
+            return """
+            - Extract verifiable facts only; preserve exact values and quoted phrases.
+            - Mention uncertainty or missing data explicitly.
+            - Avoid narrative summary beyond source-supported facts.
+            """
+        default:
+            return """
+            - Keep only high-signal facts needed for the next reasoning step.
+            - Preserve exact identifiers, numbers, and error text.
+            - Remove repetition and non-essential detail.
+            """
+        }
+    }
 }

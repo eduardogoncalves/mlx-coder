@@ -77,21 +77,26 @@ enum TerminalKeyParser {
         }
     }
 
+    static func numericSelection(for byte: UInt8, optionCount: Int) -> Int? {
+        guard optionCount > 0, byte >= 49, byte <= 57 else { return nil }
+        let index = Int(byte - 49)
+        return index < optionCount ? index : nil
+    }
+
+    static func numericSelection(forEscapeSequence sequence: [UInt8], optionCount: Int) -> Int? {
+        // Keypad digits in application mode often arrive as Esc O q/r/s/t... for 1/2/3/4...
+        guard optionCount > 0, sequence.count >= 2, sequence.first == 79, let last = sequence.last else { return nil }
+        guard last >= 113, last <= 121 else { return nil } // q...y => 1...9
+        let index = Int(last - 113)
+        return index < optionCount ? index : nil
+    }
+
     static func numericSelection(for byte: UInt8, allowThirdOption: Bool) -> Int? {
-        if byte == 49 { return 0 }
-        if byte == 50 { return 1 }
-        if byte == 51 && allowThirdOption { return 2 }
-        return nil
+        numericSelection(for: byte, optionCount: allowThirdOption ? 3 : 2)
     }
 
     static func numericSelection(forEscapeSequence sequence: [UInt8], allowThirdOption: Bool) -> Int? {
-        // Keypad digits in application mode often arrive as Esc O q/r/s for 1/2/3.
-        guard sequence.count >= 2, sequence.first == 79 else { return nil }
-
-        if sequence.last == 113 { return 0 }
-        if sequence.last == 114 { return 1 }
-        if sequence.last == 115 && allowThirdOption { return 2 }
-        return nil
+        numericSelection(forEscapeSequence: sequence, optionCount: allowThirdOption ? 3 : 2)
     }
 
     static func drainAvailableInput() {

@@ -38,6 +38,27 @@ public struct AuditHook: AgentHook {
                 toolName: toolName,
                 details: "before=\(beforeTokens); after=\(afterTokens); fallback=\(usedFallback)"
             )
+        case .steeringInjected(let message):
+            await logger.logHookEvent(
+                hookName: name,
+                eventName: "steering_injected",
+                toolName: nil,
+                details: message
+            )
+        case .followUpStarted(let message):
+            await logger.logHookEvent(
+                hookName: name,
+                eventName: "follow_up_started",
+                toolName: nil,
+                details: message
+            )
+        case .contextTransformApplied(let transformIndex, let messagesBefore, let messagesAfter):
+            await logger.logHookEvent(
+                hookName: name,
+                eventName: "context_transform_applied",
+                toolName: nil,
+                details: "transform_index=\(transformIndex); messages_before=\(messagesBefore); messages_after=\(messagesAfter)"
+            )
         }
     }
 }

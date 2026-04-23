@@ -12,6 +12,7 @@ public actor GitOrchestrationManager {
     private var baseBranch: String = "main"
     private var filesModifiedInCurrentSubtask: Set<String> = []
     private var subtaskCount: Int = 0
+    private var pendingApprovalSummary: TaskCompletionGuide?
     
     public enum Status: Equatable, Sendable {
         case notInitialized
@@ -52,18 +53,23 @@ public actor GitOrchestrationManager {
             await stateTracker.markGitInitialized(true)
         }
         
-        // Validate current branch setup
+        // Validate current branch setup - only if we have commits
         let currentBranch = try? await gitService.getCurrentBranch()
-        let taskSetupValidation = validateTaskSetup(
-            repositoryInitialized: gitService.isRepositoryInitialized(),
-            currentBranch: currentBranch
-        )
-        
-        if !taskSetupValidation.isValid {
-            throw GitError.notOnCorrectBranch(expected: "main/master", actual: currentBranch ?? "unknown")
+        if currentBranch != nil && currentBranch != "HEAD" {
+            let taskSetupValidation = validateTaskSetup(
+                repositoryInitialized: gitService.isRepositoryInitialized(),
+                currentBranch: currentBranch
+            )
+            
+            if !taskSetupValidation.isValid {
+                throw GitError.notOnCorrectBranch(expected: "main/master", actual: currentBranch ?? "unknown")
+            }
         }
 
-        let prepareWarning = taskSetupValidation.warning
+        var warnings: [String] = []
+        if currentBranch == nil || currentBranch == "HEAD" {
+            warnings.append("New repository - will create branch from scratch")
+        }
         
         // Determine base branch
         let hasRemote = try await gitService.hasRemote()
@@ -95,12 +101,105 @@ public actor GitOrchestrationManager {
             } else if let first = branches.first {
                 self.baseBranch = first
             }
+        } else {
+            // No remote - use main or create first branch
+            self.baseBranch = "main"
+        }
+
+        if hasRemote {
+            do {
+                _ = try await gitService.syncBaseBranch(baseBranch)
+            } catch {
+                warnings.append("Could not update base branch '\(baseBranch)': \(error.localizedDescription)")
+            }
         }
         
         await stateTracker.setBaseBranch(baseBranch)
         try await stateTracker.saveState()
         
+        let prepareWarning = warnings.isEmpty ? nil : warnings.joined(separator: " | ")
         return (branchName: branchInfo.branchName, baseBranch: baseBranch, warning: prepareWarning)
+    }
+    
+    /// Update the branch name (e.g., if user provides custom name)
+    public func updateBranchName(_ newName: String) throws {
+        guard BranchNamer.isValidCustomBranchName(newName) else {
+            throw GitError.invalidCustomBranchName(newName)
+        }
+        
+        self.currentBranchName = newName
+    }
+    
+    /// Create worktree immediately (non-lazy initialization)
+    public func createWorktreeNow() async throws {
+        guard let branchName = self.currentBranchName else {
+            throw GitError.invalidBranchName("No branch name set - call prepareTask first")
+        }
+        
+        guard self.currentWorktreePath == nil else {
+            return
+        }
+        
+        let worktreePath = try await gitService.createWorktree(
+            branchName: branchName,
+            fromBranch: baseBranch
+        )
+        
+        self.currentWorktreePath = worktreePath
+        await stateTracker.setWorktreeRoot(worktreePath)
+        try await stateTracker.saveState()
+    }
+    
+    /// Get current branch name
+    public func getCurrentBranchName() -> String? {
+        return currentBranchName
+    }
+    
+    /// Get worktree path
+    public func getWorktreePath() -> String? {
+        return currentWorktreePath
+    }
+    
+    /// Get base branch
+    public func getBaseBranch() -> String {
+        return baseBranch
+    }
+
+    /// List available git worktrees and their branches.
+    public func listAvailableWorktrees() async throws -> [GitService.WorktreeInfo] {
+        try await gitService.listWorktreeInfos()
+    }
+
+    /// List local branches.
+    public func listLocalBranches() async throws -> [String] {
+        try await gitService.listLocalBranches()
+    }
+
+    /// Get current branch from a specific directory (or project root when nil).
+    public func getCurrentBranch(in workingDirectory: String? = nil) async throws -> String {
+        try await gitService.getCurrentBranch(in: workingDirectory)
+    }
+
+    /// Delete a local branch.
+    public func deleteLocalBranch(_ branchName: String, force: Bool = false) async throws {
+        try await gitService.deleteBranch(branchName, force: force)
+    }
+
+    /// Connect this orchestration session to an existing worktree.
+    @discardableResult
+    public func connectToExistingWorktree(path: String) async throws -> (path: String, branch: String) {
+        try await gitService.switchWorktree(path: path)
+        let branch = try await gitService.getCurrentBranch(in: path)
+
+        currentWorktreePath = path
+        currentBranchName = branch
+        pendingApprovalSummary = nil
+
+        await stateTracker.setWorktreeRoot(path)
+        await stateTracker.setBranchName(branch)
+        try await stateTracker.saveState()
+
+        return (path, branch)
     }
     
     // MARK: - Validation Helpers
@@ -195,7 +294,7 @@ public actor GitOrchestrationManager {
         let commitMessage = "[\(subtaskCount)] \(description)"
         
         do {
-            let result = try await gitService.commit(message: commitMessage)
+            let result = try await gitService.commit(message: commitMessage, in: currentWorktreePath)
             await stateTracker.recordCommit(message: commitMessage)
             
             // Clear subtask tracking
@@ -228,7 +327,7 @@ public actor GitOrchestrationManager {
                 return (false, "No remote configured")
             }
             
-            let result = try await gitService.push()
+            let result = try await gitService.push(in: currentWorktreePath)
             return (true, result)
         } catch GitError.remoteNotConfigured {
             return (false, "No remote configured - commits saved locally")
@@ -239,24 +338,46 @@ public actor GitOrchestrationManager {
         }
     }
     
+    /// Build pending changes diff (working tree vs HEAD) for commit-message generation.
+    public func buildPendingCommitDiff() async throws -> String {
+        try await gitService.getWorkingTreeDiff(in: currentWorktreePath)
+    }
+
     /// Called when task is complete
-    public func onTaskComplete() async throws -> TaskCompletionGuide {
-        // Final commit if there are pending changes
-        if !filesModifiedInCurrentSubtask.isEmpty {
+    public func onTaskComplete(
+        finalCommitMessage: String = "Final changes",
+        autoFinalCommit: Bool = true
+    ) async throws -> TaskCompletionGuide {
+        // Final commit if there are pending changes (optional).
+        if autoFinalCommit && !filesModifiedInCurrentSubtask.isEmpty {
             do {
-                _ = try await commitSubtask(description: "Final changes")
+                _ = try await gitService.commit(message: finalCommitMessage, in: currentWorktreePath)
+                await stateTracker.recordCommit(message: finalCommitMessage)
+                filesModifiedInCurrentSubtask.removeAll()
+                try await stateTracker.saveState()
             } catch GitError.nothingToCommit {
                 // Expected if no changes since last commit
             } catch {
                 // Non-fatal - log but continue
             }
         }
-        
+
+        // Ensure at least one commit exists before showing merge approval guidance when enabled.
+        var commits = try await gitService.getCommitsSince(baseBranch: baseBranch, in: currentWorktreePath)
+        if autoFinalCommit && commits.isEmpty {
+            do {
+                _ = try await gitService.commit(message: finalCommitMessage, in: currentWorktreePath)
+                await stateTracker.recordCommit(message: finalCommitMessage)
+                filesModifiedInCurrentSubtask.removeAll()
+                try await stateTracker.saveState()
+                commits = try await gitService.getCommitsSince(baseBranch: baseBranch, in: currentWorktreePath)
+            } catch GitError.nothingToCommit {
+                // No pending changes - keep zero commits.
+            }
+        }
+
         // Try to push to remote (non-blocking failure)
         let pushResult = await attemptPush()
-        
-        // Get commit info for PR guidance
-        let commits = try await gitService.getCommitsSince(baseBranch: baseBranch)
         
         let guide = TaskCompletionGuide(
             branchName: currentBranchName ?? "unknown",
@@ -266,23 +387,147 @@ public actor GitOrchestrationManager {
             filesModified: await stateTracker.getModifiedFiles(),
             pushStatus: pushResult
         )
-        
+        pendingApprovalSummary = guide
         try await stateTracker.saveState()
         return guide
+    }
+
+    /// Run verification commands (e.g. lint/test/build) before merge.
+    public func runVerificationPipeline(commands: [String]) async -> VerificationSummary {
+        guard !commands.isEmpty else {
+            return VerificationSummary(allPassed: true, results: [])
+        }
+
+        var results: [VerificationStepResult] = []
+        for command in commands {
+            do {
+                let output = try await gitService.runVerification(command: command, in: currentWorktreePath)
+                results.append(VerificationStepResult(command: command, passed: true, output: output))
+            } catch {
+                results.append(VerificationStepResult(command: command, passed: false, output: error.localizedDescription))
+                return VerificationSummary(allPassed: false, results: results)
+            }
+        }
+
+        return VerificationSummary(allPassed: true, results: results)
+    }
+
+    /// Review artifacts before merge (`git log` and `git diff` against base).
+    public func buildDiffReview() async throws -> DiffReviewArtifacts {
+        let commitLog = try await gitService.getCommitLogSince(baseBranch: baseBranch, in: currentWorktreePath)
+        let fullDiff = try await gitService.getDiff(baseBranch: baseBranch, in: currentWorktreePath)
+        return DiffReviewArtifacts(commitLog: commitLog, fullDiff: fullDiff)
+    }
+
+    /// Handle user decision at the merge approval step.
+    public func finalizeAfterUserApproval(
+        mergeNow: Bool,
+        strategy: MergeStrategy = .squash,
+        cleanupWorktree: Bool = true,
+        squashCommitMessage: String? = nil
+    ) async throws -> MergeOutcome {
+        guard let summary = pendingApprovalSummary else {
+            throw GitError.mergeFailed(reason: "Task completion summary not prepared")
+        }
+
+        guard mergeNow else {
+            return MergeOutcome(
+                merged: false,
+                cleanedUp: false,
+                message: "Merge deferred. Worktree remains available at \(summary.worktreePath ?? "current directory").",
+                cleanupWarnings: []
+            )
+        }
+
+        // Re-sync base immediately before merge to reduce stale-base surprises.
+        _ = try await gitService.syncBaseBranch(summary.baseBranch)
+
+        let mergeMessage: String
+        switch strategy {
+        case .squash:
+            let sanitizedCustomMessage = squashCommitMessage?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if let custom = sanitizedCustomMessage, !custom.isEmpty {
+                mergeMessage = custom
+            } else {
+                let title = summary.commits.first?.split(separator: " ").dropFirst().joined(separator: " ")
+                let sanitizedTitle = title?.trimmingCharacters(in: .whitespacesAndNewlines)
+                mergeMessage = sanitizedTitle?.isEmpty == false
+                    ? "feat: \(sanitizedTitle!)"
+                    : "feat: merge \(summary.branchName)"
+            }
+            _ = try await gitService.mergeSquash(
+                baseBranch: summary.baseBranch,
+                sourceBranch: summary.branchName,
+                commitMessage: mergeMessage
+            )
+        case .mergeCommit:
+            _ = try await gitService.mergeNoFastForward(
+                baseBranch: summary.baseBranch,
+                sourceBranch: summary.branchName,
+                mergeMessage: "merge: integrate \(summary.branchName) into \(summary.baseBranch)"
+            )
+        case .rebase:
+            _ = try await gitService.rebaseAndFastForward(
+                baseBranch: summary.baseBranch,
+                sourceBranch: summary.branchName
+            )
+        }
+
+        var cleanedUp = false
+        var cleanupWarnings: [String] = []
+        if cleanupWorktree {
+            let forceDeleteBranch: Bool
+            switch strategy {
+            case .squash:
+                forceDeleteBranch = true
+            case .mergeCommit, .rebase:
+                forceDeleteBranch = false
+            }
+            if let worktreePath = summary.worktreePath {
+                do {
+                    try await gitService.removeWorktree(path: worktreePath)
+                } catch {
+                    cleanupWarnings.append(error.localizedDescription)
+                }
+            }
+            do {
+                try await gitService.deleteBranch(summary.branchName, force: forceDeleteBranch)
+            } catch {
+                cleanupWarnings.append(error.localizedDescription)
+            }
+            do {
+                try await gitService.pruneWorktrees()
+            } catch {
+                cleanupWarnings.append(error.localizedDescription)
+            }
+            cleanedUp = cleanupWarnings.isEmpty
+        }
+
+        pendingApprovalSummary = nil
+        return MergeOutcome(
+            merged: true,
+            cleanedUp: cleanedUp,
+            message: cleanedUp
+                ? "Merge completed on \(summary.baseBranch) and worktree cleaned up."
+                : cleanupWorktree
+                    ? "Merge completed on \(summary.baseBranch), but cleanup had issues."
+                    : "Merge completed on \(summary.baseBranch). Worktree was kept.",
+            cleanupWarnings: cleanupWarnings
+        )
     }
     
     /// Get current status
     public func getStatus() async -> Status {
+        if let summary = pendingApprovalSummary {
+            return .waitingForUserConfirmation(message: summary.approvalPromptMessage)
+        }
+
         guard let branchName = currentBranchName else {
             return .notInitialized
         }
         
         return .ready(branchName: branchName, worktreePath: currentWorktreePath)
-    }
-    
-    /// Get current branch name
-    public func getCurrentBranchName() -> String? {
-        currentBranchName
     }
     
     /// Get number of commits made this session
@@ -342,15 +587,51 @@ public struct TaskCompletionGuide: Sendable {
                 message += "⚠️  \(pushStatus.message)"
             }
         }
-        
-        message += """
-        
-        Next steps:
-          1. Review all changes with: git diff \(baseBranch)..HEAD
-          2. Create a pull request on your repository
-          3. Or merge locally: git checkout \(baseBranch) && git merge \(branchName)
-        """
-        
+
+        message += "\n\n" + approvalPromptMessage
         return message
     }
+
+    public var approvalPromptMessage: String {
+        """
+        ⏸️ Awaiting approval before merge
+
+        Summary:
+          - Files modified: \(filesModified.count)
+          - Commits created: \(commits.count)
+
+        Merge options:
+          1. Merge now
+          2. Leave for later (keep worktree)
+        """
+    }
+}
+
+public enum MergeStrategy: String, Sendable {
+    case squash
+    case mergeCommit
+    case rebase
+}
+
+public struct MergeOutcome: Sendable {
+    public let merged: Bool
+    public let cleanedUp: Bool
+    public let message: String
+    public let cleanupWarnings: [String]
+}
+
+public struct VerificationStepResult: Sendable {
+    public let command: String
+    public let passed: Bool
+    public let output: String
+}
+
+public struct VerificationSummary: Sendable {
+    public let allPassed: Bool
+    public let results: [VerificationStepResult]
+}
+
+public struct DiffReviewArtifacts: Sendable {
+    public let commitLog: String
+    public let fullDiff: String
 }

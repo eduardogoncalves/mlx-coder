@@ -16,10 +16,37 @@ final class PermissionEngineTests: XCTestCase {
         XCTAssertThrowsError(try engine.validatePath("/etc/passwd"))
     }
 
+    func testReadPathOutsideWorkspaceThrowsUnlessInHomeSkills() {
+        let engine = PermissionEngine(workspaceRoot: "/tmp/workspace")
+        XCTAssertThrowsError(try engine.validateReadPath("/etc/passwd"))
+    }
+
     func testRelativePathResolves() throws {
         let engine = PermissionEngine(workspaceRoot: "/tmp/workspace")
         let resolved = try engine.validatePath("src/main.swift")
         XCTAssertTrue(resolved.hasPrefix("/tmp/workspace"))
+    }
+
+    func testReadPathAllowsWorkspaceFile() throws {
+        let engine = PermissionEngine(workspaceRoot: "/tmp/workspace")
+        let resolved = try engine.validateReadPath("src/main.swift")
+        XCTAssertTrue(resolved.hasPrefix("/tmp/workspace"))
+    }
+
+    func testReadPathAllowsHomeSkillsTree() throws {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let skillsPath = home + "/skills/dotnet-architect/SKILL.md"
+        let engine = PermissionEngine(workspaceRoot: "/tmp/workspace")
+
+        let resolved = try engine.validateReadPath(skillsPath)
+        XCTAssertTrue(resolved.hasPrefix(home + "/skills"))
+    }
+
+    func testReadPathAllowsTildeHomeSkillsTree() throws {
+        let engine = PermissionEngine(workspaceRoot: "/tmp/workspace")
+        let resolved = try engine.validateReadPath("~/skills/dotnet-architect/SKILL.md")
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        XCTAssertTrue(resolved.hasPrefix(home + "/skills"))
     }
 
     func testDeniedCommandBlocked() {
@@ -71,5 +98,17 @@ final class PermissionEngineTests: XCTestCase {
         XCTAssertTrue(engine.isPathIgnored("Sources/API.generated.swift"))
         XCTAssertTrue(engine.isPathIgnored("/tmp/workspace/vendor/lib/file.swift"))
         XCTAssertFalse(engine.isPathIgnored("Sources/Main.swift"))
+    }
+
+    func testEffectiveWorkspaceRootMatchesWorkspaceRoot() throws {
+        let tempRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mlx-coder-permissions-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tempRoot, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempRoot) }
+
+        let engine = PermissionEngine(workspaceRoot: tempRoot.path)
+
+        XCTAssertTrue((engine.effectiveWorkspaceRoot as NSString).isAbsolutePath)
+        XCTAssertEqual(engine.effectiveWorkspaceRoot, URL(filePath: tempRoot.path).standardized.path())
     }
 }

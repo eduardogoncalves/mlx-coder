@@ -55,6 +55,7 @@ final class ListToolsConfigIntegrationTests: XCTestCase {
             isDotnetWorkspace: false,
             runtimeConfig: runtimeConfig,
             cliMCPConfig: nil,
+            includeHomeSkills: false,
             discoverMCPTools: { config in
                 await recorder.record(config)
                 return [IntegrationMockTool(name: "mcp_\(config.name)_tool", description: "Tool from \(config.name)")]
@@ -98,6 +99,7 @@ final class ListToolsConfigIntegrationTests: XCTestCase {
                 endpointURL: "http://cli.example",
                 timeoutSeconds: 15
             ),
+            includeHomeSkills: false,
             discoverMCPTools: { config in
                 await recorder.record(config)
                 return [IntegrationMockTool(name: "mcp_docs_tool", description: "docs")]
@@ -141,6 +143,7 @@ final class ListToolsConfigIntegrationTests: XCTestCase {
                         isDotnetWorkspace: false,
                         runtimeConfig: runtimeConfig,
                         cliMCPConfig: nil,
+                    includeHomeSkills: false,
                         discoverMCPTools: { config in
                                 await recorder.record(config)
                                 return [IntegrationMockTool(name: "mcp_\(config.name)_tool", description: "Tool from \(config.name)")]
@@ -186,6 +189,7 @@ final class ListToolsConfigIntegrationTests: XCTestCase {
                         isDotnetWorkspace: false,
                         runtimeConfig: runtimeConfig,
                         cliMCPConfig: nil,
+                    includeHomeSkills: false,
                         mcpIncludeOverride: "docs,metrics",
                         mcpExcludeOverride: "docs",
                         discoverMCPTools: { config in

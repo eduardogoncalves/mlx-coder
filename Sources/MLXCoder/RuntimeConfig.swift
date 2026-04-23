@@ -79,10 +79,13 @@ enum RuntimeConfigLoader {
         workspaceConfigPath: String? = nil
     ) -> RuntimeConfig {
         let userPath = userConfigPath ?? (FileManager.default.homeDirectoryForCurrentUser.path + "/.mlx-coder/config.json")
-        let workspacePath = workspaceConfigPath ?? (workspaceRoot + "/.mlx-coder-config.json")
+        let workspacePath = workspaceConfigPath ?? firstExistingPath([
+            workspaceRoot + "/.mlx-coder-config.json",
+            workspaceRoot + "/.native-agent-config.json"
+        ])
 
         let userConfig = load(path: userPath)
-        let workspaceConfig = load(path: workspacePath)
+        let workspaceConfig = load(path: workspacePath ?? "")
 
         // Workspace config overrides user config by server name.
         var mergedByName: [String: RuntimeConfig.MCPServer] = [:]
@@ -162,5 +165,12 @@ enum RuntimeConfigLoader {
         } catch {
             return RuntimeConfig()
         }
+    }
+
+    private static func firstExistingPath(_ candidates: [String]) -> String? {
+        for candidate in candidates where FileManager.default.fileExists(atPath: candidate) {
+            return candidate
+        }
+        return nil
     }
 }

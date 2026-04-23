@@ -48,11 +48,8 @@ public struct PermissionEngine: Sendable {
 
     /// Approval strategy for destructive tools.
     public enum ApprovalMode: String, Sendable, CaseIterable {
-        /// Prompt for destructive operations.
         case `default` = "default"
-        /// Auto-approve common file edit tools; still prompt for shell/task.
         case autoEdit = "auto-edit"
-        /// Auto-approve all destructive operations.
         case yolo = "yolo"
     }
 
@@ -82,7 +79,6 @@ public struct PermissionEngine: Sendable {
         policy: PolicyDocument? = nil,
         ignoredPathPatterns: [String] = []
     ) {
-        // Resolve workspace root to absolute path
         let expanded = NSString(string: workspaceRoot).expandingTildeInPath
         self.workspaceRoot = URL(filePath: expanded).standardized.path()
         self.allowedCommands = allowedCommands
@@ -92,51 +88,69 @@ public struct PermissionEngine: Sendable {
         self.ignoredPathPatterns = ignoredPathPatterns
     }
 
-    /// Validate that a path is within the workspace root.
-    ///
-    /// - Parameter path: The path to validate (will be resolved to absolute, symlinks resolved)
-    /// - Returns: The resolved absolute path
-    /// - Throws: `PermissionError.pathOutsideWorkspace` if the path escapes
-    public func validatePath(_ path: String) throws -> String {
+    /// Get the effective workspace (worktree if set, otherwise original)
+    public var effectiveWorkspaceRoot: String {
+        return workspaceRoot
+    }
+
+    /// Resolve a path to an absolute, normalized, symlink-resolved location.
+    private func resolveAbsolutePath(_ path: String) -> String {
         let expanded = NSString(string: path).expandingTildeInPath
-        let resolved: String
+        let effectiveRoot = effectiveWorkspaceRoot
+        let resolved = expanded.hasPrefix("/") ? expanded : effectiveRoot + "/" + expanded
+        let normalizedPath = URL(filePath: resolved).standardized.path()
+        return URL(filePath: normalizedPath).resolvingSymlinksInPath().path()
+    }
 
-        if expanded.hasPrefix("/") {
-            resolved = expanded
-        } else {
-            resolved = workspaceRoot + "/" + expanded
-        }
+    /// Validate that a path is within the workspace root.
+    public func validatePath(_ path: String) throws -> String {
+        let effectiveRoot = effectiveWorkspaceRoot
+        let finalPath = resolveAbsolutePath(path)
 
-        // Resolve symlinks and normalize the path
-        // This is critical for security: we must resolve symlinks to prevent TOCTOU attacks
-        // where symlinks are created after validation but before the actual operation.
-        let url = URL(filePath: resolved).standardized
-        let normalizedPath = url.path()
-        
-        // Resolve any symlinks in the normalized path
-        let resolvedURL = URL(filePath: normalizedPath).resolvingSymlinksInPath()
-        let finalPath = resolvedURL.path()
-
-        guard finalPath.hasPrefix(workspaceRoot) else {
+        guard finalPath.hasPrefix(effectiveRoot) else {
             throw PermissionError.pathOutsideWorkspace(
                 path: finalPath,
-                workspaceRoot: workspaceRoot
+                workspaceRoot: effectiveRoot
             )
         }
 
         return finalPath
     }
 
+    /// Validate read-only access for a path.
+    ///
+    /// Reads are allowed inside the workspace and under `~/skills`.
+    public func validateReadPath(_ path: String) throws -> String {
+        let finalPath = resolveAbsolutePath(path)
+        let effectiveRoot = effectiveWorkspaceRoot
+        if finalPath == effectiveRoot || finalPath.hasPrefix(effectiveRoot + "/") {
+            return finalPath
+        }
+
+        let homeSkills = URL(filePath: FileManager.default.homeDirectoryForCurrentUser.path)
+            .appending(path: "skills")
+            .standardized
+            .resolvingSymlinksInPath()
+            .path()
+        if finalPath == homeSkills || finalPath.hasPrefix(homeSkills + "/") {
+            return finalPath
+        }
+
+        throw PermissionError.pathOutsideAllowedReadRoots(
+            path: finalPath,
+            workspaceRoot: effectiveRoot,
+            extraRoot: homeSkills
+        )
+    }
+
     /// Check if a shell command is allowed.
     public func isCommandAllowed(_ command: String) -> Bool {
-        // Check deny list first
         for pattern in deniedCommands {
             if matchesGlob(command, pattern: pattern) {
                 return false
             }
         }
 
-        // Check allow list
         for pattern in allowedCommands {
             if matchesGlob(command, pattern: pattern) {
                 return true
@@ -155,7 +169,8 @@ public struct PermissionEngine: Sendable {
         let normalizedPath: String?
         if let targetPath {
             let expanded = NSString(string: targetPath).expandingTildeInPath
-            let candidate = expanded.hasPrefix("/") ? expanded : workspaceRoot + "/" + expanded
+            let effectiveRoot = effectiveWorkspaceRoot
+            let candidate = expanded.hasPrefix("/") ? expanded : effectiveRoot + "/" + expanded
             normalizedPath = URL(filePath: candidate).standardized.path()
         } else {
             normalizedPath = nil
@@ -193,16 +208,16 @@ public struct PermissionEngine: Sendable {
     }
 
     /// Returns true if a path should be ignored by search-style tools.
-    /// Accepts relative or absolute paths.
     public func isPathIgnored(_ path: String) -> Bool {
         guard !ignoredPathPatterns.isEmpty else {
             return false
         }
 
         let relativePath: String
-        if path.hasPrefix(workspaceRoot + "/") {
-            relativePath = String(path.dropFirst(workspaceRoot.count + 1))
-        } else if path == workspaceRoot {
+        let effectiveRoot = effectiveWorkspaceRoot
+        if path.hasPrefix(effectiveRoot + "/") {
+            relativePath = String(path.dropFirst(effectiveRoot.count + 1))
+        } else if path == effectiveRoot {
             relativePath = "."
         } else {
             relativePath = path
@@ -217,12 +232,7 @@ public struct PermissionEngine: Sendable {
         return false
     }
 
-    // MARK: - Private
-
     private func matchesGlob(_ string: String, pattern: String) -> Bool {
-        // Use fnmatch for proper glob pattern matching
-        // This prevents bypasses using regex metacharacters
-        // fnmatch matches patterns literally except for POSIX glob wildcards (*, ?, [])
         return fnmatch(pattern, string, 0) == 0
     }
 }
@@ -231,12 +241,15 @@ public struct PermissionEngine: Sendable {
 
 public enum PermissionError: LocalizedError {
     case pathOutsideWorkspace(path: String, workspaceRoot: String)
+    case pathOutsideAllowedReadRoots(path: String, workspaceRoot: String, extraRoot: String)
     case commandDenied(command: String)
 
     public var errorDescription: String? {
         switch self {
         case .pathOutsideWorkspace(let path, let root):
             return "Path '\(path)' is outside workspace root '\(root)'"
+        case .pathOutsideAllowedReadRoots(let path, let root, let extraRoot):
+            return "Path '\(path)' is outside allowed read roots '\(root)' and '\(extraRoot)'"
         case .commandDenied(let command):
             return "Command denied by permission rules: \(command)"
         }

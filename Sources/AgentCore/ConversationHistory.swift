@@ -114,10 +114,16 @@ public struct ConversationHistory: Sendable {
     /// <|im_end|>
     /// ```
     public func formatChatML(enableThinking: Bool = true) -> String {
+        return formatChatML(messages: messages, enableThinking: enableThinking)
+    }
+
+    /// Format an explicit message list as ChatML. Used by `transformContext` to format
+    /// a potentially modified copy of `messages` without mutating history.
+    public func formatChatML(messages messagesOverride: [Message], enableThinking: Bool = true) -> String {
         var result = ""
-        for message in messages {
+        for message in messagesOverride {
             result += "\(ToolCallPattern.imStart)\(message.role.rawValue)\n"
-            result += message.content
+            result += sanitizedChatMLContent(message.content)
             result += "\n\(ToolCallPattern.imEnd)\n"
         }
         // Add the opening for the assistant's next turn
@@ -134,14 +140,164 @@ public struct ConversationHistory: Sendable {
         return result
     }
 
+    /// Escapes ChatML control tokens present in message content so untrusted tool/user text
+    /// cannot inject synthetic role boundaries into subsequent model turns.
+    private func sanitizedChatMLContent(_ content: String) -> String {
+        content
+            .replacingOccurrences(of: ToolCallPattern.imStart, with: "[CHATML_IM_START]")
+            .replacingOccurrences(of: ToolCallPattern.imEnd, with: "[CHATML_IM_END]")
+    }
+
     /// Total estimated token count (rough: 4 chars ≈ 1 token).
     public var estimatedTokenCount: Int {
         let totalChars = messages.reduce(0) { $0 + $1.content.count }
         return totalChars / 4
     }
 
-    /// Deterministically compacts older context into a summary message while preserving
-    /// system prompt and recent turns.
+    // MARK: - Turn-level data structures
+
+    /// A logical conversation turn: one user message plus all assistant/tool messages that follow
+    /// it before the next user message.
+    public struct Turn: Sendable {
+        public let userMessage: Message
+        public let assistantAndToolMessages: [Message]
+
+        public var allMessages: [Message] { [userMessage] + assistantAndToolMessages }
+
+        /// Rough token estimate for this turn (4 chars ≈ 1 token).
+        public var estimatedTokens: Int {
+            allMessages.reduce(0) { $0 + $1.content.count / 4 }
+        }
+
+        /// Exact token count using an external counter (e.g. the model tokenizer).
+        public func tokenCount(using counter: (String) -> Int) -> Int {
+            allMessages.reduce(0) { $0 + counter($1.content) }
+        }
+
+        /// Heuristic importance score (higher = keep longer during compaction).
+        /// Turns are given higher importance when the user is correcting/asking about an error,
+        /// or when the turn itself surfaced an error.
+        public var importanceScore: Int {
+            var score = 0
+            let userText = userMessage.content.lowercased()
+            let correctionKeywords = ["error", "wrong", "actually", "wait", "no,", "no.", "stop",
+                                      "mistake", "incorrect", "fix", "bug", "that's not", "that is not"]
+            if correctionKeywords.contains(where: { userText.contains($0) }) { score += 10 }
+            if userMessage.content.count < 60 { score += 3 } // Short corrections are important
+
+            let errorSurface = assistantAndToolMessages.contains(where: { msg in
+                let lower = msg.content.lowercased()
+                return lower.contains("error:") || lower.contains("failed:") || lower.contains("exception:")
+            })
+            if errorSurface { score += 5 }
+            return score
+        }
+    }
+
+    /// Groups non-system messages into conversation turns in chronological order.
+    public func turns() -> [Turn] {
+        var result: [Turn] = []
+        var currentUserMsg: Message? = nil
+        var currentFollowers: [Message] = []
+
+        for message in messages where message.role != .system {
+            if message.role == .user {
+                if let user = currentUserMsg {
+                    result.append(Turn(userMessage: user, assistantAndToolMessages: currentFollowers))
+                }
+                currentUserMsg = message
+                currentFollowers = []
+            } else {
+                currentFollowers.append(message)
+            }
+        }
+        if let user = currentUserMsg {
+            result.append(Turn(userMessage: user, assistantAndToolMessages: currentFollowers))
+        }
+        return result
+    }
+
+    // MARK: - Compaction
+
+    /// Turn-aware compaction: drops the least-important oldest turns first, preserves the most
+    /// recent `keepRecentTurns` turns intact, and replaces dropped turns with a richer summary.
+    ///
+    /// - Parameters:
+    ///   - maxTokens: Token budget to compact down to.
+    ///   - keepRecentTurns: Minimum number of recent turns always kept verbatim.
+    ///   - tokenCounter: Optional exact token counter (e.g. model tokenizer). Falls back to `chars/4`.
+    ///   - maxSummaryChars: Character ceiling for the generated summary block.
+    /// - Returns: `true` if compaction was performed.
+    @discardableResult
+    public mutating func compactByTurns(
+        maxTokens: Int,
+        keepRecentTurns: Int,
+        tokenCounter: ((String) -> Int)? = nil,
+        maxSummaryChars: Int = 2400
+    ) -> Bool {
+        let count: (String) -> Int = tokenCounter ?? { $0.count / 4 }
+        let total = messages.reduce(0) { $0 + count($1.content) }
+        guard total > maxTokens else { return false }
+
+        guard let systemMessage = messages.first(where: { $0.role == .system }) else { return false }
+
+        let allTurns = turns()
+        let keepCount = max(1, keepRecentTurns)
+        guard allTurns.count > keepCount else { return false }
+
+        let recentTurns  = Array(allTurns.suffix(keepCount))
+        let candidateTurns = Array(allTurns.dropLast(keepCount))
+
+        // Drop turns from least-important to most-important (stable: preserves order among ties).
+        // Sort candidates by importance ascending so we drop least-important first.
+        let sortedIndices = candidateTurns.indices.sorted {
+            candidateTurns[$0].importanceScore < candidateTurns[$1].importanceScore
+        }
+
+        var dropped = Set<Int>()
+        var runningTotal = total
+        for idx in sortedIndices {
+            if runningTotal <= maxTokens { break }
+            let turnTokens = candidateTurns[idx].tokenCount(using: count)
+            runningTotal -= turnTokens
+            dropped.insert(idx)
+        }
+
+        let keptCandidates = candidateTurns.indices
+            .filter { !dropped.contains($0) }
+            .map { candidateTurns[$0] }
+        let droppedTurns = dropped.sorted().map { candidateTurns[$0] }
+
+        // Build summary from dropped turns (in chronological order).
+        let summary = buildTurnAwareSummary(from: droppedTurns, maxChars: maxSummaryChars)
+
+        var rebuilt: [Message] = [systemMessage]
+        if !summary.isEmpty {
+            rebuilt.append(Message(role: .assistant, content: summary))
+        }
+        rebuilt.append(contentsOf: keptCandidates.flatMap(\.allMessages))
+        rebuilt.append(contentsOf: recentTurns.flatMap(\.allMessages))
+        messages = rebuilt
+
+        // Emergency trim: if still over budget, shorten the summary text progressively.
+        if messages.reduce(0, { $0 + count($1.content) }) > maxTokens, messages.count >= 2,
+           messages[1].role == .assistant {
+            var summaryText = messages[1].content
+            var current = messages.reduce(0) { $0 + count($1.content) }
+            while current > maxTokens && summaryText.count > 80 {
+                let nextLen = max(80, Int(Double(summaryText.count) * 0.75))
+                summaryText = String(summaryText.prefix(nextLen))
+                    .trimmingCharacters(in: .whitespacesAndNewlines) + "..."
+                messages[1] = Message(role: .assistant, content: summaryText)
+                current = messages.reduce(0) { $0 + count($1.content) }
+            }
+        }
+
+        return true
+    }
+
+    /// Legacy single-message compaction — kept for compatibility.
+    /// Prefer `compactByTurns` which removes whole turns and produces better summaries.
     @discardableResult
     public mutating func compactDeterministically(
         maxEstimatedTokens: Int,
@@ -189,7 +345,7 @@ public struct ConversationHistory: Sendable {
 
     /// Export conversation as a Markdown transcript.
     /// By default, excludes the initial system prompt. Set `includeSystemPrompt` to true to include it.
-    public func asMarkdownTranscript(includeSystemPrompt: Bool = false) -> String {
+    public func asMarkdownTranscript(includeSystemPrompt: Bool = true) -> String {
         var lines: [String] = []
         lines.append("# mlx-coder Session Transcript")
         lines.append("")
@@ -205,6 +361,75 @@ public struct ConversationHistory: Sendable {
         }
 
         return lines.joined(separator: "\n")
+    }
+
+    /// Turn-aware summary: groups dropped turns into a readable narrative that captures
+    /// what happened (user intent, files touched, errors surfaced, key decisions).
+    private func buildTurnAwareSummary(from droppedTurns: [Turn], maxChars: Int) -> String {
+        guard !droppedTurns.isEmpty else {
+            return "[Context compaction summary] No earlier turns to summarize."
+        }
+
+        var lines: [String] = [
+            "[Context compaction summary — \(droppedTurns.count) earlier turn(s) condensed]"
+        ]
+
+        for (idx, turn) in droppedTurns.enumerated() {
+            let userSnippet = turn.userMessage.content
+                .replacingOccurrences(of: "\n", with: " ")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let clippedUser = userSnippet.count > 160 ? String(userSnippet.prefix(160)) + "…" : userSnippet
+            lines.append("Turn \(idx + 1): user: \(clippedUser)")
+
+            // Extract file paths mentioned in any message of this turn (simple heuristic: tokens with "/" or ".")
+            var fileMentions: [String] = []
+            var seen = Set<String>()
+            for msg in turn.allMessages {
+                let tokens = msg.content.split(separator: " ").map(String.init)
+                let paths = tokens.filter { $0.contains("/") || ($0.contains(".") && !$0.hasPrefix("http")) }
+                    .map { $0.trimmingCharacters(in: .init(charactersIn: "\"'`(),;")) }
+                    .filter { $0.count > 3 && $0.count < 120 }
+                for path in paths where seen.insert(path).inserted {
+                    fileMentions.append(path)
+                }
+            }
+            let uniqueFiles = fileMentions.prefix(4)
+            if !uniqueFiles.isEmpty {
+                lines.append("  files: \(uniqueFiles.joined(separator: ", "))")
+            }
+
+            // Capture first error line if any
+            for msg in turn.assistantAndToolMessages {
+                let lower = msg.content.lowercased()
+                if lower.contains("error:") || lower.contains("failed:") || lower.contains("exception:") {
+                    let errLine = msg.content
+                        .components(separatedBy: "\n")
+                        .first(where: { $0.lowercased().contains("error") || $0.lowercased().contains("failed") })?
+                        .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                    if !errLine.isEmpty {
+                        let clipped = errLine.count > 120 ? String(errLine.prefix(120)) + "…" : errLine
+                        lines.append("  error: \(clipped)")
+                        break
+                    }
+                }
+            }
+
+            // Final assistant text snippet (outcome/decision)
+            if let lastAssistant = turn.assistantAndToolMessages.last(where: { $0.role == .assistant }),
+               !lastAssistant.content.isEmpty {
+                let snippet = lastAssistant.content
+                    .replacingOccurrences(of: "\n", with: " ")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                let clipped = snippet.count > 120 ? String(snippet.prefix(120)) + "…" : snippet
+                lines.append("  outcome: \(clipped)")
+            }
+        }
+
+        var result = lines.joined(separator: "\n")
+        if result.count > maxChars {
+            result = String(result.prefix(maxChars)).trimmingCharacters(in: .whitespacesAndNewlines) + "\n…"
+        }
+        return result
     }
 
     private func buildCompactionSummary(from source: [Message], maxChars: Int) -> String {
@@ -238,7 +463,7 @@ public struct ConversationHistory: Sendable {
 
     /// Export conversation messages as pretty-printed JSON.
     /// By default, excludes the initial system prompt. Set `includeSystemPrompt` to true to include it.
-    public func asJSONTranscript(includeSystemPrompt: Bool = false) throws -> String {
+    public func asJSONTranscript(includeSystemPrompt: Bool = true) throws -> String {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         let messagesToExport = includeSystemPrompt ? messages : messages.filter { $0.role != .system }

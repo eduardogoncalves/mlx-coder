@@ -18,6 +18,20 @@ public struct PatchTool: Tool {
 
     private let permissions: PermissionEngine
 
+    private enum PatchError: LocalizedError {
+        case invalidHunkRange(start: Int, length: Int, fileLineCount: Int)
+        case contextMismatch(start: Int)
+
+        var errorDescription: String? {
+            switch self {
+            case .invalidHunkRange(let start, let length, let fileLineCount):
+                return "Patch hunk range is out of bounds (start=\(start), length=\(length), file lines=\(fileLineCount))."
+            case .contextMismatch(let start):
+                return "Patch context mismatch at original line \(start). The file has changed or the diff is incorrect."
+            }
+        }
+    }
+
     public init(permissions: PermissionEngine) {
         self.permissions = permissions
     }
@@ -53,7 +67,7 @@ public struct PatchTool: Tool {
 
             // Apply hunks in reverse order to preserve line numbers
             for hunk in hunks.reversed() {
-                lines = applyHunk(hunk, to: lines)
+                lines = try applyHunk(hunk, to: lines)
             }
 
             let result = lines.joined(separator: "\n")
@@ -70,9 +84,8 @@ public struct PatchTool: Tool {
     private struct Hunk {
         let oldStart: Int // 1-indexed
         let oldCount: Int
-        let additions: [(Int, String)]  // (line index, content)
-        let deletions: [Int]             // line indices to remove
-        let context: [(Int, String)]     // unchanged lines for validation
+        let oldLines: [String]
+        let newLines: [String]
     }
 
     private func parseDiff(_ diff: String) -> [Hunk] {
@@ -111,54 +124,56 @@ public struct PatchTool: Tool {
             : 1
 
         startIndex += 1
-        var additions: [(Int, String)] = []
-        var deletions: [Int] = []
-        var context: [(Int, String)] = []
-        var lineNum = oldStart
+        var oldLines: [String] = []
+        var newLines: [String] = []
 
         while startIndex < lines.count {
             let line = lines[startIndex]
             if line.hasPrefix("@@") || line.isEmpty && startIndex == lines.count - 1 {
                 break
             } else if line.hasPrefix("+") {
-                additions.append((lineNum, String(line.dropFirst())))
+                newLines.append(String(line.dropFirst()))
             } else if line.hasPrefix("-") {
-                deletions.append(lineNum)
-                lineNum += 1
+                oldLines.append(String(line.dropFirst()))
             } else if line.hasPrefix(" ") {
-                context.append((lineNum, String(line.dropFirst())))
-                lineNum += 1
+                let contextLine = String(line.dropFirst())
+                oldLines.append(contextLine)
+                newLines.append(contextLine)
+            } else if line.hasPrefix("\\ No newline at end of file") {
+                // Ignore metadata marker.
             } else {
-                lineNum += 1
+                break
             }
             startIndex += 1
+        }
+
+        guard oldCount == oldLines.count else {
+            return nil
         }
 
         return Hunk(
             oldStart: oldStart,
             oldCount: oldCount,
-            additions: additions,
-            deletions: deletions,
-            context: context
+            oldLines: oldLines,
+            newLines: newLines
         )
     }
 
-    private func applyHunk(_ hunk: Hunk, to lines: [String]) -> [String] {
+    private func applyHunk(_ hunk: Hunk, to lines: [String]) throws -> [String] {
         var result = lines
+        let start = hunk.oldStart - 1
+        let end = start + hunk.oldLines.count
 
-        // Remove deleted lines (in reverse to preserve indices)
-        for idx in hunk.deletions.sorted().reversed() {
-            let arrayIdx = idx - 1 // Convert to 0-indexed
-            if arrayIdx >= 0 && arrayIdx < result.count {
-                result.remove(at: arrayIdx)
-            }
+        guard start >= 0, end <= result.count else {
+            throw PatchError.invalidHunkRange(start: hunk.oldStart, length: hunk.oldLines.count, fileLineCount: result.count)
         }
 
-        // Insert additions
-        for (idx, content) in hunk.additions.sorted(by: { $0.0 < $1.0 }) {
-            let arrayIdx = min(idx - 1, result.count)
-            result.insert(content, at: arrayIdx)
+        let currentSlice = Array(result[start..<end])
+        guard currentSlice == hunk.oldLines else {
+            throw PatchError.contextMismatch(start: hunk.oldStart)
         }
+
+        result.replaceSubrange(start..<end, with: hunk.newLines)
 
         return result
     }

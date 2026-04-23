@@ -8,6 +8,9 @@ public struct ParameterProfile: Sendable {
     public let maxTokens: Int
     public let kvBits: Int?
     public let kvGroupSize: Int
+    /// The transformer layer index at which KV-cache quantization begins.
+    /// 0 means all layers are quantized (maximum memory savings).
+    public let quantizedKVStart: Int
     public let maxCacheBytes: Int
     public let temperature: Float
     public let topP: Float
@@ -22,6 +25,7 @@ public struct ParameterProfile: Sendable {
         maxTokens: 2048,
         kvBits: 4,
         kvGroupSize: 64,
+        quantizedKVStart: 0,
         maxCacheBytes: 512 * 1024 * 1024,  // 512 MB
         temperature: 0.6,
         topP: 1.0,
@@ -37,6 +41,7 @@ public struct ParameterProfile: Sendable {
         maxTokens: 4096,
         kvBits: 4, // 4-bit by default
         kvGroupSize: 64,
+        quantizedKVStart: 0,
         maxCacheBytes: 1024 * 1024 * 1024,  // 1 GB
         temperature: 0.6,
         topP: 1.0,
@@ -52,6 +57,7 @@ public struct ParameterProfile: Sendable {
         maxTokens: 8192,
         kvBits: 4, // 4-bit by default
         kvGroupSize: 64,
+        quantizedKVStart: 0,
         maxCacheBytes: 2048 * 1024 * 1024,  // 2 GB
         temperature: 0.6,
         topP: 1.0,

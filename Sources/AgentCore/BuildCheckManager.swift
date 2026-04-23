@@ -31,6 +31,18 @@ public actor BuildCheckManager {
         
         // Initial build check
         let initialCheck = await buildErrorDetector.detect(workspace: workspace)
+
+        // Some toolchains can report a failed status while emitting zero parseable diagnostics.
+        // Avoid blocking autonomous flow on this ambiguous state.
+        if initialCheck.errors.isEmpty {
+            let duration = Date().timeIntervalSince(startTime)
+            let msg = "⚠️  Build check returned 0 parseable error(s) (\(initialCheck.tool), \(String(format: "%.2f", duration))s) - continuing"
+            onProgress(msg)
+            if let renderer = streamRenderer {
+                renderer.printStatus(msg)
+            }
+            return true
+        }
         
         if !initialCheck.hasErrors {
             // Build is clean, commit can proceed

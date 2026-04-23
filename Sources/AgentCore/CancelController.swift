@@ -7,15 +7,38 @@ import Foundation
 public actor CancelController {
     public static let shared = CancelController()
     
-    // We store the current generation task
-    private var generationTask: Task<Void, Error>?
+    // Stores a cancellation closure for the current async operation.
+    private var cancelCurrentTask: (@Sendable () -> Void)?
     private var listeningTask: Task<Void, Never>?
+    private var forceExitOnEscape = false
     
     private init() {}
     
-    /// Set the current generation task and start listening for ESC
-    public func setTask(_ task: Task<Void, Error>?) async {
-        self.generationTask = task
+    /// Set the current operation task and start listening for ESC/Ctrl+C.
+    public func setTask(_ task: Task<Void, Error>?, forceExitOnEscape: Bool = false) async {
+        let canceler: (@Sendable () -> Void)?
+        if let task {
+            canceler = { task.cancel() }
+        } else {
+            canceler = nil
+        }
+        await updateTrackedCancellation(canceler, forceExitOnEscape: forceExitOnEscape)
+    }
+
+    /// Set any typed task as the current cancellable operation.
+    public func setTask<T>(_ task: Task<T, Error>?, forceExitOnEscape: Bool = false) async {
+        let canceler: (@Sendable () -> Void)?
+        if let task {
+            canceler = { task.cancel() }
+        } else {
+            canceler = nil
+        }
+        await updateTrackedCancellation(canceler, forceExitOnEscape: forceExitOnEscape)
+    }
+
+    private func updateTrackedCancellation(_ canceler: (@Sendable () -> Void)?, forceExitOnEscape: Bool) async {
+        self.cancelCurrentTask = canceler
+        self.forceExitOnEscape = (canceler != nil) ? forceExitOnEscape : false
 
         // Always cancel any previous listener first.
         // When starting a new task, do not block listener startup on teardown;
@@ -24,7 +47,7 @@ public actor CancelController {
         existingListener?.cancel()
         listeningTask = nil
 
-        if task != nil {
+        if canceler != nil {
             startListening()
             return
         }
@@ -48,14 +71,14 @@ public actor CancelController {
 
     /// Resume listening only when there is an active generation task.
     public func resumeListeningIfNeeded() {
-        guard generationTask != nil, listeningTask == nil else { return }
+        guard cancelCurrentTask != nil, listeningTask == nil else { return }
         startListening()
     }
     
     /// Cancel the current task if any
     public func cancel() {
-        generationTask?.cancel()
-        generationTask = nil
+        cancelCurrentTask?()
+        cancelCurrentTask = nil
     }
     
     private func startListening() {
@@ -65,7 +88,7 @@ public actor CancelController {
             
             var rawTerm = originalTerm
             // Disable ICANON, ECHO, and ISIG to read char-by-char and catch ESC/Ctrl+C
-            rawTerm.c_lflag &= ~UInt(ICANON | ECHO | ISIG)
+            rawTerm.c_lflag &= ~tcflag_t(ICANON | ECHO | ISIG)
             // Non-blocking read
             rawTerm.c_cc.16 = 0 // VMIN
             rawTerm.c_cc.17 = 1 // VTIME (0.1s)
@@ -84,7 +107,13 @@ public actor CancelController {
                         // Consume only the ESC sequence tail so the next prompt can keep
                         // legitimate follow-up keypresses (e.g. quick numeric selections).
                         _ = TerminalKeyParser.readEscapeSequence(initialTimeoutMs: 10, extendedTimeoutMs: 40)
+                        let shouldForceExit = await self.forceExitOnEscape
                         await self.cancel()
+                        if shouldForceExit {
+                            print("\nInterrupted by Esc. Exiting...")
+                            fflush(stdout)
+                            exit(130)
+                        }
                         break
                     } else if byte == 3 { // Ctrl+C
                         // User wants 'Esc' for cancellation, so Ctrl+C should exit the app

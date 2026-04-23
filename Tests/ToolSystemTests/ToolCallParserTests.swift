@@ -49,7 +49,8 @@ final class ToolCallParserTests: XCTestCase {
         XCTAssertEqual(thinking, "Internal reasoning here")
     }
     
-    func testRejectsMalformedJSONWithoutFallbackRepair() {
+    func testMalformedJSONHandling() {
+        // Structural errors (missing closing brace) are not repairable → empty result
         let missingBraceText = """
         <tool_call>
         {"name": "test_tool", "arguments": {"key": "value"}
@@ -57,13 +58,17 @@ final class ToolCallParserTests: XCTestCase {
         """
         XCTAssertTrue(ToolCallParser.parse(missingBraceText).isEmpty)
 
-        let malformedStringText = """
+        // Literal newlines inside JSON strings are sanitized and parsed successfully.
+        // Models commonly emit multi-line content this way (e.g. log_knowledge).
+        let literalNewlineText = """
         <tool_call>
         {"name": "write_file", "arguments": {"path": "test.txt", "content": "line1
         line2"}}
         </tool_call>
         """
-        XCTAssertTrue(ToolCallParser.parse(malformedStringText).isEmpty)
+        let calls = ToolCallParser.parse(literalNewlineText)
+        XCTAssertEqual(calls.count, 1)
+        XCTAssertEqual(calls[0].name, "write_file")
     }
 
     func testParsesTruncatedToolBlockWhenJSONIsValid() {
@@ -74,6 +79,74 @@ final class ToolCallParserTests: XCTestCase {
         let calls = ToolCallParser.parse(missingClosingTag)
         XCTAssertEqual(calls.count, 1)
         XCTAssertEqual(calls[0].name, "test_tool")
+    }
+
+    func testParsesMalformedPositionalToolCallWrapper() {
+        let text = """
+        <tool_call>
+        {"list_dir", "path": "."}
+        </tool_call>
+        """
+
+        let calls = ToolCallParser.parse(text)
+        XCTAssertEqual(calls.count, 1)
+        XCTAssertEqual(calls[0].name, "list_dir")
+        XCTAssertEqual(calls[0].arguments["path"] as? String, ".")
+    }
+
+    func testParsesFunctionStyleToolCallWrapper() {
+        let text = """
+        <tool_call>
+        tool_call(tool: list_dir, path: .)
+        </tool_call>
+        """
+
+        let calls = ToolCallParser.parse(text)
+        XCTAssertEqual(calls.count, 1)
+        XCTAssertEqual(calls[0].name, "list_dir")
+        XCTAssertEqual(calls[0].arguments["path"] as? String, ".")
+    }
+
+    func testParsesToolCallWithTrailingQuoteNoise() {
+        let text = """
+        <tool_call>
+        {"name": "write_file", "arguments": {"path": "index.html", "file_content": "<html>ok</html>"}}"
+        </tool_call>
+        """
+
+        let calls = ToolCallParser.parse(text)
+        XCTAssertEqual(calls.count, 1)
+        XCTAssertEqual(calls[0].name, "write_file")
+        XCTAssertEqual(calls[0].arguments["path"] as? String, "index.html")
+    }
+
+    func testIgnoresToolCallsInsideThinkBlock() {
+        let text = """
+        <think>
+        <tool_call>
+        {"name":"list_dir","arguments":{"path":"."}}
+        </tool_call>
+        </think>
+        <tool_call>
+        {"name":"read_file","arguments":{"path":"README.md"}}
+        </tool_call>
+        """
+
+        let calls = ToolCallParser.parse(text)
+        XCTAssertEqual(calls.count, 1)
+        XCTAssertEqual(calls[0].name, "read_file")
+    }
+
+    func testUnclosedThinkSuppressesSubsequentToolTags() {
+        let text = """
+        prefix
+        <think>
+        still thinking
+        <tool_call>{"name":"read_file","arguments":{"path":"README.md"}}</tool_call>
+        """
+
+        XCTAssertTrue(ToolCallParser.parse(text).isEmpty)
+        XCTAssertFalse(ToolCallParser.containsToolCall(text))
     }
 }
 

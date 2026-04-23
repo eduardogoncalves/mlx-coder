@@ -9,7 +9,7 @@ mlx-coder is built to run local LLM workflows on macOS with a native MLX app arc
 - **Local-first, in-process inference**: runs model execution directly in the app process via MLX instead of relying on a separate model service.
 - **Smaller local AI runtime footprint**: by avoiding an always-on external inference server and extra API/network layers, more system memory remains available for the model weights and larger context windows.
 - **Built-in sandbox + policy + approvals**: combines macOS seatbelt sandboxing, approval modes, and per-tool/per-path policy controls.
-- **Audited tool lifecycle**: emits permission, pre-tool, post-tool, and compression events with audit-log visibility.
+- **Audited tool lifecycle**: emits permission, pre-tool, post-tool, compression, steering-injection, follow-up, and context-transform events with audit-log visibility.
 - **Delegated task isolation**: supports specialist task profiles, isolated work directories, cleanup controls, and strict delegated-input validation.
 - **Operational diagnostics**: includes `doctor` and `list-tools --strict` for CI-friendly readiness checks.
 - **Integrated tool transports**: supports MCP over HTTP and command-based stdio, plus built-in LSP tools including safe apply-mode rename flows.
