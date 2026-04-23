@@ -54,8 +54,33 @@ public struct ToolCallParser: Sendable {
         return results
     }
 
+    /// Returns true if `text` contains a `<tool_call>` tag outside any think block.
+    /// Used to detect malformed tool call attempts that need re-prompting.
+    /// Tool call tags that appear inside `<think>…</think>` (or an unclosed think block)
+    /// are suppressed, matching the behaviour of `parse(_:)`.
     public static func containsToolCall(_ text: String) -> Bool {
-        !parse(text).isEmpty
+        var searchRange = text.startIndex..<text.endIndex
+
+        while !searchRange.isEmpty {
+            if let thinkOpen = text.range(of: ToolCallPattern.thinkOpen, range: searchRange) {
+                // A tool call that starts before the think block counts.
+                if let toolOpen = text.range(of: ToolCallPattern.toolCallOpen, range: searchRange),
+                   toolOpen.lowerBound < thinkOpen.lowerBound {
+                    return true
+                }
+                // Skip the closed think block.
+                if let thinkClose = text.range(of: ToolCallPattern.thinkClose,
+                                               range: thinkOpen.upperBound..<text.endIndex) {
+                    searchRange = thinkClose.upperBound..<text.endIndex
+                    continue
+                }
+                // Unclosed think block — all remaining text is still thinking.
+                return false
+            }
+            // No think block — any tool call tag counts.
+            return text.range(of: ToolCallPattern.toolCallOpen, range: searchRange) != nil
+        }
+        return false
     }
 
     private static func parseToolCall(
