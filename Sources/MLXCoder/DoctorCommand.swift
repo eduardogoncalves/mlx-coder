@@ -64,6 +64,9 @@ struct DoctorCommand: AsyncParsableCommand {
         )
         payload = appendDoctorCheck(payload, check: lspCheck)
 
+        let memoryCheck = await memoryDoctorCheck()
+        payload = appendDoctorCheck(payload, check: memoryCheck)
+
         if json {
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
@@ -301,10 +304,6 @@ func buildDoctorPayload(
             checks.append(DoctorCheck(name: "mcp", status: .fail, message: invalidEndpoints.joined(separator: " | ")))
         }
     }
-
-    // Memory subsystem check
-    let memoryCheck = await memoryDoctorCheck()
-    checks.append(memoryCheck)
 
     let passCount = checks.filter { $0.status == .pass }.count
     let warnCount = checks.filter { $0.status == .warn }.count

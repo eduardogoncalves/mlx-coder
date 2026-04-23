@@ -22,7 +22,7 @@ public struct LogKnowledgeTool: Tool {
             "type": PropertySchema(
                 type: "string",
                 description: "Type of knowledge: decision, gotcha, pattern, plan",
-                enum: ["decision", "gotcha", "pattern", "plan"]
+                enumValues: ["decision", "gotcha", "pattern", "plan"]
             ),
             "content": PropertySchema(
                 type: "string",

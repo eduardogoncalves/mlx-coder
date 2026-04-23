@@ -166,9 +166,9 @@ public actor KnowledgeStore {
             throw StoreError.sqliteError("Failed to prepare duplicate check", sqlite3_errcode(db))
         }
         
-        sqlite3_bind_text(checkStmt, 1, contentHash, -1, SQLITE_TRANSIENT)
-        sqlite3_bind_text(checkStmt, 2, entry.type.rawValue, -1, SQLITE_TRANSIENT)
-        sqlite3_bind_text(checkStmt, 3, entry.projectRoot, -1, SQLITE_TRANSIENT)
+        sqlite3_bind_text(checkStmt, 1, contentHash, -1, _swift_sqlite_transient)
+        sqlite3_bind_text(checkStmt, 2, entry.type.rawValue, -1, _swift_sqlite_transient)
+        sqlite3_bind_text(checkStmt, 3, entry.projectRoot, -1, _swift_sqlite_transient)
         
         if sqlite3_step(checkStmt) == SQLITE_ROW {
             // Duplicate found, skip insertion
@@ -193,24 +193,24 @@ public actor KnowledgeStore {
         let tagsJSON = try JSONEncoder().encode(entry.tags)
         let tagsString = String(data: tagsJSON, encoding: .utf8) ?? "[]"
         
-        sqlite3_bind_text(insertStmt, 1, entry.id.uuidString, -1, SQLITE_TRANSIENT)
-        sqlite3_bind_text(insertStmt, 2, entry.type.rawValue, -1, SQLITE_TRANSIENT)
-        sqlite3_bind_text(insertStmt, 3, entry.content, -1, SQLITE_TRANSIENT)
-        sqlite3_bind_text(insertStmt, 4, tagsString, -1, SQLITE_TRANSIENT)
+        sqlite3_bind_text(insertStmt, 1, entry.id.uuidString, -1, _swift_sqlite_transient)
+        sqlite3_bind_text(insertStmt, 2, entry.type.rawValue, -1, _swift_sqlite_transient)
+        sqlite3_bind_text(insertStmt, 3, entry.content, -1, _swift_sqlite_transient)
+        sqlite3_bind_text(insertStmt, 4, tagsString, -1, _swift_sqlite_transient)
         
         if let surface = entry.surface {
-            sqlite3_bind_text(insertStmt, 5, surface, -1, SQLITE_TRANSIENT)
+            sqlite3_bind_text(insertStmt, 5, surface, -1, _swift_sqlite_transient)
         } else {
             sqlite3_bind_null(insertStmt, 5)
         }
         
         if let branch = entry.branch {
-            sqlite3_bind_text(insertStmt, 6, branch, -1, SQLITE_TRANSIENT)
+            sqlite3_bind_text(insertStmt, 6, branch, -1, _swift_sqlite_transient)
         } else {
             sqlite3_bind_null(insertStmt, 6)
         }
         
-        sqlite3_bind_text(insertStmt, 7, entry.projectRoot, -1, SQLITE_TRANSIENT)
+        sqlite3_bind_text(insertStmt, 7, entry.projectRoot, -1, _swift_sqlite_transient)
         sqlite3_bind_double(insertStmt, 8, entry.createdAt.timeIntervalSince1970)
         
         if let expiresAt = entry.expiresAt {
@@ -219,7 +219,7 @@ public actor KnowledgeStore {
             sqlite3_bind_null(insertStmt, 9)
         }
         
-        sqlite3_bind_text(insertStmt, 10, contentHash, -1, SQLITE_TRANSIENT)
+        sqlite3_bind_text(insertStmt, 10, contentHash, -1, _swift_sqlite_transient)
         
         guard sqlite3_step(insertStmt) == SQLITE_DONE else {
             throw StoreError.sqliteError("Failed to insert entry", sqlite3_errcode(db))
@@ -270,8 +270,8 @@ public actor KnowledgeStore {
             throw StoreError.sqliteError("Failed to prepare search", sqlite3_errcode(db))
         }
         
-        sqlite3_bind_text(stmt, 1, query, -1, SQLITE_TRANSIENT)
-        sqlite3_bind_text(stmt, 2, projectRoot, -1, SQLITE_TRANSIENT)
+        sqlite3_bind_text(stmt, 1, query, -1, _swift_sqlite_transient)
+        sqlite3_bind_text(stmt, 2, projectRoot, -1, _swift_sqlite_transient)
         
         return try fetchEntries(from: stmt)
     }
@@ -306,10 +306,10 @@ public actor KnowledgeStore {
             throw StoreError.sqliteError("Failed to prepare list", sqlite3_errcode(db))
         }
         
-        sqlite3_bind_text(stmt, 1, projectRoot, -1, SQLITE_TRANSIENT)
+        sqlite3_bind_text(stmt, 1, projectRoot, -1, _swift_sqlite_transient)
         
         if let type {
-            sqlite3_bind_text(stmt, 2, type.rawValue, -1, SQLITE_TRANSIENT)
+            sqlite3_bind_text(stmt, 2, type.rawValue, -1, _swift_sqlite_transient)
             sqlite3_bind_int(stmt, 3, Int32(limit))
         } else {
             sqlite3_bind_int(stmt, 2, Int32(limit))
@@ -333,7 +333,7 @@ public actor KnowledgeStore {
             throw StoreError.sqliteError("Failed to prepare delete", sqlite3_errcode(db))
         }
         
-        sqlite3_bind_text(stmt, 1, id.uuidString, -1, SQLITE_TRANSIENT)
+        sqlite3_bind_text(stmt, 1, id.uuidString, -1, _swift_sqlite_transient)
         
         guard sqlite3_step(stmt) == SQLITE_DONE else {
             throw StoreError.sqliteError("Failed to delete entry", sqlite3_errcode(db))
