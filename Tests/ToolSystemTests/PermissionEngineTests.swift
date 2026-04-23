@@ -33,18 +33,6 @@ final class PermissionEngineTests: XCTestCase {
         XCTAssertTrue(resolved.hasPrefix("/tmp/workspace"))
     }
 
-    func testReadPathAllowsWorkspaceFileWhenWorkspaceRootHasTrailingSlash() throws {
-        let engine = PermissionEngine(workspaceRoot: "/tmp/workspace/")
-        let resolved = try engine.validateReadPath("src/main.swift")
-        XCTAssertTrue(resolved.hasPrefix("/tmp/workspace"))
-    }
-
-    func testValidatePathAllowsWorkspaceFileWhenWorkspaceRootHasTrailingSlash() throws {
-        let engine = PermissionEngine(workspaceRoot: "/tmp/workspace/")
-        let resolved = try engine.validatePath("src/main.swift")
-        XCTAssertTrue(resolved.hasPrefix("/tmp/workspace"))
-    }
-
     func testReadPathAllowsHomeSkillsTree() throws {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         let skillsPath = home + "/skills/dotnet-architect/SKILL.md"

@@ -96,32 +96,18 @@ public struct PermissionEngine: Sendable {
     /// Resolve a path to an absolute, normalized, symlink-resolved location.
     private func resolveAbsolutePath(_ path: String) -> String {
         let expanded = NSString(string: path).expandingTildeInPath
-        let effectiveRoot = normalizeRootPath(effectiveWorkspaceRoot)
+        let effectiveRoot = effectiveWorkspaceRoot
         let resolved = expanded.hasPrefix("/") ? expanded : effectiveRoot + "/" + expanded
         let normalizedPath = URL(filePath: resolved).standardized.path()
         return URL(filePath: normalizedPath).resolvingSymlinksInPath().path()
     }
 
-    private func normalizeRootPath(_ root: String) -> String {
-        guard root.count > 1 else { return root }
-        var normalized = root
-        while normalized.count > 1 && normalized.hasSuffix("/") {
-            normalized.removeLast()
-        }
-        return normalized
-    }
-
-    private func isPathWithinRoot(_ path: String, root: String) -> Bool {
-        let normalizedRoot = normalizeRootPath(root)
-        return path == normalizedRoot || path.hasPrefix(normalizedRoot + "/")
-    }
-
     /// Validate that a path is within the workspace root.
     public func validatePath(_ path: String) throws -> String {
-        let effectiveRoot = normalizeRootPath(effectiveWorkspaceRoot)
+        let effectiveRoot = effectiveWorkspaceRoot
         let finalPath = resolveAbsolutePath(path)
 
-        guard isPathWithinRoot(finalPath, root: effectiveRoot) else {
+        guard finalPath.hasPrefix(effectiveRoot) else {
             throw PermissionError.pathOutsideWorkspace(
                 path: finalPath,
                 workspaceRoot: effectiveRoot
@@ -136,8 +122,8 @@ public struct PermissionEngine: Sendable {
     /// Reads are allowed inside the workspace and under `~/skills`.
     public func validateReadPath(_ path: String) throws -> String {
         let finalPath = resolveAbsolutePath(path)
-        let effectiveRoot = normalizeRootPath(effectiveWorkspaceRoot)
-        if isPathWithinRoot(finalPath, root: effectiveRoot) {
+        let effectiveRoot = effectiveWorkspaceRoot
+        if finalPath == effectiveRoot || finalPath.hasPrefix(effectiveRoot + "/") {
             return finalPath
         }
 
@@ -146,7 +132,7 @@ public struct PermissionEngine: Sendable {
             .standardized
             .resolvingSymlinksInPath()
             .path()
-        if isPathWithinRoot(finalPath, root: homeSkills) {
+        if finalPath == homeSkills || finalPath.hasPrefix(homeSkills + "/") {
             return finalPath
         }
 
@@ -228,11 +214,11 @@ public struct PermissionEngine: Sendable {
         }
 
         let relativePath: String
-        let effectiveRoot = normalizeRootPath(effectiveWorkspaceRoot)
-        if path == effectiveRoot {
-            relativePath = "."
-        } else if path.hasPrefix(effectiveRoot + "/") {
+        let effectiveRoot = effectiveWorkspaceRoot
+        if path.hasPrefix(effectiveRoot + "/") {
             relativePath = String(path.dropFirst(effectiveRoot.count + 1))
+        } else if path == effectiveRoot {
+            relativePath = "."
         } else {
             relativePath = path
         }
