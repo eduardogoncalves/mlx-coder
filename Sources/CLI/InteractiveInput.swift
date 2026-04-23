@@ -302,6 +302,28 @@ public final class InteractiveInput: @unchecked Sendable {
                         }
                     }
                 }
+            } else if byte == 22 { // Ctrl+V — voice input
+                #if canImport(Speech)
+                // Clear the input box before starting voice recording.
+                if currentCursorRowRelToTop > 0 {
+                    print("\r\u{1B}[\(currentCursorRowRelToTop)A", terminator: "")
+                }
+                print("\r\u{1B}[J", terminator: "")
+                fflush(stdout)
+                do {
+                    let spoken = try await VoiceInput.transcribe()
+                    if !spoken.isEmpty {
+                        insertTextAtCursor(spoken)
+                    }
+                    // Flush the Enter key pressed to stop recording.
+                    tcflush(STDIN_FILENO, TCIFLUSH)
+                } catch {
+                    print("\u{001B}[31m⚠️  Voice: \(error.localizedDescription)\u{001B}[0m")
+                    fflush(stdout)
+                }
+                isInitialDraw = true
+                redraw()
+                #endif
             } else if byte >= 32 { // Printable characters
                 // Proper UTF8 decoding for multi-byte
                 var bytes = [byte]

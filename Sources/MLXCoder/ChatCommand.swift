@@ -316,6 +316,34 @@ struct ChatCommand: AsyncParsableCommand {
                 await agentLoop.setSandbox(sandboxEnabled)
                 continue
             }
+            if trimmed == "/voice" {
+                #if canImport(Speech)
+                renderer.printStatus("🎤 Starting voice input…")
+                do {
+                    let transcription = try await VoiceInput.transcribe()
+                    renderer.printStatus("🎤 \"\(transcription)\"")
+                    renderer.printStatus("[Key mode] Generation active. Press Esc to cancel.")
+                    let task = Task {
+                        let parsed = ImageAttachmentParser.parse(prompt: transcription)
+                        try await agentLoop.processUserMessage(parsed.cleanedPrompt, images: parsed.imageURLs)
+                    }
+                    await CancelController.shared.setTask(task)
+                    do {
+                        try await task.value
+                    } catch is CancellationError {
+                        renderer.printError("Generation cancelled by user.")
+                    } catch {
+                        renderer.printError(error.localizedDescription)
+                    }
+                    await CancelController.shared.setTask(nil)
+                } catch {
+                    renderer.printError("Voice input: \(error.localizedDescription)")
+                }
+                #else
+                renderer.printError("Voice input requires macOS with the Speech framework.")
+                #endif
+                continue
+            }
             if trimmed == "/plan" {
                 await agentLoop.setMode(.plan)
                 continue
@@ -583,8 +611,10 @@ func printREPLHelp() {
       \u{001B}[32m/merge-approval\u{001B}[0m Trigger the "Awaiting approval before merge" flow
       \u{001B}[32m/gittree\u{001B}[0m       List git worktrees and switch workspace/branch to one
       \u{001B}[32m/sandbox\u{001B}[0m       Toggle macOS Seatbelt sandbox for shell commands
+      \u{001B}[32m/voice\u{001B}[0m         Record voice input (STT) and send transcription to agent
       \u{001B}[32m/memory <cmd>\u{001B}[0m  Memory commands: save, log, search, list, undo, status, snippet
       \u{001B}[32mEsc\u{001B}[0m            Cancel current generation
+      \u{001B}[32mCtrl+V\u{001B}[0m         Dictate text with voice (STT) — inserts transcription into input field
       \u{001B}[32mShift+Tab\u{001B}[0m      Cycle modes (default starts at Plan low):
                      Plan (low) → Plan (high) → General (fast) →
                      General (low) → Coding (fast) → Coding (low) → Coding (high)
