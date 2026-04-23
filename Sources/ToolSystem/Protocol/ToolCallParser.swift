@@ -122,7 +122,60 @@ public struct ToolCallParser: Sendable {
             return call
         }
 
+        // Models frequently emit multi-line content strings using literal newlines
+        // instead of JSON-escaped \n sequences, making the JSON invalid.
+        // Sanitize control characters within string values and retry.
+        let sanitized = sanitizeControlCharsInJSONStrings(jsonString)
+        if sanitized != jsonString {
+            if let call = tryParse(sanitized) {
+                return call
+            }
+            if let call = tryParseWithFallbacks(sanitized) {
+                return call
+            }
+        }
+
         return tryParseLooseToolCall(jsonString)
+    }
+
+    /// Escapes unescaped ASCII control characters (newlines, carriage returns, tabs)
+    /// that appear inside JSON string values. Uses a simple state machine to track
+    /// whether the current character is inside a quoted string.
+    private static func sanitizeControlCharsInJSONStrings(_ json: String) -> String {
+        var result = ""
+        result.reserveCapacity(json.count + 32)
+        var inString = false
+        var escaping = false
+
+        for char in json {
+            if escaping {
+                result.append(char)
+                escaping = false
+            } else if char == "\\" && inString {
+                result.append(char)
+                escaping = true
+            } else if char == "\"" {
+                result.append(char)
+                inString = !inString
+            } else if inString {
+                switch char {
+                case "\n": result += "\\n"
+                case "\r": result += "\\r"
+                case "\t": result += "\\t"
+                default:
+                    // Escape any other ASCII control character
+                    let v = char.unicodeScalars.first!.value
+                    if v < 32 {
+                        result += String(format: "\\u%04x", v)
+                    } else {
+                        result.append(char)
+                    }
+                }
+            } else {
+                result.append(char)
+            }
+        }
+        return result
     }
 
     private static func tryParse(_ jsonString: String) -> ParsedToolCall? {
