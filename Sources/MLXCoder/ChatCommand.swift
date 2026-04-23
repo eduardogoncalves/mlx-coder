@@ -64,7 +64,10 @@ struct ChatCommand: AsyncParsableCommand {
 
         // Set up permissions
         let workspacePath = NSString(string: args.workspace).expandingTildeInPath
-        let absWorkspace = workspacePath.hasPrefix("/") ? workspacePath : FileManager.default.currentDirectoryPath + "/" + workspacePath
+        let rawWorkspace = workspacePath.hasPrefix("/") ? workspacePath : FileManager.default.currentDirectoryPath + "/" + workspacePath
+        // Canonicalize to eliminate trailing slashes, /. components, and symlink variants
+        // so that project_root values are consistent across sessions.
+        let absWorkspace = URL(fileURLWithPath: rawWorkspace).standardized.path
         let runtimeConfig = RuntimeConfigLoader.loadMerged(workspaceRoot: absWorkspace)
         let effectiveApprovalMode = resolvedApprovalMode(from: args.approvalMode, runtimeConfig: runtimeConfig)
         let effectivePolicyFile = args.policyFile ?? runtimeConfig.defaultPolicyFile

@@ -50,6 +50,21 @@ public struct KnowledgeEntry: Codable, Identifiable, Sendable {
     private static func normalizeTags(_ tags: [String]) -> [String] {
         Array(Set(tags.map { $0.lowercased() })).sorted()
     }
+
+    /// Return a copy with a different project root (used for normalization).
+    public func withProjectRoot(_ root: String) -> KnowledgeEntry {
+        KnowledgeEntry(
+            id: id,
+            type: type,
+            content: content,
+            tags: tags,
+            surface: surface,
+            branch: branch,
+            projectRoot: root,
+            createdAt: createdAt,
+            expiresAt: expiresAt
+        )
+    }
 }
 
 /// Priority tiers for deterministic restore.

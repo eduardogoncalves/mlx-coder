@@ -65,8 +65,9 @@ func registerAllTools(
     // Build checking tool
     await registry.register(BuildCheckTool(permissions: permissions))
     
-    // Memory tool
+    // Memory tools
     await registry.register(LogKnowledgeTool(workspaceRoot: permissions.workspaceRoot))
+    await registry.register(SearchKnowledgeTool(workspaceRoot: permissions.workspaceRoot))
 
     // MCP tools (optional)
     for mcpConfig in mcpConfigs {

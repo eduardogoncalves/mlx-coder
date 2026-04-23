@@ -143,8 +143,16 @@ public actor KnowledgeStore {
         }
     }
     
+    /// Normalize a file-system path for consistent DB storage/lookup.
+    /// Eliminates trailing slashes, /. and symlink variants.
+    static func normalizePath(_ path: String) -> String {
+        URL(fileURLWithPath: path).standardized.path
+    }
+
     /// Insert a knowledge entry, deduplicating by content_hash + type + project_root.
-    public func insert(_ entry: KnowledgeEntry) throws {
+    public func insert(_ rawEntry: KnowledgeEntry) throws {
+        // Normalize project root for consistent lookup across session invocations.
+        let entry = rawEntry.withProjectRoot(KnowledgeStore.normalizePath(rawEntry.projectRoot))
         guard let db else {
             throw StoreError.databaseNotOpen
         }
@@ -251,6 +259,7 @@ public actor KnowledgeStore {
     
     /// FTS5 full-text search.
     public func search(query: String, projectRoot: String) throws -> [KnowledgeEntry] {
+        let projectRoot = KnowledgeStore.normalizePath(projectRoot)
         guard let db else {
             throw StoreError.databaseNotOpen
         }
@@ -278,6 +287,7 @@ public actor KnowledgeStore {
     
     /// Get all entries for a project, optionally filtered by type.
     public func list(projectRoot: String, type: KnowledgeType? = nil, limit: Int = 100) throws -> [KnowledgeEntry] {
+        let projectRoot = KnowledgeStore.normalizePath(projectRoot)
         guard let db else {
             throw StoreError.databaseNotOpen
         }

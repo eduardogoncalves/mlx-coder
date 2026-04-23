@@ -40,7 +40,8 @@ public struct LogKnowledgeTool: Tool {
     private let workspaceRoot: String
     
     public init(workspaceRoot: String) {
-        self.workspaceRoot = workspaceRoot
+        // Canonicalize to match the path stored during restore
+        self.workspaceRoot = URL(fileURLWithPath: workspaceRoot).standardized.path
     }
     
     public func execute(arguments: [String: Any]) async throws -> ToolResult {
