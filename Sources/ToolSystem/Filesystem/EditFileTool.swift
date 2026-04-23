@@ -6,13 +6,19 @@ import Foundation
 /// Performs targeted search-and-replace edits on a file.
 public struct EditFileTool: Tool {
     public let name = "edit_file"
-    public let description = "Apply search-and-replace edits to an existing file. Preferred over full rewrites for making updates to existing files. Each edit replaces an exact match of old_text with new_text."
+    public let description = """
+        Replace one unique occurrence of a string within an existing file. \
+        Use this for a single, targeted in-place substitution where old_text appears exactly once. \
+        Do NOT use when the same string appears more than once (make old_text longer/more unique instead), \
+        when changes span multiple non-adjacent locations (use patch instead), \
+        or when adding content at the end of the file (use append_file instead).
+        """
     public let parameters = JSONSchema(
         type: "object",
         properties: [
-            "path": PropertySchema(type: "string", description: "Path to the file to edit (relative to workspace root)"),
-            "old_text": PropertySchema(type: "string", description: "Exact text to find and replace"),
-            "new_text": PropertySchema(type: "string", description: "Replacement text"),
+            "path": PropertySchema(type: "string", description: "Path to the file to edit (relative to workspace root). The file must already exist."),
+            "old_text": PropertySchema(type: "string", description: "Exact text to find and replace. Must match exactly one location in the file, including all whitespace and indentation. Add surrounding context lines to make it unique if needed."),
+            "new_text": PropertySchema(type: "string", description: "Replacement text that will be written in place of old_text."),
         ],
         required: ["path", "old_text", "new_text"]
     )

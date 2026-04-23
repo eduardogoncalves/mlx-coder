@@ -6,12 +6,20 @@ import Foundation
 /// Applies a unified diff patch to a file.
 public struct PatchTool: Tool {
     public let name = "patch"
-    public let description = "Apply a unified diff patch to a file."
+    public let description = """
+        Apply a unified diff to an existing file to make multiple coordinated changes in one call. \
+        Use this when changes span more than one non-adjacent location, when the change is structurally \
+        complex, or when you already have a well-formed unified diff. \
+        Do NOT use for a single targeted substitution (use edit_file instead) or for appending content \
+        at the end of the file (use append_file instead). \
+        The diff must contain at least one valid @@ hunk; all hunks are applied atomically in reverse \
+        line-number order so earlier hunks do not shift positions for later ones.
+        """
     public let parameters = JSONSchema(
         type: "object",
         properties: [
-            "path": PropertySchema(type: "string", description: "Path to the file to patch (relative to workspace root)"),
-            "diff": PropertySchema(type: "string", description: "Unified diff content to apply"),
+            "path": PropertySchema(type: "string", description: "Path to the file to patch (relative to workspace root). The file must already exist."),
+            "diff": PropertySchema(type: "string", description: "Unified diff content to apply, containing one or more @@ -old_start,old_count +new_start,new_count @@ hunks. Context lines (space-prefixed) and changed lines (+/-) must exactly match the current file content."),
         ],
         required: ["path", "diff"]
     )

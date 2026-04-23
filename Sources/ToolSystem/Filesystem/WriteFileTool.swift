@@ -6,7 +6,13 @@ import Foundation
 /// Creates or overwrites a file with the given content.
 public struct WriteFileTool: Tool {
     public let name = "write_file"
-    public let description = "Create a new file or overwrite an existing file with the given content. Use this to scaffold the minimal valid structure of a file before adding sections incrementally."
+    public let description = """
+        Create a new file or completely replace all content of an existing file. \
+        Use this to scaffold a brand-new file or when a file needs a full rewrite from scratch. \
+        Do NOT use for partial modifications to an existing file \
+        (use edit_file for a single targeted substitution or patch for multi-location changes), \
+        and do NOT use merely to append content at the end (use append_file instead).
+        """
     public let parameters = JSONSchema(
         type: "object",
         properties: [

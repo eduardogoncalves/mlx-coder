@@ -6,12 +6,19 @@ import Foundation
 /// Appends content to a file.
 public struct AppendFileTool: Tool {
     public let name = "append_file"
-    public let description = "Appends content to the end of a file. Preferred for adding sections incrementally after the initial scaffold is created. This is much safer than search-and-replace for adding new content."
+    public let description = """
+        Add new content after the last line of a file. \
+        Use this only when inserting at the very end of the file — never for modifying or replacing \
+        existing lines (use edit_file for a single targeted substitution or patch for multi-location changes). \
+        For intentionally creating a brand-new file use write_file instead. \
+        Note: if the target file does not exist it will be created silently; \
+        prefer write_file when creating new files on purpose.
+        """
     public let parameters = JSONSchema(
         type: "object",
         properties: [
-            "path": PropertySchema(type: "string", description: "Path to the file to append to (relative to workspace root)"),
-            "content": PropertySchema(type: "string", description: "Content to append to the file"),
+            "path": PropertySchema(type: "string", description: "Path to the file to append to (relative to workspace root). If the file does not exist it will be created; prefer write_file for intentional new-file creation."),
+            "content": PropertySchema(type: "string", description: "Content to append after the last line of the file."),
         ],
         required: ["path", "content"]
     )
