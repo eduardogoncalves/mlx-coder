@@ -54,8 +54,33 @@ public struct ToolCallParser: Sendable {
         return results
     }
 
+    /// Returns true if `text` contains a `<tool_call>` tag outside any think block.
+    /// Used to detect malformed tool call attempts that need re-prompting.
+    /// Tool call tags that appear inside `<think>…</think>` (or an unclosed think block)
+    /// are suppressed, matching the behaviour of `parse(_:)`.
     public static func containsToolCall(_ text: String) -> Bool {
-        !parse(text).isEmpty
+        var searchRange = text.startIndex..<text.endIndex
+
+        while !searchRange.isEmpty {
+            if let thinkOpen = text.range(of: ToolCallPattern.thinkOpen, range: searchRange) {
+                // A tool call that starts before the think block counts.
+                if let toolOpen = text.range(of: ToolCallPattern.toolCallOpen, range: searchRange),
+                   toolOpen.lowerBound < thinkOpen.lowerBound {
+                    return true
+                }
+                // Skip the closed think block.
+                if let thinkClose = text.range(of: ToolCallPattern.thinkClose,
+                                               range: thinkOpen.upperBound..<text.endIndex) {
+                    searchRange = thinkClose.upperBound..<text.endIndex
+                    continue
+                }
+                // Unclosed think block — all remaining text is still thinking.
+                return false
+            }
+            // No think block — any tool call tag counts.
+            return text.range(of: ToolCallPattern.toolCallOpen, range: searchRange) != nil
+        }
+        return false
     }
 
     private static func parseToolCall(
@@ -122,7 +147,60 @@ public struct ToolCallParser: Sendable {
             return call
         }
 
+        // Models frequently emit multi-line content strings using literal newlines
+        // instead of JSON-escaped \n sequences, making the JSON invalid.
+        // Sanitize control characters within string values and retry.
+        let sanitized = sanitizeControlCharsInJSONStrings(jsonString)
+        if sanitized != jsonString {
+            if let call = tryParse(sanitized) {
+                return call
+            }
+            if let call = tryParseWithFallbacks(sanitized) {
+                return call
+            }
+        }
+
         return tryParseLooseToolCall(jsonString)
+    }
+
+    /// Escapes unescaped ASCII control characters (newlines, carriage returns, tabs)
+    /// that appear inside JSON string values. Uses a simple state machine to track
+    /// whether the current character is inside a quoted string.
+    private static func sanitizeControlCharsInJSONStrings(_ json: String) -> String {
+        var result = ""
+        result.reserveCapacity(json.count + 32)
+        var inString = false
+        var escaping = false
+
+        for char in json {
+            if escaping {
+                result.append(char)
+                escaping = false
+            } else if char == "\\" && inString {
+                result.append(char)
+                escaping = true
+            } else if char == "\"" {
+                result.append(char)
+                inString = !inString
+            } else if inString {
+                switch char {
+                case "\n": result += "\\n"
+                case "\r": result += "\\r"
+                case "\t": result += "\\t"
+                default:
+                    // Escape any other ASCII control character
+                    let v = char.unicodeScalars.first!.value
+                    if v < 32 {
+                        result += String(format: "\\u%04x", v)
+                    } else {
+                        result.append(char)
+                    }
+                }
+            } else {
+                result.append(char)
+            }
+        }
+        return result
     }
 
     private static func tryParse(_ jsonString: String) -> ParsedToolCall? {

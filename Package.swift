@@ -12,6 +12,10 @@ let package = Package(
         .package(url: "https://github.com/jpsim/Yams", from: "6.2.1"),
     ],
     targets: [
+        .systemLibrary(
+            name: "CSQLite",
+            pkgConfig: "sqlite3"
+        ),
         .executableTarget(
             name: "MLXCoder",
             dependencies: [
@@ -24,8 +28,12 @@ let package = Package(
                 .product(name: "Tokenizers",    package: "swift-transformers"),
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
                 .product(name: "Yams",          package: "Yams"),
+                "CSQLite",
             ],
-            path: "Sources"
+            path: "Sources",
+            linkerSettings: [
+                .linkedLibrary("sqlite3")
+            ]
         ),
         .executableTarget(
             name: "TestGenerable",
@@ -50,6 +58,11 @@ let package = Package(
             name: "ProjectDetectorTests",
             dependencies: ["MLXCoder"],
             path: "Tests/ProjectDetectorTests"
+        ),
+        .testTarget(
+            name: "MemoryTests",
+            dependencies: ["MLXCoder"],
+            path: "Tests/MemoryTests"
         ),
     ]
 )

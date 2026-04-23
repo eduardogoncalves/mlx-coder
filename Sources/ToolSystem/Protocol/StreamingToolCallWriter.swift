@@ -290,17 +290,23 @@ public final class StreamingToolCallWriter: @unchecked Sendable {
     // MARK: - JSON handling
 
     private func handleCompletedJSON(_ buffer: String) {
-        // Try to parse the JSON
-        guard let data = buffer.data(using: .utf8),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let toolName = json["name"] as? String else {
+        // Try to parse the JSON, with a sanitization fallback for unescaped control chars
+        // (models commonly emit literal newlines in multi-line content strings).
+        func parseBuffer(_ raw: String) -> (json: [String: Any], toolName: String)? {
+            guard let data = raw.data(using: .utf8),
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let name = json["name"] as? String else { return nil }
+            return (json, name)
+        }
+
+        guard let (json, toolName) = parseBuffer(buffer) ?? parseBuffer(sanitizeControlChars(buffer)) else {
             failedCalls.append("parse_failed")
             return
         }
 
         let arguments = json["arguments"] as? [String: Any] ?? [:]
 
-        // Check if this is a content-heavy tool call
+        // Check if this is a content-heavy file tool call
         if let contentKey = detectContentField(buffer)?.key,
            let path = arguments["path"] as? String {
             // Content was streamed to tmp during generation, but we didn't catch it
@@ -321,6 +327,37 @@ public final class StreamingToolCallWriter: @unchecked Sendable {
                 ))
             }
         }
+        // Non-file tools (e.g. log_knowledge) are not added to completedCalls;
+        // ToolCallParser handles them from rawResponseText.
+    }
+
+    /// Escapes unescaped ASCII control characters within JSON string values.
+    private func sanitizeControlChars(_ json: String) -> String {
+        var result = ""
+        result.reserveCapacity(json.count + 32)
+        var inString = false
+        var escaping = false
+        for char in json {
+            if escaping {
+                result.append(char); escaping = false
+            } else if char == "\\" && inString {
+                result.append(char); escaping = true
+            } else if char == "\"" {
+                result.append(char); inString = !inString
+            } else if inString {
+                switch char {
+                case "\n": result += "\\n"
+                case "\r": result += "\\r"
+                case "\t": result += "\\t"
+                default:
+                    let v = char.unicodeScalars.first!.value
+                    result += v < 32 ? String(format: "\\u%04x", v) : String(char)
+                }
+            } else {
+                result.append(char)
+            }
+        }
+        return result
     }
 
     private func extractOtherArgs(_ buffer: String, contentKey: String, path: String) -> [String: Any] {

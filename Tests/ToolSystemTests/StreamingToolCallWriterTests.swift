@@ -118,12 +118,14 @@ final class StreamingToolCallWriterTests: XCTestCase {
         XCTAssertTrue(result1.displayText.contains("<tool_call>"))
         XCTAssertTrue(writer.drainCompletedCalls().isEmpty)
 
-        let chunk2 = "</think><tool_call>{\"name\":\"read_file\",\"arguments\":{\"path\":\"README.md\"}}</tool_call>"
+        // After </think>, a content-streaming tool call IS captured by the writer.
+        // (read_file has no content field so it is handled by ToolCallParser, not here.)
+        let chunk2 = "</think><tool_call>{\"name\":\"write_file\",\"arguments\":{\"path\":\"out.txt\",\"content\":\"hello\"}}</tool_call>"
         _ = writer.process(chunk2)
         let calls = writer.drainCompletedCalls()
         XCTAssertEqual(calls.count, 1)
-        XCTAssertEqual(calls[0].toolName, "read_file")
-        XCTAssertEqual(calls[0].path, "README.md")
+        XCTAssertEqual(calls[0].toolName, "write_file")
+        XCTAssertEqual(calls[0].path, "out.txt")
 
         writer.cleanupAllTmpFiles()
     }

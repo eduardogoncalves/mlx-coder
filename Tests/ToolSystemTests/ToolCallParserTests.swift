@@ -49,7 +49,8 @@ final class ToolCallParserTests: XCTestCase {
         XCTAssertEqual(thinking, "Internal reasoning here")
     }
     
-    func testRejectsMalformedJSONWithoutFallbackRepair() {
+    func testMalformedJSONHandling() {
+        // Structural errors (missing closing brace) are not repairable → empty result
         let missingBraceText = """
         <tool_call>
         {"name": "test_tool", "arguments": {"key": "value"}
@@ -57,13 +58,17 @@ final class ToolCallParserTests: XCTestCase {
         """
         XCTAssertTrue(ToolCallParser.parse(missingBraceText).isEmpty)
 
-        let malformedStringText = """
+        // Literal newlines inside JSON strings are sanitized and parsed successfully.
+        // Models commonly emit multi-line content this way (e.g. log_knowledge).
+        let literalNewlineText = """
         <tool_call>
         {"name": "write_file", "arguments": {"path": "test.txt", "content": "line1
         line2"}}
         </tool_call>
         """
-        XCTAssertTrue(ToolCallParser.parse(malformedStringText).isEmpty)
+        let calls = ToolCallParser.parse(literalNewlineText)
+        XCTAssertEqual(calls.count, 1)
+        XCTAssertEqual(calls[0].name, "write_file")
     }
 
     func testParsesTruncatedToolBlockWhenJSONIsValid() {

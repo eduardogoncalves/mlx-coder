@@ -64,6 +64,9 @@ struct DoctorCommand: AsyncParsableCommand {
         )
         payload = appendDoctorCheck(payload, check: lspCheck)
 
+        let memoryCheck = await memoryDoctorCheck()
+        payload = appendDoctorCheck(payload, check: memoryCheck)
+
         if json {
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
@@ -142,6 +145,26 @@ func doctorShouldFail(payload: DoctorPayload, strict: Bool) -> Bool {
     }
     return false
 }
+
+// MARK: - Memory Doctor Check
+
+func memoryDoctorCheck() async -> DoctorCheck {
+    let store = KnowledgeStore.shared
+    
+    do {
+        try await store.initialize()
+        let stats = try await store.stats()
+        
+        // Check if DB is accessible and has reasonable size
+        let dbSizeMB = Double(stats.dbSizeBytes) / 1_000_000.0
+        let message = "Memory store accessible: \(stats.entryCount) entries, \(String(format: "%.2f", dbSizeMB)) MB"
+        
+        return DoctorCheck(name: "memory", status: .pass, message: message)
+    } catch {
+        return DoctorCheck(name: "memory", status: .warn, message: "Memory store not accessible: \(error.localizedDescription)")
+    }
+}
+
 
 func lspDoctorCheck(isDotnetWorkspace: Bool, csharpLSAvailable: Bool) -> DoctorCheck {
     if !isDotnetWorkspace {

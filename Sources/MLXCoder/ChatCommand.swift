@@ -64,7 +64,10 @@ struct ChatCommand: AsyncParsableCommand {
 
         // Set up permissions
         let workspacePath = NSString(string: args.workspace).expandingTildeInPath
-        let absWorkspace = workspacePath.hasPrefix("/") ? workspacePath : FileManager.default.currentDirectoryPath + "/" + workspacePath
+        let rawWorkspace = workspacePath.hasPrefix("/") ? workspacePath : FileManager.default.currentDirectoryPath + "/" + workspacePath
+        // Canonicalize to eliminate trailing slashes, /. components, and symlink variants
+        // so that project_root values are consistent across sessions.
+        let absWorkspace = URL(fileURLWithPath: rawWorkspace).standardized.path
         let runtimeConfig = RuntimeConfigLoader.loadMerged(workspaceRoot: absWorkspace)
         let effectiveApprovalMode = resolvedApprovalMode(from: args.approvalMode, runtimeConfig: runtimeConfig)
         let effectivePolicyFile = args.policyFile ?? runtimeConfig.defaultPolicyFile
@@ -121,17 +124,22 @@ struct ChatCommand: AsyncParsableCommand {
         let toolCount = await registry.count
         renderer.printStatus("Registered \(toolCount) tools")
 
-        // Build layered system prompt with optional skills metadata.
+        // Build layered system prompt with optional skills metadata and memory restoration.
         let skillsRegistry = SkillsRegistry(workspaceRoot: absWorkspace)
         let skillMetadata = await skillsRegistry.listMetadata()
         let hooks = HookPipeline()
         await hooks.register(AuditHook(logger: auditLogger))
+        
+        // Restore memory from previous sessions
+        let memorySection = await restoreMemorySection(workspaceRoot: absWorkspace, renderer: renderer)
+        
         let promptComposition = await AgentLoop.buildSystemPromptComposition(
             registry: registry,
             maxTokens: args.maxTokens,
             mode: .plan,
             thinkingLevel: .low,
             taskType: .general,
+            memorySection: memorySection,
             skillsMetadata: skillMetadata
         )
 
@@ -212,7 +220,7 @@ struct ChatCommand: AsyncParsableCommand {
                 continue
             }
             if trimmed == "/clear" {
-                await agentLoop.clearHistory()
+                await agentLoop.clearHistoryWithCheckpoint()
                 continue
             }
             if trimmed.hasPrefix("/model") {
@@ -394,6 +402,16 @@ struct ChatCommand: AsyncParsableCommand {
                 continue
             }
 
+            // Memory commands
+            if trimmed.hasPrefix("/memory") {
+                await handleMemoryCommand(
+                    trimmed: trimmed,
+                    workspaceRoot: absWorkspace,
+                    renderer: renderer
+                )
+                continue
+            }
+
             do {
                 let activeMode = await agentLoop.currentMode
                 if activeMode == .agentGeneralFast && isAppleFoundationModelAvailable() {
@@ -565,6 +583,7 @@ func printREPLHelp() {
       \u{001B}[32m/merge-approval\u{001B}[0m Trigger the "Awaiting approval before merge" flow
       \u{001B}[32m/gittree\u{001B}[0m       List git worktrees and switch workspace/branch to one
       \u{001B}[32m/sandbox\u{001B}[0m       Toggle macOS Seatbelt sandbox for shell commands
+      \u{001B}[32m/memory <cmd>\u{001B}[0m  Memory commands: save, log, search, list, undo, status, snippet
       \u{001B}[32mEsc\u{001B}[0m            Cancel current generation
       \u{001B}[32mShift+Tab\u{001B}[0m      Cycle modes (default starts at Plan low):
                      Plan (low) → Plan (high) → General (fast) →
@@ -573,3 +592,314 @@ func printREPLHelp() {
       
     """)
 }
+
+// MARK: - Memory Restoration
+
+func restoreMemorySection(workspaceRoot: String, renderer: StreamRenderer) async -> String? {
+    let store = KnowledgeStore.shared
+    
+    // Initialize store (safe to call multiple times)
+    do {
+        try await store.initialize()
+    } catch {
+        // Silently fail - memory is optional
+        return nil
+    }
+    
+    // Prune expired entries
+    do {
+        try await store.pruneExpired()
+    } catch {
+        // Non-fatal
+    }
+    
+    // Detect surface
+    let surface = SurfaceDetector.detectSurface(workspacePath: workspaceRoot)
+    let branch = SurfaceDetector.currentBranch(in: workspaceRoot)
+    
+    // Build restore context
+    let context = RestoreContext(
+        projectRoot: workspaceRoot,
+        surface: surface,
+        branch: branch
+    )
+    
+    // Retrieve entries
+    do {
+        let result = try await KnowledgeRetriever.retrieve(from: store, context: context)
+        
+        if !result.entries.isEmpty {
+            renderer.printStatus("Restored \(result.entries.count) knowledge entries (\(result.tokenEstimate) tokens)")
+            return MemoryFormatter.formatRestoredContext(result)
+        }
+        
+        return nil
+    } catch {
+        // Non-fatal
+        return nil
+    }
+}
+
+// MARK: - Memory Command Handler
+
+func handleMemoryCommand(
+    trimmed: String,
+    workspaceRoot: String,
+    renderer: StreamRenderer
+) async {
+    let parts = trimmed.split(separator: " ", maxSplits: 2, omittingEmptySubsequences: true)
+    
+    guard parts.count >= 2 else {
+        renderer.printError("Usage: /memory <subcommand> [args]")
+        print("""
+        
+        Memory subcommands:
+          /memory save "<message>"                  Save a session state checkpoint
+          /memory log "<message>" --type <type>     Log typed knowledge (decision|gotcha|plan|pattern)
+          /memory search "<query>"                  FTS5 keyword search
+          /memory list [--type <type>]              Browse recent entries
+          /memory undo                              Delete last entry
+          /memory status                            Entry counts and DB stats
+          /memory snippet [--today|--week]          Generate work summary
+        
+        """)
+        return
+    }
+    
+    let subcommand = String(parts[1])
+    let store = KnowledgeStore.shared
+    
+    // Initialize store
+    do {
+        try await store.initialize()
+    } catch {
+        renderer.printError("Failed to initialize memory store: \(error)")
+        return
+    }
+    
+    switch subcommand {
+    case "save":
+        guard parts.count >= 3 else {
+            renderer.printError("Usage: /memory save \"<message>\"")
+            return
+        }
+        let message = String(parts[2]).trimmingCharacters(in: CharacterSet(charactersIn: "\""))
+        await handleMemorySave(message: message, workspaceRoot: workspaceRoot, store: store, renderer: renderer)
+        
+    case "log":
+        guard parts.count >= 3 else {
+            renderer.printError("Usage: /memory log \"<message>\" --type <type>")
+            return
+        }
+        let fullArgs = String(parts[2])
+        await handleMemoryLog(args: fullArgs, workspaceRoot: workspaceRoot, store: store, renderer: renderer)
+        
+    case "search":
+        guard parts.count >= 3 else {
+            renderer.printError("Usage: /memory search \"<query>\"")
+            return
+        }
+        let query = String(parts[2]).trimmingCharacters(in: CharacterSet(charactersIn: "\""))
+        await handleMemorySearch(query: query, workspaceRoot: workspaceRoot, store: store, renderer: renderer)
+        
+    case "list":
+        let typeFilter = parts.count >= 3 ? String(parts[2]) : nil
+        await handleMemoryList(typeFilter: typeFilter, workspaceRoot: workspaceRoot, store: store, renderer: renderer)
+        
+    case "undo":
+        await handleMemoryUndo(workspaceRoot: workspaceRoot, store: store, renderer: renderer)
+        
+    case "status":
+        await handleMemoryStatus(store: store, renderer: renderer)
+        
+    case "snippet":
+        let windowArg = parts.count >= 3 ? String(parts[2]) : nil
+        await handleMemorySnippet(window: windowArg, workspaceRoot: workspaceRoot, store: store, renderer: renderer)
+        
+    default:
+        renderer.printError("Unknown memory subcommand: \(subcommand)")
+    }
+}
+
+func handleMemorySave(message: String, workspaceRoot: String, store: KnowledgeStore, renderer: StreamRenderer) async {
+    let surface = SurfaceDetector.detectSurface(workspacePath: workspaceRoot)
+    let branch = SurfaceDetector.currentBranch(in: workspaceRoot)
+    let expiresAt = Date().addingTimeInterval(48 * 3600) // 48h TTL
+    
+    let entry = KnowledgeEntry(
+        type: .sessionState,
+        content: message,
+        surface: surface,
+        branch: branch,
+        projectRoot: workspaceRoot,
+        expiresAt: expiresAt
+    )
+    
+    do {
+        try await store.insert(entry)
+        renderer.printStatus("Session state saved")
+    } catch {
+        renderer.printError("Failed to save: \(error)")
+    }
+}
+
+func handleMemoryLog(args: String, workspaceRoot: String, store: KnowledgeStore, renderer: StreamRenderer) async {
+    // Parse: "<message>" --type <type>
+    let components = args.components(separatedBy: "--type")
+    guard components.count == 2 else {
+        renderer.printError("Usage: /memory log \"<message>\" --type <type>")
+        return
+    }
+    
+    let message = components[0].trimmingCharacters(in: .whitespacesAndNewlines)
+        .trimmingCharacters(in: CharacterSet(charactersIn: "\""))
+    let typeStr = components[1].trimmingCharacters(in: .whitespacesAndNewlines)
+    
+    guard let type = KnowledgeType(rawValue: typeStr) else {
+        renderer.printError("Invalid type. Use: decision, gotcha, plan, pattern, session_state")
+        return
+    }
+    
+    let surface = SurfaceDetector.detectSurface(workspacePath: workspaceRoot)
+    let branch = SurfaceDetector.currentBranch(in: workspaceRoot)
+    
+    let entry = KnowledgeEntry(
+        type: type,
+        content: message,
+        surface: surface,
+        branch: branch,
+        projectRoot: workspaceRoot,
+        expiresAt: type == .sessionState ? Date().addingTimeInterval(48 * 3600) : nil
+    )
+    
+    do {
+        try await store.insert(entry)
+        renderer.printStatus("Knowledge logged as \(type.rawValue)")
+    } catch {
+        renderer.printError("Failed to log: \(error)")
+    }
+}
+
+func handleMemorySearch(query: String, workspaceRoot: String, store: KnowledgeStore, renderer: StreamRenderer) async {
+    do {
+        let entries = try await store.search(query: query, projectRoot: workspaceRoot)
+        
+        if entries.isEmpty {
+            print("\nNo results found.\n")
+            return
+        }
+        
+        print("\nSearch results (\(entries.count)):\n")
+        for entry in entries.prefix(20) {
+            print("[\(entry.type.rawValue)] \(entry.content)")
+            if let surface = entry.surface {
+                print("  surface: \(surface)")
+            }
+            print("")
+        }
+    } catch {
+        renderer.printError("Search failed: \(error)")
+    }
+}
+
+func handleMemoryList(typeFilter: String?, workspaceRoot: String, store: KnowledgeStore, renderer: StreamRenderer) async {
+    do {
+        let type: KnowledgeType?
+        if let typeFilter {
+            let typeStr = typeFilter.replacingOccurrences(of: "--type ", with: "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            type = KnowledgeType(rawValue: typeStr)
+            if type == nil {
+                renderer.printError("Invalid type: \(typeStr)")
+                return
+            }
+        } else {
+            type = nil
+        }
+        
+        let entries = try await store.list(projectRoot: workspaceRoot, type: type, limit: 50)
+        
+        if entries.isEmpty {
+            print("\nNo entries found.\n")
+            return
+        }
+        
+        let dateFormatter = DateFormatter()
+        dateFormatter.dateStyle = .short
+        dateFormatter.timeStyle = .short
+        
+        print("\nKnowledge entries (\(entries.count)):\n")
+        for entry in entries.prefix(20) {
+            print("[\(entry.type.rawValue)] \(dateFormatter.string(from: entry.createdAt))")
+            print("  \(entry.content)")
+            if let surface = entry.surface {
+                print("  surface: \(surface)")
+            }
+            print("")
+        }
+    } catch {
+        renderer.printError("List failed: \(error)")
+    }
+}
+
+func handleMemoryUndo(workspaceRoot: String, store: KnowledgeStore, renderer: StreamRenderer) async {
+    do {
+        let entries = try await store.list(projectRoot: workspaceRoot, limit: 1)
+        
+        guard let lastEntry = entries.first else {
+            renderer.printError("No entries to undo")
+            return
+        }
+        
+        try await store.delete(id: lastEntry.id)
+        renderer.printStatus("Deleted last entry")
+    } catch {
+        renderer.printError("Undo failed: \(error)")
+    }
+}
+
+func handleMemoryStatus(store: KnowledgeStore, renderer: StreamRenderer) async {
+    do {
+        let stats = try await store.stats()
+        print("""
+        
+        Memory Status:
+        - Entries: \(stats.entryCount)
+        - DB size: \(stats.dbSizeBytes / 1024) KB
+        
+        """)
+    } catch {
+        renderer.printError("Status failed: \(error)")
+    }
+}
+
+func handleMemorySnippet(window: String?, workspaceRoot: String, store: KnowledgeStore, renderer: StreamRenderer) async {
+    let timeWindow: SnippetGenerator.TimeWindow
+    
+    if let window {
+        switch window {
+        case "--today":
+            timeWindow = .today
+        case "--week":
+            timeWindow = .week
+        default:
+            timeWindow = .all
+        }
+    } else {
+        timeWindow = .today
+    }
+    
+    do {
+        let snippet = try await SnippetGenerator.generate(
+            from: store,
+            projectRoot: workspaceRoot,
+            window: timeWindow,
+            format: .markdown
+        )
+        print("\n\(snippet)\n")
+    } catch {
+        renderer.printError("Snippet generation failed: \(error)")
+    }
+}
+
+
