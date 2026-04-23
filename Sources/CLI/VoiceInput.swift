@@ -147,7 +147,7 @@ public enum VoiceInput {
             inputNode.removeTap(onBus: 0)
             request.endAudio()
             recognitionTask.cancel()
-            print("\r\u{1B}[K", terminator: "") // clear partial transcription line
+            print("\r\u{1B}[K\u{1B}[A\r\u{1B}[K", terminator: "") // clear partial transcription line, then the "Listening…" line above it
             fflush(stdout)
         }
 

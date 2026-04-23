@@ -38,7 +38,7 @@ public final class InteractiveInput: @unchecked Sendable {
     
     /// Reads a line from the user interactively, drawing a box and a footer below it.
     /// When the user submits (Enter), the box and footer are erased and only the plain text remains.
-    public func readInteractive(contextPercent: Double? = nil, sandboxEnabled: Bool = false, version: String = "", mode initialMode: String = "", onModeToggle: (() async -> String)? = nil) async -> String? {
+    public func readInteractive(contextPercent: Double? = nil, sandboxEnabled: Bool = false, version: String = "", mode initialMode: String = "", initialText: String = "", onModeToggle: (() async -> String)? = nil) async -> String? {
         var mode = initialMode
         // Ensure STDIN is a terminal, otherwise fallback to standard readLine
         guard isatty(STDIN_FILENO) == 1 else {
@@ -70,8 +70,8 @@ public final class InteractiveInput: @unchecked Sendable {
             tcsetattr(STDIN_FILENO, TCSANOW, &originalTerm)
         }
         
-        var input = ""
-        var cursorPosition = 0 // character index
+        var input = initialText
+        var cursorPosition = initialText.count // character index
         let width = getTerminalWidth()
         var isInitialDraw = true
         
