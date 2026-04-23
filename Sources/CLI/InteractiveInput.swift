@@ -12,7 +12,12 @@ public final class InteractiveInput: @unchecked Sendable {
     private var history: [String] = []
     private var historyIndex: Int = 0
     private var currentInputBeforeHistory: String = ""
-    
+
+    /// Seconds of silence before voice recording stops. Forwarded to ``VoiceInput/transcribe(silenceTimeout:locale:)``.
+    public var voiceSilenceTimeout: TimeInterval = 2.0
+    /// Locale for speech recognition. `nil` means device locale with `en-US` fallback.
+    public var voiceLocale: Locale?
+
     public init() {}
     
     // ANSI Controls (same as StreamRenderer to match styling)
@@ -311,7 +316,10 @@ public final class InteractiveInput: @unchecked Sendable {
                 print("\r\u{1B}[J", terminator: "")
                 fflush(stdout)
                 do {
-                    let spoken = try await VoiceInput.transcribe()
+                    let spoken = try await VoiceInput.transcribe(
+                        silenceTimeout: voiceSilenceTimeout,
+                        locale: voiceLocale
+                    )
                     if !spoken.isEmpty {
                         insertTextAtCursor(spoken)
                     }

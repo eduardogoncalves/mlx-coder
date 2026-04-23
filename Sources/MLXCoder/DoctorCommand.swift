@@ -4,6 +4,10 @@
 import ArgumentParser
 import Foundation
 
+#if canImport(Speech)
+import Speech
+#endif
+
 struct DoctorCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "doctor",
@@ -66,6 +70,11 @@ struct DoctorCommand: AsyncParsableCommand {
 
         let memoryCheck = await memoryDoctorCheck()
         payload = appendDoctorCheck(payload, check: memoryCheck)
+
+        #if canImport(Speech)
+        let voiceCheck = voiceDoctorCheck()
+        payload = appendDoctorCheck(payload, check: voiceCheck)
+        #endif
 
         if json {
             let encoder = JSONEncoder()
@@ -324,3 +333,26 @@ private func resolveDoctorPath(_ value: String, workspaceRoot: String) -> String
     }
     return workspaceRoot + "/" + expanded
 }
+
+// MARK: - Voice Doctor Check
+
+#if canImport(Speech)
+func voiceDoctorCheck() -> DoctorCheck {
+    let status = SFSpeechRecognizer.authorizationStatus()
+    switch status {
+    case .authorized:
+        let localesToTry = [Locale.current, Locale(identifier: "en-US")]
+        if let recognizer = localesToTry.compactMap({ SFSpeechRecognizer(locale: $0) }).first(where: { $0.isAvailable }) {
+            let localeID = recognizer.locale.identifier
+            return DoctorCheck(name: "voice", status: .pass, message: "Speech recognition authorized and available (locale: \(localeID)).")
+        }
+        return DoctorCheck(name: "voice", status: .warn, message: "Speech recognition is authorized but no recognizer is available for the current locale.")
+    case .denied, .restricted:
+        return DoctorCheck(name: "voice", status: .fail, message: "Speech recognition permission denied. Grant access in System Settings → Privacy & Security → Speech Recognition.")
+    case .notDetermined:
+        return DoctorCheck(name: "voice", status: .warn, message: "Speech recognition permission not yet requested. It will be prompted on first use of /voice or --voice.")
+    @unknown default:
+        return DoctorCheck(name: "voice", status: .warn, message: "Speech recognition authorization status unknown.")
+    }
+}
+#endif

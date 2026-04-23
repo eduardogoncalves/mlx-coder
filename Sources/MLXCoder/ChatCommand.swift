@@ -175,6 +175,8 @@ struct ChatCommand: AsyncParsableCommand {
         renderer.printStatus("[Key mode] Editing input. Enter sends, Shift+Tab cycles mode, Ctrl+C exits.")
 
         let interactiveInput = InteractiveInput()
+        interactiveInput.voiceSilenceTimeout = args.voiceSilenceTimeout
+        interactiveInput.voiceLocale = args.voiceLocale.map { Locale(identifier: $0) }
         var sandboxEnabled = effectiveSandbox
         var announcedGeneralFastFoundationRoute = false
         
@@ -320,7 +322,11 @@ struct ChatCommand: AsyncParsableCommand {
                 #if canImport(Speech)
                 renderer.printStatus("🎤 Starting voice input…")
                 do {
-                    let transcription = try await VoiceInput.transcribe()
+                    let voiceLocale = args.voiceLocale.map { Locale(identifier: $0) }
+                    let transcription = try await VoiceInput.transcribe(
+                        silenceTimeout: args.voiceSilenceTimeout,
+                        locale: voiceLocale
+                    )
                     renderer.printStatus("🎤 \"\(transcription)\"")
                     renderer.printStatus("[Key mode] Generation active. Press Esc to cancel.")
                     let task = Task {

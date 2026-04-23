@@ -69,17 +69,20 @@ public enum VoiceInput {
     /// speech, or immediately when the user presses **Enter** (or **Ctrl-C**).
     /// Live partial transcriptions are printed to `stdout` during recording.
     ///
-    /// - Parameter silenceTimeout: Seconds of silence after which recording stops
-    ///   automatically. Defaults to `2.0`.
+    /// - Parameters:
+    ///   - silenceTimeout: Seconds of silence after which recording stops
+    ///     automatically. Defaults to `2.0`.
+    ///   - locale: The locale to use for speech recognition. When `nil` the
+    ///     device's current locale is tried first, then `en-US` as a fallback.
     /// - Returns: The final recognised string.
     /// - Throws: ``VoiceInputError`` when speech recognition is unavailable,
     ///   unauthorised, the audio engine fails, or no speech is detected.
-    public static func transcribe(silenceTimeout: TimeInterval = 2.0) async throws -> String {
-        // Try the device's current locale first; fall back to English.
+    public static func transcribe(silenceTimeout: TimeInterval = 2.0, locale: Locale? = nil) async throws -> String {
+        // Locale priority: explicit → device current → en-US fallback.
         let recognizer: SFSpeechRecognizer
-        if let r = SFSpeechRecognizer(locale: Locale.current), r.isAvailable {
-            recognizer = r
-        } else if let r = SFSpeechRecognizer(locale: Locale(identifier: "en-US")), r.isAvailable {
+        let localesToTry: [Locale] = locale.map { [$0, Locale.current, Locale(identifier: "en-US")] }
+            ?? [Locale.current, Locale(identifier: "en-US")]
+        if let r = localesToTry.compactMap({ SFSpeechRecognizer(locale: $0) }).first(where: { $0.isAvailable }) {
             recognizer = r
         } else {
             throw VoiceInputError.notAvailable

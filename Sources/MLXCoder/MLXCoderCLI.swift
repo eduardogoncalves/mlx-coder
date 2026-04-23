@@ -126,5 +126,11 @@ struct ModelArguments: ParsableArguments, Sendable {
     @Option(name: .long, help: "Initial working mode (agent or plan)")
     var mode: String = "plan"
 
+    @Option(name: .long, help: "Seconds of silence before voice recording stops automatically (default: 2.0)")
+    var voiceSilenceTimeout: Double = 2.0
+
+    @Option(name: .long, help: "BCP 47 locale tag for speech recognition, e.g. en-US, fr-FR (default: device locale, then en-US)")
+    var voiceLocale: String?
+
     @OptionGroup var testAbsorber: TestAbsorber
 }
