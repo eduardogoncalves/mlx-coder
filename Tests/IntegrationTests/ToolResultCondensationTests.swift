@@ -174,4 +174,16 @@ final class ToolResultCondensationTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(after, 200)
         XCTAssertLessThanOrEqual(after, 400)
     }
+
+    func testInstructionTemplateIsToolSpecificForBash() {
+        let instruction = ToolResultCondensationPolicy.instructionTemplate(for: "bash")
+        XCTAssertTrue(instruction.contains("final status"))
+        XCTAssertTrue(instruction.contains("progress spam"))
+    }
+
+    func testInstructionTemplateIsToolSpecificForReadFile() {
+        let instruction = ToolResultCondensationPolicy.instructionTemplate(for: "read_file")
+        XCTAssertTrue(instruction.contains("structural snapshot"))
+        XCTAssertTrue(instruction.contains("line ranges"))
+    }
 }

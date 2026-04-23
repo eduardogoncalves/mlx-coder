@@ -10,6 +10,10 @@ extension AgentLoop {
     func makeToolResponseForHistory(toolName: String, result: ToolResult, userGoal: String) async throws -> String {
         let rawToolResponse = ToolResultCondensationPolicy.joinedToolOutput(result: result)
 
+        guard useShadowContextForToolResults else {
+            return applyFactOnlyPreambleIfNeeded(toolName: toolName, toolResponse: rawToolResponse)
+        }
+
         guard ToolResultCondensationPolicy.shouldCondense(toolName: toolName, result: result, config: condensationConfig) else {
             return applyFactOnlyPreambleIfNeeded(toolName: toolName, toolResponse: rawToolResponse)
         }
@@ -106,6 +110,7 @@ extension AgentLoop {
         let extractionGoal = effectiveGoal.isEmpty
             ? "No explicit user goal is available. Extract only the most relevant facts for likely task completion."
             : effectiveGoal
+        let toolSpecificInstructions = ToolResultCondensationPolicy.instructionTemplate(for: toolName)
 
         let systemPrompt = "You are a precise extraction engine. Return only facts relevant to the current goal."
         let userPrompt = """
@@ -120,6 +125,7 @@ extension AgentLoop {
         - Keep exact numbers, names, dates, versions, and quoted phrases unchanged.
         - Do not add outside knowledge.
         - If information is missing or ambiguous, explicitly say so.
+        \(toolSpecificInstructions)
         - Keep the response under \(condensationConfig.summaryTargetTokens) tokens.
 
         Raw tool output:
