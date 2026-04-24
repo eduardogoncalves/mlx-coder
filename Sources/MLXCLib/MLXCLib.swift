@@ -186,20 +186,12 @@ final class MLXCLibSession: @unchecked Sendable {
         onToken: @escaping @Sendable (UnsafePointer<CChar>, Int) -> Void,
         onDone:  @escaping @Sendable (String?) -> Void
     ) {
-        fputs("[Swift] generate() called with prompt: \(prompt)\n", stderr)
         let task = Task.detached { [weak self] in
-            fputs("[Swift] Task.detached started\n", stderr)
-            guard let self else { 
-                fputs("[Swift] self deallocated\n", stderr)
-                onDone("Session deallocated")
-                return 
-            }
+            guard let self else { onDone("Session deallocated"); return }
 
             let container = readModel()
-            fputs("[Swift] readModel() returned: \(container != nil ? "ok" : "nil")\n", stderr)
 
             guard let container else {
-                fputs("[Swift] No container, calling onDone\n", stderr)
                 onDone("No model loaded. Call mlxclib_load_model() first.")
                 return
             }
@@ -208,14 +200,11 @@ final class MLXCLibSession: @unchecked Sendable {
             nonisolated(unsafe) var tokenCount = 0
 
             do {
-                fputs("[Swift] Calling container.perform\n", stderr)
                 try await container.perform { ctx in
-                    fputs("[Swift] Inside container.perform\n", stderr)
                     if Task.isCancelled { throw CancellationError() }
 
                     // Build a safe, non-empty token sequence.
                     let inputIDs = ctx.tokenizer.encode(text: prompt, addSpecialTokens: true)
-                    fputs("[Swift] Tokenized into \(inputIDs.count) tokens\n", stderr)
                     guard !inputIDs.isEmpty else {
                         throw NSError(
                             domain: "MLXCLib",
@@ -232,7 +221,6 @@ final class MLXCLibSession: @unchecked Sendable {
                     var accumulatedIDs: [Int] = []
                     var lastText = ""
 
-                    fputs("[Swift] Starting token generation\n", stderr)
                     let tokenStream = try MLXLMCommon.generateTokens(
                         input: input,
                         parameters: parameters,
@@ -240,7 +228,6 @@ final class MLXCLibSession: @unchecked Sendable {
                     )
 
                     for await item in tokenStream {
-                        fputs("[Swift] Got item from tokenStream\n", stderr)
                         if Task.isCancelled { throw CancellationError() }
 
                         switch item {
@@ -255,9 +242,7 @@ final class MLXCLibSession: @unchecked Sendable {
                             lastText  = text
 
                             if !delta.isEmpty {
-                                fputs("[Swift] Calling onToken with \(delta.utf8.count) bytes: \(delta)\n", stderr)
                                 delta.withCString { onToken($0, delta.utf8.count) }
-                                fputs("[Swift] onToken returned\n", stderr)
                             }
 
                             tokenCount &+= 1
@@ -271,14 +256,11 @@ final class MLXCLibSession: @unchecked Sendable {
                 let elapsed = max(-t0.timeIntervalSinceNow, 1e-9)
                 updateStats(tokenCount: UInt64(tokenCount), elapsed: elapsed)
 
-                fputs("[Swift] Generation complete, calling onDone\n", stderr)
                 onDone(nil)
 
             } catch is CancellationError {
-                fputs("[Swift] Generation cancelled\n", stderr)
                 onDone(nil)     // clean cancellation — not an error
             } catch {
-                fputs("[Swift] Generation error: \(error.localizedDescription)\n", stderr)
                 onDone(error.localizedDescription)
             }
         }
@@ -445,26 +427,18 @@ public func mlxclib_generate(
     _ doneCB:     CDoneCB?,
     _ userData:   UnsafeMutableRawPointer?
 ) {
-    fputs("[mlxclib_generate] called\n", stderr)
-    guard let sessionPtr, let promptPtr, let doneCB else {
-        fputs("[mlxclib_generate] missing args\n", stderr)
-        return
-    }
-    fputs("[mlxclib_generate] args OK\n", stderr)
+    guard let sessionPtr, let promptPtr, let doneCB else { return }
     let session = Unmanaged<MLXCLibSession>.fromOpaque(sessionPtr).takeUnretainedValue()
     let prompt  = String(cString: promptPtr)
     let tcb     = tokenCB
     nonisolated(unsafe) let ud = userData
 
-    fputs("[mlxclib_generate] calling session.generate with prompt: \(prompt)\n", stderr)
     session.generate(
         prompt: prompt,
         onToken: { cStr, len in
-            fputs("[mlxclib_generate->onToken] calling callback\n", stderr)
             tcb?(cStr, len, ud)
         },
         onDone: { errMsg in
-            fputs("[mlxclib_generate->onDone] calling done callback\n", stderr)
             if let errMsg {
                 errMsg.withCString { doneCB($0, ud) }
             } else {

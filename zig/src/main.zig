@@ -47,11 +47,8 @@ export fn onToken(
     _user_data: ?*anyopaque,
 ) callconv(.c) void {
     _ = _user_data;
-    std.debug.print("[onToken] len={}, g_io_initialized={}\n", .{ len, g_io_initialized });
     if (token) |t| {
-        std.debug.print("[onToken] pushing {s}\n", .{t[0..len]});
         g_queue.push(t[0..len]);
-        std.debug.print("[onToken] pushed OK\n", .{});
     }
 }
 

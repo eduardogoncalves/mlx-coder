@@ -253,12 +253,8 @@ pub const TUI = struct {
             const n = self.token_queue.pop(&tmp);
             if (n == 0) break;
             any = true;
-            std.debug.print("[drainQueue] got {} bytes: {s}\n", .{ n, tmp[0..n] });
             try self.response_buf.appendSlice(self.allocator, tmp[0..n]);
             try self.appendOutput(tmp[0..n], "");
-        }
-        if (!any) {
-            std.debug.print("[drainQueue] queue empty\n", .{});
         }
         return any;
     }
@@ -271,8 +267,18 @@ pub const TUI = struct {
         // Refresh stats
         bridge.mlxclib_get_stats(session, &self.last_stats);
 
+        try self.writeAll(CLEAR_SCREEN);
         try self.writeAll(SAVE_CURSOR);
         try self.drawStatusBar();
+        
+        // Draw response output area (rows 2-N)
+        try self.printFmt("{s}2;1H", .{ ESC });
+        if (self.response_buf.items.len > 0) {
+            try self.writeAll(CYAN);
+            try self.writeAll(self.response_buf.items);
+            try self.writeAll(RESET);
+        }
+        
         if (self.approval.pending and !self.approval.answered) {
             try self.drawApprovalModal();
         }
