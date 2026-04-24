@@ -29,7 +29,7 @@ struct UpdateCommand: AsyncParsableCommand {
     mutating func run() async throws {
         guard !testAbsorber.isTestInvocation else { return }
 
-        let currentVersion = MLXCoderCLI.configuration.version ?? "0.0.0"
+        let currentVersion = MLXCoderCLI.configuration.version
 
         if json {
             try await runJSON(currentVersion: currentVersion)
