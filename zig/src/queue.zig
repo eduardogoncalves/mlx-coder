@@ -13,6 +13,9 @@ const std = @import("std");
 
 pub const TokenQueue = struct {
     const CAP = 8192;
+    // Classic ring-buffer: one slot is sacrificed to distinguish full from empty
+    // (write+1 == read means full; read == write means empty).
+    // Effective capacity is therefore CAP-1 = 8191 bytes per push-cycle.
 
     buf:   [CAP]u8 = undefined,
     write: usize   = 0,

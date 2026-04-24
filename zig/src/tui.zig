@@ -144,7 +144,9 @@ pub const TUI = struct {
 
     fn queryTermSize(self: *TUI) void {
         var ws: std.posix.winsize = undefined;
-        const TIOCGWINSZ: u32 = 0x40087468; // macOS value
+        // TIOCGWINSZ ioctl number is macOS/BSD-specific (0x40087468).
+        // This entire TUI module targets macOS only, matching the MLX requirement.
+        const TIOCGWINSZ: u32 = 0x40087468;
         const rc = std.posix.system.ioctl(
             self.out.handle,
             TIOCGWINSZ,

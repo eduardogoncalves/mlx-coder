@@ -101,9 +101,12 @@ fn enterRawMode(saved: *Termios) !void {
     raw.lflag.ICANON = false;
     raw.lflag.ECHO   = false;
     raw.lflag.ISIG   = false;
-    // Non-blocking single-byte reads.
+    // Non-blocking single-byte reads: V.MIN=0, V.TIME=0 means return
+    // immediately with whatever bytes are available (0 or 1).
+    // The event loop controls frame timing via nanosleep; a per-read
+    // timeout would add unnecessary latency floor.
     raw.cc[@intFromEnum(std.posix.V.MIN)]  = 0;
-    raw.cc[@intFromEnum(std.posix.V.TIME)] = 1; // 0.1 s read timeout
+    raw.cc[@intFromEnum(std.posix.V.TIME)] = 0;
     try std.posix.tcsetattr(std.posix.STDIN_FILENO, .FLUSH, raw);
 }
 
@@ -116,7 +119,7 @@ fn leaveRawMode(saved: *const Termios) void {
 // ---------------------------------------------------------------------------
 
 const Args = struct {
-    model_path: []const u8 = "~/models/Qwen/Qwen3-4B-4bit",
+    model_path: []const u8,
 };
 
 fn parseArgs(allocator: std.mem.Allocator) !Args {
@@ -124,11 +127,17 @@ fn parseArgs(allocator: std.mem.Allocator) !Args {
     defer args.deinit();
     _ = args.next(); // program name
 
-    var result = Args{};
-    if (args.next()) |arg| {
-        result.model_path = arg;
-    }
-    return result;
+    const model_path = args.next() orelse {
+        std.debug.print(
+            \\Usage: mlx-coder-tui <model-path>
+            \\
+            \\  model-path  Path to a local model directory (e.g. ~/models/Qwen/Qwen3-4B-4bit)
+            \\              or a Hugging Face Hub ID (e.g. Qwen/Qwen3-4B-4bit).
+            \\
+        , .{});
+        return error.MissingModelPath;
+    };
+    return Args{ .model_path = model_path };
 }
 
 // ---------------------------------------------------------------------------

@@ -208,8 +208,14 @@ final class MLXCLibSession: @unchecked Sendable {
                     if Task.isCancelled { throw CancellationError() }
 
                     // Build a safe, non-empty token sequence.
-                    var inputIDs = ctx.tokenizer.encode(text: prompt, addSpecialTokens: true)
-                    if inputIDs.isEmpty { inputIDs = [ctx.tokenizer.encode(text: " ", addSpecialTokens: false).first ?? 0] }
+                    let inputIDs = ctx.tokenizer.encode(text: prompt, addSpecialTokens: true)
+                    guard !inputIDs.isEmpty else {
+                        throw NSError(
+                            domain: "MLXCLib",
+                            code: 1,
+                            userInfo: [NSLocalizedDescriptionKey: "Tokenizer produced an empty token sequence for the given prompt."]
+                        )
+                    }
 
                     let input      = LMInput(tokens: MLXArray(inputIDs))
                     let parameters = GenerateParameters(temperature: 0.6, topP: 1.0)
