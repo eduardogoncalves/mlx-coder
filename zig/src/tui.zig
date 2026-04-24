@@ -19,6 +19,8 @@ const queue  = @import("queue.zig");
 const bridge = @import("bridge.zig");
 const main   = @import("main.zig");
 const spinner = @import("spinner.zig");
+const messages = @import("messages.zig");
+const message_renderer = @import("message_renderer.zig");
 
 // ANSI escape helpers
 const ESC  = "\x1b[";
@@ -85,8 +87,12 @@ pub const TUI = struct {
 
     // Token streaming
     token_queue: *queue.TokenQueue,
-    response_buf: std.ArrayList(u8),  // accumulates the current assistant response
+    response_buf: [16384]u8 = undefined,  // accumulates the current assistant response
+    response_len: usize = 0,
 
+    // Message history for enhanced OpenCode-like rendering
+    message_history: messages.MessageHistory,
+    
     // Input
     input_buf:   [4096]u8 = undefined,
     input_len:   usize    = 0,
@@ -103,6 +109,10 @@ pub const TUI = struct {
 
     // Stats cache (refreshed before each status-bar repaint)
     last_stats:  bridge.MLXCStats = std.mem.zeroes(bridge.MLXCStats),
+    
+    // Layout tracking for multi-pane display
+    scroll_offset: usize = 0,  // Current scroll position in message history
+    max_visible_messages: usize = 100,  // Max messages to render on screen
 
     // ---------------------------------------------------------------------------
 
@@ -111,12 +121,12 @@ pub const TUI = struct {
             .allocator    = allocator,
             .io           = main.g_io,
             .token_queue  = tq,
-            .response_buf = std.ArrayList(u8).empty,
+            .message_history = messages.MessageHistory.init(allocator),
         };
     }
 
     pub fn deinit(self: *TUI) void {
-        self.response_buf.deinit(self.allocator);
+        self.message_history.deinit();
     }
 
     fn printFmt(self: *TUI, comptime fmt: []const u8, args: anytype) !void {
@@ -267,7 +277,11 @@ pub const TUI = struct {
             const n = self.token_queue.pop(&tmp);
             if (n == 0) break;
             any = true;
-            try self.response_buf.appendSlice(self.allocator, tmp[0..n]);
+            // Append to response buffer if space available
+            if (self.response_len + n <= self.response_buf.len) {
+                @memcpy(self.response_buf[self.response_len..self.response_len + n], tmp[0..n]);
+                self.response_len += n;
+            }
             try self.appendOutput(tmp[0..n], "");
         }
         return any;
@@ -286,9 +300,9 @@ pub const TUI = struct {
         
         // Draw response output area (rows 2-N)
         try self.printFmt("{s}2;1H", .{ ESC });
-        if (self.response_buf.items.len > 0) {
+        if (self.response_len > 0) {
             try self.writeAll(CYAN);
-            try self.writeAll(self.response_buf.items);
+            try self.writeAll(self.response_buf[0..self.response_len]);
             try self.writeAll(RESET);
         }
         
@@ -323,5 +337,75 @@ pub const TUI = struct {
         const n = @min(name.len, self.model_name.len - 1);
         @memcpy(self.model_name[0..n], name[0..n]);
         self.model_name[n] = 0;
+    }
+    
+    // -----------------------------------------------------------------------
+    // Enhanced message handling for OpenCode-like rendering
+    // -----------------------------------------------------------------------
+    
+    /// Add a thinking message to history
+    pub fn addThinkingMessage(self: *TUI, content: []const u8) !void {
+        const msg = try messages.ThinkingMessage.create(self.allocator, content);
+        try self.message_history.append(msg);
+    }
+    
+    /// Add a tool call message to history
+    pub fn addToolCallMessage(self: *TUI, tool_name: []const u8, args_json: []const u8) !void {
+        const msg = try messages.ToolCallMessage.create(self.allocator, tool_name, args_json);
+        try self.message_history.append(msg);
+    }
+    
+    /// Add a tool result message to history
+    pub fn addToolResultMessage(self: *TUI, tool_name: []const u8, success: bool, result: []const u8) !void {
+        const msg = try messages.ToolResultMessage.create(self.allocator, tool_name, success, result);
+        try self.message_history.append(msg);
+    }
+    
+    /// Add a status message to history
+    pub fn addStatusMessage(self: *TUI, text: []const u8, is_error: bool) !void {
+        const msg = try messages.StatusMessage.create(self.allocator, text, is_error);
+        try self.message_history.append(msg);
+    }
+    
+    /// Render the message history in the content pane
+    fn renderMessageHistory(self: *TUI) !void {
+        const msg_count = self.message_history.getCount();
+        if (msg_count == 0) return;
+        
+        // Position cursor at content start (row 2, after status bar)
+        try self.printFmt("{s}2;1H", .{ ESC });
+        
+        const start_idx = if (self.scroll_offset > msg_count)
+            0
+        else
+            msg_count - self.scroll_offset;
+        
+        var idx = start_idx;
+        var row: u16 = 2;
+        const max_rows = self.term_rows - 3;  // Leave room for status and input
+        
+        while (idx < msg_count and row < max_rows) {
+            if (self.message_history.getMessage(idx)) |msg| {
+                // Render message (simplified - in real implementation would handle wrapping)
+                const rendered = message_renderer.MessageRenderer.renderMessage(msg, self.term_cols);
+                try self.writeAll(rendered);
+                row += @intCast(std.mem.count(u8, rendered, "\n"));
+            }
+            idx += 1;
+        }
+    }
+    
+    /// Scroll message history up
+    pub fn scrollUp(self: *TUI) void {
+        if (self.scroll_offset < 50) {
+            self.scroll_offset += 1;
+        }
+    }
+    
+    /// Scroll message history down
+    pub fn scrollDown(self: *TUI) void {
+        if (self.scroll_offset > 0) {
+            self.scroll_offset -= 1;
+        }
     }
 };
