@@ -21,6 +21,8 @@
 #       binary ships pre-warmed MTLLibrary caches and avoids first-run crashes.
 #    4. Runs the test suite to verify correctness.
 #    5. Builds distributable artifacts (.tar.gz, .pkg, .sha256 via build-and-release.sh).
+#       If zig is present, also builds mlx-coder-tui and creates a companion
+#       mlx-coder-tui-<version>-arm64.tar.gz / .sha256 artifact.
 #    6. Commits Package.resolved, tags, and pushes.
 #
 #    Note: with --build-only, step 2 still runs so Package.resolved stays fresh;
@@ -156,6 +158,18 @@ for tool in swift git xcodebuild; do
   fi
 done
 log_ok "Required tools present (swift, git, xcodebuild)"
+
+# Optional: zig is required only for the TUI binary; the rest of the pipeline
+# continues normally when it is absent.
+ZIG_AVAILABLE=false
+TUI_BIN_PATH=""
+TUI_ARCHIVE=""
+if command -v zig &>/dev/null; then
+  ZIG_AVAILABLE=true
+  log_ok "zig found – mlx-coder-tui will be built"
+else
+  log_warn "zig not found – skipping mlx-coder-tui build (install from https://ziglang.org/download/)"
+fi
 
 # Must be on main branch (skipped with --build-only since no git operations occur)
 if ! $BUILD_ONLY; then
