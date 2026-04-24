@@ -485,6 +485,30 @@ struct ChatCommand: AsyncParsableCommand {
                 continue
             }
 
+            if trimmed.hasPrefix("/btw ") {
+                let question = String(trimmed.dropFirst("/btw ".count)).trimmingCharacters(in: .whitespacesAndNewlines)
+                if question.isEmpty {
+                    renderer.printError("Usage: /btw <question>")
+                } else {
+                    renderer.printStatus("[btw] Side question (main context will be restored after).")
+                    renderer.printStatus("[Key mode] Generation active. Press Esc to cancel.")
+                    let task = Task {
+                        try await agentLoop.processEphemeralMessage(question)
+                        renderer.printStatus("[btw] Side question answered. Main context restored.")
+                    }
+                    await CancelController.shared.setTask(task)
+                    do {
+                        try await task.value
+                    } catch is CancellationError {
+                        renderer.printError("[btw] Generation cancelled.")
+                    } catch {
+                        renderer.printError(error.localizedDescription)
+                    }
+                    await CancelController.shared.setTask(nil)
+                }
+                continue
+            }
+
             // Memory commands
             if trimmed.hasPrefix("/memory") {
                 await handleMemoryCommand(
@@ -663,6 +687,7 @@ func printREPLHelp() {
       \u{001B}[32m/thinking [lvl]\u{001B}[0m Set thinking budget: fast/off, minimal, low, medium, high (default: low)
       \u{001B}[32m/steer [msg]\u{001B}[0m   Queue a steering message injected between agent turns (no arg = list queue)
       \u{001B}[32m/followup [msg]\u{001B}[0m Queue a follow-up run after the current task (no arg = list queue)
+      \u{001B}[32m/btw <question>\u{001B}[0m Ask a quick side question without affecting the main conversation
       \u{001B}[32m/merge-approval\u{001B}[0m Trigger the "Awaiting approval before merge" flow
       \u{001B}[32m/gittree\u{001B}[0m       List git worktrees and switch workspace/branch to one
       \u{001B}[32m/sandbox\u{001B}[0m       Toggle macOS Seatbelt sandbox for shell commands

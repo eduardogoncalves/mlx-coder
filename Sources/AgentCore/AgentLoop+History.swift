@@ -115,4 +115,20 @@ extension AgentLoop {
                 \(toolsWarning)
         """
     }
+
+    /// Process a side question without affecting the main conversation history.
+    ///
+    /// The current history snapshot is saved, the question is answered in the
+    /// normal generation pipeline, and the history is restored afterwards so
+    /// the main task context is completely unaffected.
+    ///
+    /// - Parameter message: The side question to answer.
+    /// - Throws: On model loading or generation errors.
+    public func processEphemeralMessage(_ message: String) async throws {
+        // AgentLoop is an actor, so all access to `history` is already serialized.
+        // Saving and restoring via defer is safe: no concurrent mutation can occur.
+        let savedHistory = history
+        defer { history = savedHistory }
+        try await processUserMessage(message)
+    }
 }
