@@ -7,11 +7,11 @@ import Foundation
 public struct WriteFileTool: Tool {
     public let name = "write_file"
     public let description = """
-        Create a new file or completely replace all content of an existing file. \
-        Use this to scaffold a brand-new file or when a file needs a full rewrite from scratch. \
-        Do NOT use for partial modifications to an existing file \
-        (use edit_file for a single targeted substitution or patch for multi-location changes), \
-        and do NOT use merely to append content at the end (use append_file instead).
+        Create a brand-new file only — fails if the file already exists. \
+        Use this to scaffold a new file that does not yet exist. \
+        For partial modifications to an existing file, use patch_file (for multi-location changes) \
+        or edit_file (for a single targeted substitution). \
+        Do NOT use to append content at the end of a file (use append_file instead).
         """
     public let parameters = JSONSchema(
         type: "object",
@@ -44,6 +44,14 @@ public struct WriteFileTool: Tool {
         }
 
         do {
+            // Fail if file already exists — use patch_file or edit_file for modifications
+            guard !FileManager.default.fileExists(atPath: resolvedPath) else {
+                return .error(
+                    "File already exists: \(path). Use patch_file to modify an existing file, " +
+                    "or edit_file for a single targeted substitution."
+                )
+            }
+
             // Create parent directories if needed
             let parentDir = (resolvedPath as NSString).deletingLastPathComponent
             try FileManager.default.createDirectory(
