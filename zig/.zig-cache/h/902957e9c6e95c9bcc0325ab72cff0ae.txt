@@ -1,6 +1,6 @@
 0
 13449 33720588 1777067177939211563 b7150f543b6848f0e9bc37f0ed478de3 0 src/main.zig
-44068016 33728130 1777067377386694184 c17dc0b207710817b8ed5576671baf34 0 /Users/eduardogoncalves/Documents/GitHub/mlx-coder/zig/libs/libMLXCLib.dylib
+44068016 33728130 1777068105125745643 c17dc0b207710817b8ed5576671baf34 0 /Users/eduardogoncalves/Documents/GitHub/mlx-coder/zig/libs/libMLXCLib.dylib
 5602569 28300674 1772254183000000000 72c4cbe1e3b6471f01517eb0a2e5f438 0 /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.4.sdk/System/Library/Frameworks/Foundation.framework/Foundation.tbd
 53854 28289332 1772175437000000000 730e00d6be444d572900470cf93a15be 0 /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.4.sdk/System/Library/Frameworks/Metal.framework/Metal.tbd
 381966 28293648 1772183199000000000 9bf1d03282aaf9848f82526a4deee1f5 0 /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.4.sdk/System/Library/Frameworks/Accelerate.framework/Accelerate.tbd
@@ -819,4 +819,4 @@
 13449 33720588 1777067177939211563 b7150f543b6848f0e9bc37f0ed478de3 0 /Users/eduardogoncalves/Documents/GitHub/mlx-coder/zig/src/main.zig
 3017 33720587 1777055237067354086 66d57566369afe6dea0d5047f638a8b9 0 /Users/eduardogoncalves/Documents/GitHub/mlx-coder/zig/src/bridge.zig
 4160 33720589 1777066424112718145 4fa4447ebc21e583597951b023e0396a 0 /Users/eduardogoncalves/Documents/GitHub/mlx-coder/zig/src/queue.zig
-12700 33720590 1777067373719742813 c748eea6395bdfdb81682d1cbeff17d4 0 /Users/eduardogoncalves/Documents/GitHub/mlx-coder/zig/src/tui.zig
+12617 33720590 1777068099385746232 00745a6483faad51dec43141744f6254 0 /Users/eduardogoncalves/Documents/GitHub/mlx-coder/zig/src/tui.zig

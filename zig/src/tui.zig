@@ -268,7 +268,6 @@ pub const TUI = struct {
         bridge.mlxclib_get_stats(session, &self.last_stats);
 
         try self.writeAll(CLEAR_SCREEN);
-        try self.writeAll(SAVE_CURSOR);
         try self.drawStatusBar();
         
         // Draw response output area (rows 2-N)
@@ -283,7 +282,6 @@ pub const TUI = struct {
             try self.drawApprovalModal();
         }
         try self.drawInputLine();
-        try self.writeAll(RESTORE_CURSOR);
     }
 
     // -----------------------------------------------------------------------
