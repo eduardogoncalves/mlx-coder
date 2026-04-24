@@ -8,10 +8,11 @@ import Foundation
 public struct PatchFileTool: Tool {
     public let name = "patch_file"
     public let description = """
-        Modify an existing file using a unified diff ('diff') or a targeted search-and-replace \
-        ('old_text' + 'new_text'). \
-        Use 'diff' when changes touch multiple non-adjacent locations or when you already have a \
-        unified diff; use 'old_text'+'new_text' for a single targeted substitution where old_text \
+        Modify an existing file in-place. \
+        ALWAYS include 'path' — it is required and must be the first argument. \
+        Then specify exactly one mutation strategy: \
+        supply 'diff' (unified diff) for changes that touch multiple non-adjacent locations, \
+        or supply 'old_text' + 'new_text' for a single targeted substitution where old_text \
         appears exactly once. \
         Use write_file only when creating a brand-new file that does not yet exist. \
         Use read_file to inspect a file before editing.
@@ -21,7 +22,7 @@ public struct PatchFileTool: Tool {
         properties: [
             "path": PropertySchema(
                 type: "string",
-                description: "Path to the file to modify (relative to workspace root). Must already exist."
+                description: "REQUIRED. Path to the file to modify (relative to workspace root). Must already exist. Always provide this — the tool will fail without it."
             ),
             "diff": PropertySchema(
                 type: "string",
