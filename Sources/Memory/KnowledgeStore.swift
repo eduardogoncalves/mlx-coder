@@ -293,7 +293,7 @@ public actor KnowledgeStore {
         }
         
         let sql: String
-        if let type {
+        if type != nil {
             sql = """
                 SELECT * FROM knowledge 
                 WHERE project_root = ? AND type = ?

@@ -522,7 +522,7 @@ public struct ParameterCorrectionService: Sendable {
         if corrected["command"] == nil {
             corrections.append("Added missing 'command' parameter (empty string)")
             corrected["command"] = ""
-        } else if var command = corrected["command"] as? String {
+        } else if let command = corrected["command"] as? String {
             // Trim whitespace from command
             let trimmed = command.trimmingCharacters(in: .whitespacesAndNewlines)
             if trimmed != command {
