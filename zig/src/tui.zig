@@ -18,6 +18,7 @@ const std    = @import("std");
 const queue  = @import("queue.zig");
 const bridge = @import("bridge.zig");
 const main   = @import("main.zig");
+const spinner = @import("spinner.zig");
 
 // ANSI escape helpers
 const ESC  = "\x1b[";
@@ -96,6 +97,9 @@ pub const TUI = struct {
     // State flags
     generating:  bool = false,
     model_name:  [256]u8 = std.mem.zeroes([256]u8),
+
+    // Animation frame counter for spinner
+    frame_count: usize = 0,
 
     // Stats cache (refreshed before each status-bar repaint)
     last_stats:  bridge.MLXCStats = std.mem.zeroes(bridge.MLXCStats),
@@ -178,14 +182,20 @@ pub const TUI = struct {
         const loaded = self.last_stats.model_loaded != 0;
 
         if (loaded) {
-            try self.printFmt(BOLD ++ CYAN ++ " mlx-coder " ++ RESET
-                ++ " │ model: {s}"
-                ++ DIM ++ "  {d:.1} tok/s" ++ RESET,
-                .{ modelLabel, speed });
+            // Format: ╭─ mlx-coder ─ model: <name> ─ 12.3 tok/s
+            try self.printFmt(
+                BOLD ++ "╭─ " ++ CYAN ++ "mlx-coder" ++ RESET ++ BOLD ++ " ─ " ++ RESET ++
+                "model: {s}" ++
+                DIM ++ "  ({d:.1} tok/s)" ++ RESET,
+                .{ modelLabel, speed }
+            );
         } else {
-            try self.printFmt(BOLD ++ CYAN ++ " mlx-coder " ++ RESET
-                ++ DIM ++ " (loading model…)" ++ RESET,
-                .{});
+            // Format: ╭─ mlx-coder ─ loading model…
+            try self.printFmt(
+                BOLD ++ "╭─ " ++ CYAN ++ "mlx-coder" ++ RESET ++ BOLD ++ " ─ " ++ RESET ++
+                DIM ++ "loading model…" ++ RESET,
+                .{}
+            );
         }
     }
 
@@ -206,9 +216,13 @@ pub const TUI = struct {
         const row = self.term_rows;
         try self.printFmt("{s}{d};1H{s}", .{ ESC, row, CLEAR_LINE });
 
-        const prompt = if (self.generating) DIM ++ "  (generating…)  " ++ RESET
-                       else GREEN ++ "> " ++ RESET;
-        try self.writeAll(prompt);
+        if (self.generating) {
+            // Show animated spinner with cyan color
+            const frame = spinner.getFrame(self.frame_count);
+            try self.printFmt("{s}  {s}  {s}", .{ CYAN, frame, RESET });
+        } else {
+            try self.writeAll(GREEN ++ "> " ++ RESET);
+        }
         try self.writeAll(self.input_buf[0..self.input_len]);
     }
 

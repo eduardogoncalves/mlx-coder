@@ -1,6 +1,6 @@
 0
-13449 33720588 1777067177939211563 b7150f543b6848f0e9bc37f0ed478de3 0 src/main.zig
-44068016 33728130 1777068105125745643 c17dc0b207710817b8ed5576671baf34 0 /Users/eduardogoncalves/Documents/GitHub/mlx-coder/zig/libs/libMLXCLib.dylib
+13554 33720588 1777068412915262018 ff460fc6bd1dbbb5209e2a4841ea3aad 0 src/main.zig
+44068016 33728130 1777068418445268205 c17dc0b207710817b8ed5576671baf34 0 /Users/eduardogoncalves/Documents/GitHub/mlx-coder/zig/libs/libMLXCLib.dylib
 5602569 28300674 1772254183000000000 72c4cbe1e3b6471f01517eb0a2e5f438 0 /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.4.sdk/System/Library/Frameworks/Foundation.framework/Foundation.tbd
 53854 28289332 1772175437000000000 730e00d6be444d572900470cf93a15be 0 /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.4.sdk/System/Library/Frameworks/Metal.framework/Metal.tbd
 381966 28293648 1772183199000000000 9bf1d03282aaf9848f82526a4deee1f5 0 /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.4.sdk/System/Library/Frameworks/Accelerate.framework/Accelerate.tbd
@@ -816,7 +816,8 @@
 419 33754431 1776106215000000000 ed7dfc04a5d0c4f0853edb5414ce981e 1 std/os/linux/bpf/btf_ext.zig
 24525 33754432 1776106215000000000 52c7fac6ad48da05270f91f073a4af79 1 std/os/linux/bpf/helpers.zig
 2972 33754180 1776106215000000000 8c37c40098d399e3b36a078ce1d4e3a1 1 std/crypto/codecs/asn1/der/ArrayListReverse.zig
-13449 33720588 1777067177939211563 b7150f543b6848f0e9bc37f0ed478de3 0 /Users/eduardogoncalves/Documents/GitHub/mlx-coder/zig/src/main.zig
+13554 33720588 1777068412915262018 ff460fc6bd1dbbb5209e2a4841ea3aad 0 /Users/eduardogoncalves/Documents/GitHub/mlx-coder/zig/src/main.zig
 3017 33720587 1777055237067354086 66d57566369afe6dea0d5047f638a8b9 0 /Users/eduardogoncalves/Documents/GitHub/mlx-coder/zig/src/bridge.zig
 4160 33720589 1777066424112718145 4fa4447ebc21e583597951b023e0396a 0 /Users/eduardogoncalves/Documents/GitHub/mlx-coder/zig/src/queue.zig
-12617 33720590 1777068099385746232 00745a6483faad51dec43141744f6254 0 /Users/eduardogoncalves/Documents/GitHub/mlx-coder/zig/src/tui.zig
+13127 33720590 1777068405163393996 cb93e7aa00e79b4a501ee39bd68bacd6 0 /Users/eduardogoncalves/Documents/GitHub/mlx-coder/zig/src/tui.zig
+1582 33804201 1777068367012107021 3837b42b710e4e2158f2b8c62641c009 0 /Users/eduardogoncalves/Documents/GitHub/mlx-coder/zig/src/spinner.zig

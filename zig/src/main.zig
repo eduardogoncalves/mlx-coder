@@ -16,6 +16,7 @@ const std    = @import("std");
 const bridge = @import("bridge.zig");
 const queue  = @import("queue.zig");
 const tui    = @import("tui.zig");
+const spinner = @import("spinner.zig");
 
 // ---------------------------------------------------------------------------
 // Shared state (process-global, accessed from C callbacks and the main loop)
@@ -324,6 +325,7 @@ pub fn main(init: std.process.Init) !void {
 
         // -- Periodic repaint ------------------------------------------------
         try ui.repaint(session);
+        ui.frame_count += 1;  // Increment for spinner animation
 
         // -- Frame-rate cap --------------------------------------------------
         const frame_end = g_io.vtable.now(g_io.userdata, .real).nanoseconds;
