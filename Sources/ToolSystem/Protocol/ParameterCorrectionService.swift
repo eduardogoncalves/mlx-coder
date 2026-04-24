@@ -43,10 +43,10 @@ public struct ParameterCorrectionService: Sendable {
         workspaceRoot: String
     ) async -> ParameterCorrectionResult {
         switch toolName {
-        case "write_file", "append_file":
+        case "write_file":
             return await correctFileWriteTool(arguments: arguments, workspaceRoot: workspaceRoot)
-        case "edit_file":
-            return await correctEditFileTool(arguments: arguments, workspaceRoot: workspaceRoot)
+        case "patch_file", "edit_file":
+            return await correctPatchFileTool(arguments: arguments, workspaceRoot: workspaceRoot)
         case "read_file":
             return await correctReadFileTool(arguments: arguments, workspaceRoot: workspaceRoot)
         case "patch":
@@ -254,6 +254,86 @@ public struct ParameterCorrectionService: Sendable {
             correctedArguments: corrected,
             corrections: corrections
         )
+    }
+
+    // MARK: - patch_file Tool (unified diff + search-and-replace)
+
+    private static func correctPatchFileTool(
+        arguments: [String: Any],
+        workspaceRoot: String
+    ) async -> ParameterCorrectionResult {
+        var corrected = arguments
+        var corrections: [String] = []
+
+        // Normalize path aliases
+        if corrected["path"] == nil {
+            let aliases = ["file_path", "filePath", "filepath", "target_path"]
+            if let key = aliases.first(where: { corrected[$0] is String }),
+               let val = corrected[key] as? String {
+                corrected["path"] = val
+                corrections.append("Mapped '\(key)' to 'path'")
+            }
+        }
+
+        guard var path = corrected["path"] as? String else {
+            return ParameterCorrectionResult(wasCorrected: !corrections.isEmpty, correctedArguments: corrected, corrections: corrections)
+        }
+
+        let originalPath = path
+        path = path.replacingOccurrences(of: "\\", with: "/")
+        if path != originalPath { corrections.append("Normalized path separators: '\(originalPath)' -> '\(path)'"); corrected["path"] = path }
+        if path.hasPrefix("/") {
+            let rel = String(path.dropFirst())
+            if !rel.isEmpty { corrections.append("Converted absolute path to relative"); corrected["path"] = rel; path = rel }
+        }
+        if path.hasPrefix("./") {
+            let stripped = String(path.dropFirst(2))
+            if !stripped.isEmpty { corrections.append("Stripped leading './'"); corrected["path"] = stripped; path = stripped }
+        }
+
+        // If diff mode — path normalization is all we need.
+        if let diff = corrected["diff"] as? String, !diff.isEmpty {
+            return ParameterCorrectionResult(wasCorrected: !corrections.isEmpty, correctedArguments: corrected, corrections: corrections)
+        }
+
+        // Search-and-replace mode: normalize old_text / new_text aliases.
+        if corrected["old_text"] == nil {
+            let aliases = ["oldText", "old", "search_text", "searchText", "target_text", "text_to_replace"]
+            if let key = aliases.first(where: { corrected[$0] is String }), let val = corrected[key] as? String {
+                corrected["old_text"] = val; corrections.append("Mapped '\(key)' to 'old_text'")
+            }
+        }
+        if corrected["new_text"] == nil {
+            let aliases = ["newText", "replacement", "replacement_text", "replace_with", "text", "content"]
+            if let key = aliases.first(where: { corrected[$0] is String }), let val = corrected[key] as? String {
+                corrected["new_text"] = val; corrections.append("Mapped '\(key)' to 'new_text'")
+            }
+        }
+
+        guard let oldText = corrected["old_text"] as? String, !oldText.isEmpty else {
+            return ParameterCorrectionResult(wasCorrected: !corrections.isEmpty, correctedArguments: corrected, corrections: corrections)
+        }
+        guard let newText = corrected["new_text"] as? String else {
+            return ParameterCorrectionResult(wasCorrected: !corrections.isEmpty, correctedArguments: corrected, corrections: corrections)
+        }
+
+        // Fuzzy old_text matching
+        let resolvedPath = (path as NSString).isAbsolutePath
+            ? path : (workspaceRoot as NSString).appendingPathComponent(path)
+
+        if FileManager.default.fileExists(atPath: resolvedPath),
+           let fileContent = try? String(contentsOfFile: resolvedPath, encoding: .utf8) {
+            if fileContent.contains(oldText) {
+                return ParameterCorrectionResult(wasCorrected: !corrections.isEmpty, correctedArguments: corrected, corrections: corrections)
+            }
+            if let bestMatch = findBestMatch(for: oldText, in: fileContent) {
+                corrections.append("Auto-corrected old_text (fuzzy match)")
+                corrected["old_text"] = bestMatch
+                corrected["new_text"] = newText
+            }
+        }
+
+        return ParameterCorrectionResult(wasCorrected: !corrections.isEmpty, correctedArguments: corrected, corrections: corrections)
     }
 
     /// Find the best matching substring in the file content for the given search text.

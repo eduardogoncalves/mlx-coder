@@ -77,7 +77,7 @@ public enum PromptComposer {
             CRITICAL INSTRUCTION: You have a maximum generation limit of \(maxTokens) tokens per turn.
             If you need to write or generate a file, you MUST build it incrementally.
             First, use the `write_file` tool to create the file with the minimal valid structure (scaffold).
-            Then, in subsequent turns, add one section at a time using `append_file` or `edit_file`. This ensures high quality and controlled generation.
+            Then, in subsequent turns, add one section at a time using `patch_file`. This ensures high quality and controlled generation.
             """
             let wrapped = wrap(section: .runtime, body: generationGuardrail)
             promptParts.append(wrapped)

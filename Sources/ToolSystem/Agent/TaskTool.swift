@@ -626,10 +626,8 @@ public struct TaskTool: Tool {
             await registry.register(WriteFileTool(permissions: permissions))
         case "append_file":
             await registry.register(AppendFileTool(permissions: permissions))
-        case "edit_file":
-            await registry.register(EditFileTool(permissions: permissions))
-        case "patch":
-            await registry.register(PatchTool(permissions: permissions))
+        case "edit_file", "patch_file", "patch":
+            await registry.register(PatchFileTool(permissions: permissions))
         case "list_dir":
             await registry.register(ListDirTool(permissions: permissions))
         case "read_many":

@@ -11,9 +11,11 @@ extension AgentLoop {
         // Filesystem tools
         await registry.register(ReadFileTool(permissions: permissions))
         await registry.register(WriteFileTool(permissions: permissions))
-        await registry.register(AppendFileTool(permissions: permissions))
-        await registry.register(EditFileTool(permissions: permissions))
-        await registry.register(PatchTool(permissions: permissions))
+        // AppendFileTool disabled — use patch_file for insertions at end of file
+        // await registry.register(AppendFileTool(permissions: permissions))
+        // EditFileTool absorbed into PatchFileTool — disabled
+        // await registry.register(EditFileTool(permissions: permissions))
+        await registry.register(PatchFileTool(permissions: permissions))
         await registry.register(ListDirTool(permissions: permissions))
         await registry.register(ReadManyTool(permissions: permissions))
 
@@ -72,7 +74,7 @@ extension AgentLoop {
     }
 
     func isDestructiveToolCall(_ call: ToolCallParser.ParsedToolCall) -> Bool {
-        let alwaysDestructiveTools: Set<String> = ["write_file", "edit_file", "append_file", "patch", "bash", "task"]
+        let alwaysDestructiveTools: Set<String> = ["write_file", "patch_file", "bash", "task"]
         if alwaysDestructiveTools.contains(call.name) {
             return true
         }
@@ -128,7 +130,8 @@ extension AgentLoop {
         // Generate and display the diff from the tool's proposed final file content.
         let previewContent: String
         switch call.toolName {
-        case "edit_file":
+        case "patch_file":
+            // Search-and-replace mode: tmp = new_text, old_text in otherArgs.
             if let originalContent,
                let oldText = (
                 (call.otherArgs["old_text"] as? String)
@@ -141,8 +144,6 @@ extension AgentLoop {
                let range = originalContent.range(of: oldText) {
                 previewContent = originalContent.replacingCharacters(in: range, with: tmpContent)
             } else {
-                // Fallback for malformed/partial arguments; execution-time correction
-                // still handles these cases before writing.
                 previewContent = tmpContent
             }
         case "append_file":
@@ -158,7 +159,7 @@ extension AgentLoop {
         let approval: (approved: Bool, suggestion: String?)
         if permissions.approvalMode == .yolo {
             approval = (true, nil)
-        } else if permissions.approvalMode == .autoEdit && !["write_file", "edit_file", "append_file"].contains(call.toolName) {
+        } else if permissions.approvalMode == .autoEdit && !["write_file", "patch_file"].contains(call.toolName) {
             // autoEdit only auto-approves edit tools
             var approvalArguments = call.otherArgs
             approvalArguments["path"] = call.path
@@ -195,59 +196,54 @@ extension AgentLoop {
                 }
                 return .success("Wrote \(call.path) (\(tmpContent.count) bytes)")
 
-            case "edit_file":
-                // For edit_file, the tmp contains new_text; we need old_text from otherArgs
+            case "patch_file":
+                // Search-and-replace mode: tmp = new_text, old_text in otherArgs.
                 guard let fileContent = originalContent else {
                     // Path not found — preserve new_text so the LLM only needs to fix the path.
                     preservedEditTmpFiles[call.path] = call.contentFile
                     return .error("File not found: \(call.path). new_text is preserved and will be reused automatically; only correct the path.")
                 }
 
-                // Streamed calls bypass normal execution-time correction, so run the same
-                // deterministic correction pipeline here for aliases and fuzzy old_text fixes.
+                // Run correction pipeline for aliases and fuzzy old_text fixes.
                 var streamedArguments = call.otherArgs
                 streamedArguments["path"] = call.path
                 streamedArguments["new_text"] = tmpContent
                 let correctionResult = await ParameterCorrectionService.correct(
-                    toolName: "edit_file",
+                    toolName: "patch_file",
                     arguments: streamedArguments,
                     workspaceRoot: permissions.effectiveWorkspaceRoot
                 )
                 if correctionResult.wasCorrected {
                     for correction in correctionResult.corrections {
-                        renderer.printStatus("[auto-correct] edit_file (streamed): \(correction)")
+                        renderer.printStatus("[auto-correct] patch_file (streamed): \(correction)")
                     }
                 }
 
                 guard let oldText = correctionResult.correctedArguments["old_text"] as? String,
                       !oldText.isEmpty else {
                     try? FileManager.default.removeItem(at: call.contentFile)
-                    return .error("Missing old_text for edit_file")
+                    return .error("Missing old_text for patch_file search-and-replace mode. Provide 'old_text' + 'new_text', or use 'diff' with a unified diff.")
                 }
                 let occurrences = fileContent.components(separatedBy: oldText).count - 1
                 if occurrences != 1 {
                     if occurrences == 0 {
-                        // Try semantic correction before giving up, passing tmpContent as new_text.
                         let fakeArgs: [String: Any] = ["path": call.path, "old_text": oldText, "new_text": tmpContent]
                         let fakeError = ToolResult.error("old_text not found in \(call.path). Make sure the text matches exactly.")
-                        if let correction = await attemptSemanticCorrection(toolName: "edit_file", arguments: fakeArgs, errorResult: fakeError) {
-                            renderer.printStatus("[auto-correct] Retrying streamed edit_file with corrected old_text...")
+                        if let correction = await attemptSemanticCorrection(toolName: "patch_file", arguments: fakeArgs, errorResult: fakeError) {
+                            renderer.printStatus("[auto-correct] Retrying streamed patch_file with corrected old_text...")
                             let corrected = fileContent.replacingOccurrences(of: correction.oldText, with: tmpContent)
                             do {
                                 try corrected.write(toFile: resolvedPath, atomically: true, encoding: .utf8)
                                 try? FileManager.default.removeItem(at: call.contentFile)
                                 return .success("Applied edit to \(call.path) (old_text auto-corrected)")
                             } catch {
-                                // Write failed even after correction — preserve tmp.
                                 preservedEditTmpFiles[call.path] = call.contentFile
                                 return .error("Failed to write \(call.path) after auto-correction: \(error.localizedDescription). new_text is preserved and will be reused automatically.")
                             }
                         }
-                        // Semantic correction unavailable or unsuccessful — preserve tmp.
                         preservedEditTmpFiles[call.path] = call.contentFile
                         return .error("old_text not found in \(call.path). Make sure the text matches exactly, including whitespace. new_text is preserved and will be reused automatically; only correct old_text.")
                     } else {
-                        // Duplicate match — preserve tmp and ask for more context.
                         preservedEditTmpFiles[call.path] = call.contentFile
                         return .error("old_text found \(occurrences) times in \(call.path). Must be unique — add more surrounding context to old_text. new_text is preserved and will be reused automatically.")
                     }
@@ -256,7 +252,6 @@ extension AgentLoop {
                 do {
                     try updatedContent.write(toFile: resolvedPath, atomically: true, encoding: .utf8)
                 } catch {
-                    // Write failed — preserve tmp for retry.
                     preservedEditTmpFiles[call.path] = call.contentFile
                     return .error("Failed to write \(call.path): \(error.localizedDescription). new_text is preserved and will be reused automatically; only correct the path or permissions.")
                 }

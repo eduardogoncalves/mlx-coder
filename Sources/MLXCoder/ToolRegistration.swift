@@ -18,9 +18,11 @@ func registerAllTools(
     // Filesystem tools
     await registry.register(ReadFileTool(permissions: permissions))
     await registry.register(WriteFileTool(permissions: permissions))
-    await registry.register(AppendFileTool(permissions: permissions))
-    await registry.register(EditFileTool(permissions: permissions))
-    await registry.register(PatchTool(permissions: permissions))
+    // AppendFileTool disabled — use patch_file for insertions at end of file
+    // await registry.register(AppendFileTool(permissions: permissions))
+    // EditFileTool absorbed into PatchFileTool — disabled
+    // await registry.register(EditFileTool(permissions: permissions))
+    await registry.register(PatchFileTool(permissions: permissions))
     await registry.register(ListDirTool(permissions: permissions))
     await registry.register(ReadManyTool(permissions: permissions))
 
