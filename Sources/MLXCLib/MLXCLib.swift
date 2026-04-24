@@ -170,9 +170,7 @@ final class MLXCLibSession: @unchecked Sendable {
                     progressHandler: { _ in }   // progress not surfaced through C ABI
                 )
 
-                self.modelLock.lock()
-                self.modelContainer = container
-                self.modelLock.unlock()
+                self.storeModel(container)
 
                 onDone(true, nil)
             } catch {
@@ -191,9 +189,7 @@ final class MLXCLibSession: @unchecked Sendable {
         let task = Task.detached { [weak self] in
             guard let self else { onDone("Session deallocated"); return }
 
-            modelLock.lock()
-            let container = modelContainer
-            modelLock.unlock()
+            let container = readModel()
 
             guard let container else {
                 onDone("No model loaded. Call mlxclib_load_model() first.")
@@ -258,11 +254,7 @@ final class MLXCLibSession: @unchecked Sendable {
                 }
 
                 let elapsed = max(-t0.timeIntervalSinceNow, 1e-9)
-                statsLock.lock()
-                statTotalTokens  &+= tokenCount
-                statTokenPerSec   = Double(tokenCount) / elapsed
-                statLatencyMs     = (elapsed / Double(max(tokenCount, 1))) * 1_000
-                statsLock.unlock()
+                updateStats(tokenCount: tokenCount, elapsed: elapsed)
 
                 onDone(nil)
 
@@ -313,6 +305,32 @@ final class MLXCLibSession: @unchecked Sendable {
 
     // MARK: - Stats
 
+    // Synchronous helpers for lock-protected access.
+    // NSLock.lock()/unlock() may not be called directly inside async task bodies
+    // in Swift 6; wrapping them in sync methods keeps the compiler happy while
+    // preserving the same thread-safety guarantees.
+    private func storeModel(_ container: ModelContainer) {
+        modelLock.lock()
+        modelContainer = container
+        modelLock.unlock()
+    }
+
+    private func readModel() -> ModelContainer? {
+        modelLock.lock()
+        defer { modelLock.unlock() }
+        return modelContainer
+    }
+
+    private func updateStats(tokenCount: UInt64, elapsed: Double) {
+        statsLock.lock()
+        statTotalTokens  &+= tokenCount
+        statTokenPerSec   = Double(tokenCount) / elapsed
+        statLatencyMs     = (elapsed / Double(max(tokenCount, 1))) * 1_000
+        statsLock.unlock()
+    }
+
+    // MARK: - Persisted stats (public read)
+
     struct StatsSnapshot {
         var latencyMs:    Double
         var tokensPerSec: Double
@@ -345,10 +363,12 @@ final class MLXCLibSession: @unchecked Sendable {
 
 // Convenience type aliases for the @convention(c) callback signatures used in
 // @_cdecl functions.  These must match the C typedefs in mlxclib.h exactly.
-private typealias CTokenCB    = @convention(c) (UnsafePointer<CChar>?,    Int,  UnsafeMutableRawPointer?) -> Void
-private typealias CDoneCB     = @convention(c) (UnsafePointer<CChar>?,          UnsafeMutableRawPointer?) -> Void
-private typealias CLoadCB     = @convention(c) (Bool, UnsafePointer<CChar>?,    UnsafeMutableRawPointer?) -> Void
-private typealias CApprovalCB = @convention(c) (UnsafePointer<CChar>?, UnsafePointer<CChar>?, UnsafeMutableRawPointer?) -> Void
+// Must be internal (not private) because @_cdecl public functions use them as
+// parameter types and Swift requires at least internal visibility there.
+typealias CTokenCB    = @convention(c) (UnsafePointer<CChar>?,    Int,  UnsafeMutableRawPointer?) -> Void
+typealias CDoneCB     = @convention(c) (UnsafePointer<CChar>?,          UnsafeMutableRawPointer?) -> Void
+typealias CLoadCB     = @convention(c) (Bool, UnsafePointer<CChar>?,    UnsafeMutableRawPointer?) -> Void
+typealias CApprovalCB = @convention(c) (UnsafePointer<CChar>?, UnsafePointer<CChar>?, UnsafeMutableRawPointer?) -> Void
 
 // ---------------------------------------------------------------------------
 // Session lifecycle
