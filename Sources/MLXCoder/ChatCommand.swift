@@ -4,6 +4,9 @@
 import ArgumentParser
 import Foundation
 import MLXLMCommon
+#if canImport(Speech)
+import Speech
+#endif
 
 struct ChatCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
@@ -175,8 +178,13 @@ struct ChatCommand: AsyncParsableCommand {
         renderer.printStatus("[Key mode] Editing input. Enter sends, Shift+Tab cycles mode, Ctrl+C exits.")
 
         let interactiveInput = InteractiveInput()
+        interactiveInput.voiceSilenceTimeout = args.voiceSilenceTimeout
+        interactiveInput.voiceLocale = args.resolvedVoiceLocale
         var sandboxEnabled = effectiveSandbox
         var announcedGeneralFastFoundationRoute = false
+        var voicePrefill: String? = nil
+        // Mutable session override for STT locale; starts from the CLI arg value.
+        var sessionVoiceLocale: Locale? = args.resolvedVoiceLocale
         
         // Set initial mode from arguments
         if args.mode.lowercased() == "agent" {
@@ -189,10 +197,13 @@ struct ChatCommand: AsyncParsableCommand {
             await CancelController.shared.suspendListening()
 
             let currentModeName = await agentLoop.currentMode.rawValue
+            let prefill = voicePrefill
+            voicePrefill = nil
             guard let input = await interactiveInput.readInteractive(
                 sandboxEnabled: sandboxEnabled, 
                 version: currentVersion, 
                 mode: currentModeName,
+                initialText: prefill ?? "",
                 onModeToggle: {
                     return await agentLoop.cycleMode()
                 }
@@ -314,6 +325,56 @@ struct ChatCommand: AsyncParsableCommand {
             if trimmed == "/sandbox" {
                 sandboxEnabled.toggle()
                 await agentLoop.setSandbox(sandboxEnabled)
+                continue
+            }
+            if trimmed == "/voice" {
+                #if canImport(Speech)
+                renderer.printStatus("🎤 Starting voice input…")
+                do {
+                    let transcription = try await VoiceInput.transcribe(
+                        silenceTimeout: args.voiceSilenceTimeout,
+                        locale: sessionVoiceLocale
+                    )
+                    renderer.printStatus("🎤 \"\(transcription)\"")
+                    voicePrefill = transcription
+                } catch {
+                    renderer.printError("Voice input: \(error.localizedDescription)")
+                }
+                #else
+                renderer.printError("Voice input requires macOS with the Speech framework.")
+                #endif
+                continue
+            }
+            if trimmed.hasPrefix("/voice-locale") {
+                #if canImport(Speech)
+                let parts = trimmed.split(separator: " ", maxSplits: 1)
+                if parts.count == 1 {
+                    // List available locales, marking the current one.
+                    let current = sessionVoiceLocale?.identifier ?? Locale.current.identifier
+                    let supported = SFSpeechRecognizer.supportedLocales()
+                        .sorted { $0.identifier < $1.identifier }
+                    var lines = ["🗣 Available STT locales (current: \u{001B}[1m\(current)\u{001B}[0m):"]
+                    for loc in supported {
+                        let tag = loc.identifier == current ? " \u{001B}[32m←\u{001B}[0m" : ""
+                        let name = Locale.current.localizedString(forIdentifier: loc.identifier) ?? loc.identifier
+                        let padded = loc.identifier.padding(toLength: 14, withPad: " ", startingAt: 0)
+                        lines.append("  \(padded)\(name)\(tag)")
+                    }
+                    renderer.printStatus(lines.joined(separator: "\n"))
+                } else {
+                    let identifier = String(parts[1]).trimmingCharacters(in: .whitespaces)
+                    let locale = Locale(identifier: identifier)
+                    if let r = SFSpeechRecognizer(locale: locale), r.isAvailable {
+                        sessionVoiceLocale = locale
+                        interactiveInput.voiceLocale = locale
+                        renderer.printStatus("🗣 STT locale set to \(identifier)")
+                    } else {
+                        renderer.printError("Locale '\(identifier)' is not available for speech recognition. Use /voice-locale to list supported locales.")
+                    }
+                }
+                #else
+                renderer.printError("Voice input requires macOS with the Speech framework.")
+                #endif
                 continue
             }
             if trimmed == "/plan" {
@@ -583,6 +644,8 @@ func printREPLHelp() {
       \u{001B}[32m/merge-approval\u{001B}[0m Trigger the "Awaiting approval before merge" flow
       \u{001B}[32m/gittree\u{001B}[0m       List git worktrees and switch workspace/branch to one
       \u{001B}[32m/sandbox\u{001B}[0m       Toggle macOS Seatbelt sandbox for shell commands
+      \u{001B}[32m/voice, Ctrl+V\u{001B}[0m  Voice input (STT) — fills transcription into input box for editing
+      \u{001B}[32m/voice-locale [id]\u{001B}[0m Set STT language (no arg = list all available locales)
       \u{001B}[32m/memory <cmd>\u{001B}[0m  Memory commands: save, log, search, list, undo, status, snippet
       \u{001B}[32mEsc\u{001B}[0m            Cancel current generation
       \u{001B}[32mShift+Tab\u{001B}[0m      Cycle modes (default starts at Plan low):

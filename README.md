@@ -108,6 +108,19 @@ Run a one-shot prompt and exit:
 mlx-coder run --prompt "Explain the main function in src/app.swift"
 ```
 
+Dictate the prompt via microphone instead of typing:
+
+```bash
+mlx-coder run --voice
+```
+
+The `--voice` flag uses Apple's Speech Recognition framework (macOS only). The model loads after recording finishes, so you don't need to pre-type the prompt. Optional tuning flags apply to both `run` and `chat`:
+
+| Flag | Default | Description |
+| --- | --- | --- |
+| `--voice-silence-timeout` | `2.0` | Seconds of silence before recording stops automatically |
+| `--voice-locale` | device locale → en-US | BCP 47 locale tag for recognition, e.g. `fr-FR`, `ja-JP` |
+
 ### Tool Discovery
 
 List built-in tools without loading a model:
@@ -189,6 +202,9 @@ mlx-coder doctor --strict --json
 | `--mcp-name` | `remote` | MCP tool prefix namespace |
 | `--mcp-timeout` | `30` | MCP request timeout in seconds |
 | `--verbose` | `false` | Show verbose output including thinking blocks |
+| `--voice` | `false` | (`run` only) Record voice prompt via Speech Recognition instead of `--prompt` |
+| `--voice-silence-timeout` | `2.0` | Seconds of silence before voice recording stops automatically |
+| `--voice-locale` | device locale | BCP 47 locale tag for speech recognition, e.g. `en-US`, `fr-FR` |
 
 ## Interactive Commands
 
@@ -204,6 +220,26 @@ Inside `mlx-coder chat`, these session commands are available:
 - `/load-history-json [path]` loads a JSON transcript into the current session
 - `/plan` and `/agent` switch working modes
 - `/sandbox` toggles sandbox mode for shell tools
+
+### Voice Input (macOS only)
+
+mlx-coder includes speech-to-text dictation powered by Apple's `SFSpeechRecognizer` framework. Two activation paths are available inside `chat`:
+
+- **`/voice`** — starts recording immediately and sends the transcription directly to the agent on Enter or after the configured silence timeout.
+- **`Ctrl+V`** — records and inserts the transcription into the input box so you can review and edit it before pressing Enter.
+
+Both paths stream live partial transcriptions to the terminal while recording. Recording stops on:
+- The silence timeout (default 2 s, configurable with `--voice-silence-timeout`)
+- The user pressing **Enter**
+- **Ctrl-C** / **Ctrl-D**
+
+On first use, macOS will display a system permission dialog for **Speech Recognition** and **Microphone** access. These permissions are granted to the host terminal application. You can check and reset the authorization status at any time with:
+
+```bash
+mlx-coder doctor
+```
+
+The `doctor` command reports a `voice` check showing whether Speech Recognition is authorized, not yet prompted, or denied.
 
 ### Run Mode Exports
 

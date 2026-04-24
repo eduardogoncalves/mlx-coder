@@ -12,7 +12,12 @@ public final class InteractiveInput: @unchecked Sendable {
     private var history: [String] = []
     private var historyIndex: Int = 0
     private var currentInputBeforeHistory: String = ""
-    
+
+    /// Seconds of silence before voice recording stops. Forwarded to ``VoiceInput/transcribe(silenceTimeout:locale:)``.
+    public var voiceSilenceTimeout: TimeInterval = 2.0
+    /// Locale for speech recognition. `nil` means device locale with `en-US` fallback.
+    public var voiceLocale: Locale?
+
     public init() {}
     
     // ANSI Controls (same as StreamRenderer to match styling)
@@ -33,7 +38,7 @@ public final class InteractiveInput: @unchecked Sendable {
     
     /// Reads a line from the user interactively, drawing a box and a footer below it.
     /// When the user submits (Enter), the box and footer are erased and only the plain text remains.
-    public func readInteractive(contextPercent: Double? = nil, sandboxEnabled: Bool = false, version: String = "", mode initialMode: String = "", onModeToggle: (() async -> String)? = nil) async -> String? {
+    public func readInteractive(contextPercent: Double? = nil, sandboxEnabled: Bool = false, version: String = "", mode initialMode: String = "", initialText: String = "", onModeToggle: (() async -> String)? = nil) async -> String? {
         var mode = initialMode
         // Ensure STDIN is a terminal, otherwise fallback to standard readLine
         guard isatty(STDIN_FILENO) == 1 else {
@@ -65,8 +70,8 @@ public final class InteractiveInput: @unchecked Sendable {
             tcsetattr(STDIN_FILENO, TCSANOW, &originalTerm)
         }
         
-        var input = ""
-        var cursorPosition = 0 // character index
+        var input = initialText
+        var cursorPosition = initialText.count // character index
         let width = getTerminalWidth()
         var isInitialDraw = true
         
@@ -302,6 +307,31 @@ public final class InteractiveInput: @unchecked Sendable {
                         }
                     }
                 }
+            } else if byte == 22 { // Ctrl+V — voice input
+                #if canImport(Speech)
+                // Clear the input box before starting voice recording.
+                if currentCursorRowRelToTop > 0 {
+                    print("\r\u{1B}[\(currentCursorRowRelToTop)A", terminator: "")
+                }
+                print("\r\u{1B}[J", terminator: "")
+                fflush(stdout)
+                do {
+                    let spoken = try await VoiceInput.transcribe(
+                        silenceTimeout: voiceSilenceTimeout,
+                        locale: voiceLocale
+                    )
+                    if !spoken.isEmpty {
+                        insertTextAtCursor(spoken)
+                    }
+                    // Flush the Enter key pressed to stop recording.
+                    tcflush(STDIN_FILENO, TCIFLUSH)
+                } catch {
+                    print("\u{1B}[31m⚠️  Voice: \(error.localizedDescription)\u{1B}[0m")
+                    fflush(stdout)
+                }
+                isInitialDraw = true
+                redraw()
+                #endif
             } else if byte >= 32 { // Printable characters
                 // Proper UTF8 decoding for multi-byte
                 var bytes = [byte]

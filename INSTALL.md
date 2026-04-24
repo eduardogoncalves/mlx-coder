@@ -157,6 +157,33 @@ Type `exit` or `quit` to leave.
 mlx-coder run --prompt "What is the weather in London?"
 ```
 
+### Voice Input (macOS only)
+
+mlx-coder uses Apple's Speech Recognition framework for dictation. On first use of `/voice` (in `chat`) or `--voice` (in `run`), macOS will show a system permission dialog for **Speech Recognition** and **Microphone** access. These permissions are granted to the terminal app (e.g. Terminal.app or iTerm2), not to mlx-coder itself.
+
+To verify or troubleshoot the authorization status:
+
+```bash
+mlx-coder doctor
+```
+
+Look for the `voice` check in the output:
+
+- `[PASS]` — Speech Recognition is authorized and a recognizer is available.
+- `[WARN]` — Permission has not been requested yet (will prompt on first use), or no recognizer is available for the current locale.
+- `[FAIL]` — Permission was denied. Go to **System Settings → Privacy & Security → Speech Recognition** and enable the terminal app.
+
+To configure voice recording behaviour:
+
+```bash
+# Increase silence timeout for noisy environments
+mlx-coder chat --voice-silence-timeout 4.0
+
+# Pin recognition to a specific language
+mlx-coder chat --voice-locale fr-FR
+mlx-coder run --voice --voice-locale ja-JP
+```
+
 ## Troubleshooting
 
 ### Build Issues

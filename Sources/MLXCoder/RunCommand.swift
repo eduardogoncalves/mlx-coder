@@ -13,8 +13,11 @@ struct RunCommand: AsyncParsableCommand {
 
     @OptionGroup var args: ModelArguments
 
-    @Option(name: .shortAndLong, help: "The prompt to send to the agent")
-    var prompt: String
+    @Option(name: .shortAndLong, help: "The prompt to send to the agent (omit when using --voice)")
+    var prompt: String?
+
+    @Flag(name: .long, help: "Record voice input via Speech Recognition and use the transcription as the prompt")
+    var voice: Bool = false
 
     @Option(name: .long, help: "Optional path to export markdown session history after run")
     var saveHistory: String?
@@ -31,6 +34,33 @@ struct RunCommand: AsyncParsableCommand {
             }
         }
 
+        // Resolve effective prompt — transcribe via voice if requested.
+        let effectivePrompt: String
+        if voice {
+            #if canImport(Speech)
+            renderer.printStatus("🎤 Starting voice input…")
+            do {
+                let voiceLocale = args.resolvedVoiceLocale
+                let transcription = try await VoiceInput.transcribe(
+                    silenceTimeout: args.voiceSilenceTimeout,
+                    locale: voiceLocale
+                )
+                renderer.printStatus("🎤 \"\(transcription)\"")
+                effectivePrompt = transcription
+            } catch {
+                renderer.printError("Voice input failed: \(error.localizedDescription)")
+                return
+            }
+            #else
+            renderer.printError("--voice requires macOS with the Speech framework.")
+            return
+            #endif
+        } else if let p = prompt, !p.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            effectivePrompt = p
+        } else {
+            renderer.printError("Provide a prompt with --prompt or use --voice to dictate one.")
+            return
+        }
         // Detect chip and configure memory
         let chipInfo = ChipDetector.detect()
         let budget = MemoryGuard.budgetFor(chip: chipInfo)
@@ -40,7 +70,7 @@ struct RunCommand: AsyncParsableCommand {
         if !localModelExists(selectedModel) && !looksLikeHubModelID(selectedModel) {
             renderer.printStatus("No local model found at \(selectedModel).")
             renderer.printStatus("Using Apple Foundation fallback for this single prompt.")
-            if await runAppleFoundationSinglePromptFallback(prompt: prompt, renderer: renderer) {
+            if await runAppleFoundationSinglePromptFallback(prompt: effectivePrompt, renderer: renderer) {
                 return
             }
             renderer.printError("Apple Foundation model is unavailable. Use --model with a local model path or a Hugging Face model ID.")
@@ -154,7 +184,7 @@ struct RunCommand: AsyncParsableCommand {
             cacheLimit: budget.cacheBytes
         )
 
-        let parsedPrompt = ImageAttachmentParser.parse(prompt: prompt)
+        let parsedPrompt = ImageAttachmentParser.parse(prompt: effectivePrompt)
         if !parsedPrompt.imageURLs.isEmpty {
             renderer.printStatus("Attaching \(parsedPrompt.imageURLs.count) image(s): \(parsedPrompt.imageURLs.map(\.lastPathComponent).joined(separator: ", "))")
         }
