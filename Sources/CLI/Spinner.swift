@@ -10,15 +10,22 @@ public actor Spinner {
     private var message: String
     private var startTime: Date?
     private var lastRenderedRows = 0
+    private let ui: TerminalUI?
     
-    public init(message: String) {
+    public init(message: String, ui: TerminalUI? = nil) {
         self.message = message
+        self.ui = ui
     }
     
     /// Starts the spinner animation in a detached task.
     public func start() {
         guard !isTaskRunning else { return }
         isTaskRunning = true
+
+        if let ui {
+            ui.setSpinner(message: message)
+            return
+        }
 
         let f = self.frames
         
@@ -48,12 +55,21 @@ public actor Spinner {
     /// Updates the spinner message while it is running.
     public func updateMessage(_ newMessage: String) {
         self.message = newMessage
+        if let ui, isTaskRunning {
+            ui.setSpinner(message: newMessage)
+        }
     }
     
     /// Stops the spinner and clears the line.
     public func stop(clearLine: Bool = true) {
         guard isTaskRunning else { return }
         isTaskRunning = false
+
+        if let ui {
+            ui.setSpinner(message: nil)
+            return
+        }
+
         task?.cancel()
         task = nil
         
@@ -69,13 +85,21 @@ public actor Spinner {
     /// Stops the spinner and replaces it with a completion message.
     public func succeed(with successMessage: String) {
         stop(clearLine: true)
-        print("\u{001B}[32m✅ \(successMessage)\u{001B}[0m")
+        if let ui {
+            ui.appendOutput("\u{001B}[32m✅ \(successMessage)\u{001B}[0m\n")
+        } else {
+            print("\u{001B}[32m✅ \(successMessage)\u{001B}[0m")
+        }
     }
     
     /// Stops the spinner and replaces it with an error message.
     public func fail(with errorMessage: String) {
         stop(clearLine: true)
-        print("\u{001B}[31m❌ \(errorMessage)\u{001B}[0m")
+        if let ui {
+            ui.appendOutput("\u{001B}[31m❌ \(errorMessage)\u{001B}[0m\n")
+        } else {
+            print("\u{001B}[31m❌ \(errorMessage)\u{001B}[0m")
+        }
     }
 
     private func clearRenderedRows(_ rowCount: Int) {

@@ -118,7 +118,8 @@ public actor AgentLoop {
         promptSectionTokenEstimates: [PromptSection: Int] = [:],
         maxToolIterations: Int = 20,
         memoryLimit: Int? = nil,
-        cacheLimit: Int? = nil
+        cacheLimit: Int? = nil,
+        enableInteractiveInput: Bool = true
     ) {
         self.modelContainer = modelContainer
         self.registry = registry
@@ -143,8 +144,9 @@ public actor AgentLoop {
         self.memoryLimit = memoryLimit
         self.cacheLimit = cacheLimit
         
-        // Initialize interactive input for branch name prompting
-        self.interactiveInput = InteractiveInput()
+        // Initialize interactive input for flows that need it (git setup, approvals).
+        // Full-screen TUIs may want to own input rendering and pass this as false.
+        self.interactiveInput = enableInteractiveInput ? InteractiveInput() : nil
         
         // Ensure initial config matches default mode/thinking/task
         self.currentGenerationConfig = AgentLoop.calculateGenerationConfig(
@@ -320,7 +322,11 @@ public actor AgentLoop {
                     }
                 }
                 
-                print() // newline after response
+                if renderer.ui != nil {
+                    renderer.printChunk("\n")
+                } else {
+                    print() // newline after response
+                }
                 return
             }
 
@@ -734,7 +740,7 @@ public actor AgentLoop {
                     result = .success("Dry-run mode: skipped execution of destructive tool '\(call.name)'. Arguments: \(correctionResult.correctedArguments)")
                 } else if let tool = resolvedTool {
                     let showToolSpinner = (call.name == "web_search" || call.name == "web_fetch")
-                    let toolSpinner = Spinner(message: "Executing \(call.name)...")
+                    let toolSpinner = Spinner(message: "Executing \(call.name)...", ui: renderer.ui)
                     if showToolSpinner {
                         await toolSpinner.start()
                     }

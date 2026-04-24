@@ -11,8 +11,24 @@ public actor CancelController {
     private var cancelCurrentTask: (@Sendable () -> Void)?
     private var listeningTask: Task<Void, Never>?
     private var forceExitOnEscape = false
+    private var hotkeysEnabled = true
     
     private init() {}
+
+    /// Disable CancelController's raw-mode stdin listener (useful for full-screen TUIs
+    /// that own input handling).
+    public func setHotkeysEnabled(_ enabled: Bool) async {
+        hotkeysEnabled = enabled
+        if !enabled {
+            if let task = listeningTask {
+                task.cancel()
+                listeningTask = nil
+                await task.value
+            }
+        } else {
+            resumeListeningIfNeeded()
+        }
+    }
     
     /// Set the current operation task and start listening for ESC/Ctrl+C.
     public func setTask(_ task: Task<Void, Error>?, forceExitOnEscape: Bool = false) async {
@@ -48,6 +64,7 @@ public actor CancelController {
         listeningTask = nil
 
         if canceler != nil {
+            guard hotkeysEnabled else { return }
             startListening()
             return
         }
@@ -71,7 +88,7 @@ public actor CancelController {
 
     /// Resume listening only when there is an active generation task.
     public func resumeListeningIfNeeded() {
-        guard cancelCurrentTask != nil, listeningTask == nil else { return }
+        guard hotkeysEnabled, cancelCurrentTask != nil, listeningTask == nil else { return }
         startListening()
     }
     
@@ -103,18 +120,20 @@ public actor CancelController {
                 let r = read(STDIN_FILENO, &byte, 1)
                 
                 if r == 1 {
-                    if byte == 27 { // ESC
-                        // Consume only the ESC sequence tail so the next prompt can keep
-                        // legitimate follow-up keypresses (e.g. quick numeric selections).
-                        _ = TerminalKeyParser.readEscapeSequence(initialTimeoutMs: 10, extendedTimeoutMs: 40)
-                        let shouldForceExit = await self.forceExitOnEscape
-                        await self.cancel()
-                        if shouldForceExit {
-                            print("\nInterrupted by Esc. Exiting...")
-                            fflush(stdout)
-                            exit(130)
+                    if byte == 27 { // ESC or an escape sequence (arrows, etc.)
+                        let sequence = TerminalKeyParser.readEscapeSequence(initialTimeoutMs: 10, extendedTimeoutMs: 40)
+                        // Only treat a *bare* ESC as cancellation; ignore other escape sequences
+                        // so arrow keys don't accidentally cancel a run.
+                        if sequence.isEmpty {
+                            let shouldForceExit = await self.forceExitOnEscape
+                            await self.cancel()
+                            if shouldForceExit {
+                                print("\nInterrupted by Esc. Exiting...")
+                                fflush(stdout)
+                                exit(130)
+                            }
+                            break
                         }
-                        break
                     } else if byte == 3 { // Ctrl+C
                         // User wants 'Esc' for cancellation, so Ctrl+C should exit the app
                         print("\nInterrupted by Ctrl+C. Exiting...")

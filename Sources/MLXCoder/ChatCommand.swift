@@ -8,6 +8,33 @@ import MLXLMCommon
 import Speech
 #endif
 
+actor ChatTUISession {
+    private(set) var sandboxEnabled: Bool
+    private(set) var selectedModel: String
+    private var generationRunning: Bool = false
+    private var announcedGeneralFastFoundationRoute: Bool = false
+
+    init(sandboxEnabled: Bool, selectedModel: String) {
+        self.sandboxEnabled = sandboxEnabled
+        self.selectedModel = selectedModel
+    }
+
+    func isGenerationRunning() -> Bool { generationRunning }
+
+    func setGenerationRunning(_ running: Bool) { generationRunning = running }
+
+    func toggleSandbox() -> Bool {
+        sandboxEnabled.toggle()
+        return sandboxEnabled
+    }
+
+    func setSelectedModel(_ model: String) { selectedModel = model }
+
+    func shouldAnnounceFoundationRoute() -> Bool { !announcedGeneralFastFoundationRoute }
+
+    func markAnnouncedFoundationRoute() { announcedGeneralFastFoundationRoute = true }
+}
+
 struct ChatCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "chat",
@@ -171,7 +198,8 @@ struct ChatCommand: AsyncParsableCommand {
             skillsMetadata: skillMetadata,
             promptSectionTokenEstimates: promptComposition.sectionTokenEstimates,
             memoryLimit: budget.totalBytes,
-            cacheLimit: budget.cacheBytes
+            cacheLimit: budget.cacheBytes,
+            enableInteractiveInput: false
         )
 
         // Clear the 5 startup status lines to make the UI cleaner
@@ -190,23 +218,7 @@ struct ChatCommand: AsyncParsableCommand {
             return first ?? nil
         }
 
-        // REPL Header
-        print("mlx-coder \u{001B}[2m(v\(currentVersion))\u{001B}[0m")
-        print("\u{001B}[2mModel: \(selectedModel)\u{001B}[0m")
-        print("\u{001B}[2mWorkspace: \(absWorkspace)\u{001B}[0m\n")
-        if let info = pendingUpdate {
-            print("⬆️  mlx-coder \(info.latestVersion) is available. Run \u{001B}[1mmlx-coder update\u{001B}[0m to install.\n")
-        }
-        renderer.printStatus("[Key mode] Editing input. Enter sends, Shift+Tab cycles mode, Ctrl+C exits.")
-
-        let interactiveInput = InteractiveInput()
-        interactiveInput.voiceSilenceTimeout = args.voiceSilenceTimeout
-        interactiveInput.voiceLocale = args.resolvedVoiceLocale
-        var sandboxEnabled = effectiveSandbox
-        var announcedGeneralFastFoundationRoute = false
-        var voicePrefill: String? = nil
-        // Mutable session override for STT locale; starts from the CLI arg value.
-        var sessionVoiceLocale: Locale? = args.resolvedVoiceLocale
+        let session = ChatTUISession(sandboxEnabled: effectiveSandbox, selectedModel: selectedModel)
         
         // Set initial mode from arguments
         if args.mode.lowercased() == "agent" {
@@ -214,350 +226,210 @@ struct ChatCommand: AsyncParsableCommand {
         }
         // Default is already planLow from AgentLoop initializer
 
-        while true {
-            // Ensure no background stdin listener competes with interactive editing.
-            await CancelController.shared.suspendListening()
+        await CancelController.shared.setHotkeysEnabled(false)
+        let initialModeName = await agentLoop.currentMode.rawValue
+        let ui = TerminalUI(version: currentVersion, initialMode: initialModeName, sandboxEnabled: effectiveSandbox)
+        renderer.ui = ui
+        renderer.setWriter { text in
+            ui.appendOutput(text)
+        }
 
-            let currentModeName = await agentLoop.currentMode.rawValue
-            let prefill = voicePrefill
-            voicePrefill = nil
-            guard let input = await interactiveInput.readInteractive(
-                sandboxEnabled: sandboxEnabled, 
-                version: currentVersion, 
-                mode: currentModeName,
-                initialText: prefill ?? "",
-                onModeToggle: {
-                    return await agentLoop.cycleMode()
-                }
-            ) else {
-                break
-            }
+        // Header inside the TUI
+        renderer.printChunk("mlx-coder \u{001B}[2m(v\(currentVersion))\u{001B}[0m\n")
+        renderer.printChunk("\u{001B}[2mModel: \(selectedModel)\u{001B}[0m\n")
+        renderer.printChunk("\u{001B}[2mWorkspace: \(absWorkspace)\u{001B}[0m\n\n")
+        if let info = pendingUpdate {
+            renderer.printChunk("⬆️  mlx-coder \(info.latestVersion) is available. Run \u{001B}[1mmlx-coder update\u{001B}[0m to install.\n\n")
+        }
+        renderer.printStatus("Full-screen UI active. Input stays visible during streaming.")
 
-            let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
-            if trimmed.isEmpty { continue }
-            if trimmed == "exit" || trimmed == "quit" { break }
-            if trimmed == "?" {
-                printREPLHelp()
-                continue
-            }
-            if trimmed == "/undo" || trimmed == "/revert" {
-                await agentLoop.undoLastTurn()
-                continue
-            }
-            if trimmed == "/merge-approval" {
-                await agentLoop.runMergeApprovalShortcutFlow()
-                continue
-            }
-            if trimmed == "/gittree" {
-                await agentLoop.runGitTreeShortcutFlow()
-                continue
-            }
-            if trimmed == "/clear" {
-                await agentLoop.clearHistoryWithCheckpoint()
-                continue
-            }
-            if trimmed.hasPrefix("/model") {
-                await handleModelCommand(
-                    trimmed: trimmed,
-                    agentLoop: agentLoop,
-                    renderer: renderer,
-                    interactiveInput: interactiveInput,
-                    selectedModel: &selectedModel,
-                    announcedGeneralFastFoundationRoute: &announcedGeneralFastFoundationRoute
-                )
-                continue
-            }
-            if trimmed == "/context" {
-                let report = await agentLoop.contextUsageReport()
-                print("\n\(report)\n")
-                continue
-            }
-            if trimmed == "/skills" {
-                if skillMetadata.isEmpty {
-                    print("\nNo skills discovered in workspace.\n")
-                } else {
-                    print("\nDiscovered skills (\(skillMetadata.count)):")
-                    for skill in skillMetadata {
-                        let tags = skill.tags.isEmpty ? "" : " [tags: \(skill.tags.joined(separator: ", "))]"
-                        print("- \(skill.name): \(skill.description) (\(skill.filePath))\(tags)")
-                    }
-                    print("")
-                }
-                continue
-            }
-            if trimmed == "/hooks" {
-                let names = await hooks.registeredHookNames()
-                if names.isEmpty {
-                    print("\nNo hooks registered.\n")
-                } else {
-                    print("\nActive hooks (\(names.count)):")
-                    for name in names {
-                        print("- \(name)")
-                    }
-                    print("")
-                }
-                continue
-            }
-            if trimmed.hasPrefix("/transforms") {
-                let arg = String(trimmed.dropFirst("/transforms".count)).trimmingCharacters(in: .whitespacesAndNewlines)
-                if arg == "clear" {
-                    await agentLoop.removeAllContextTransforms()
-                    renderer.printStatus("All context transforms removed.")
-                } else {
-                    let count = await agentLoop.contextTransformCount
-                    if count == 0 {
-                        print("\nNo context transforms registered.\n")
-                    } else {
-                        print("\nContext transforms registered: \(count)")
-                        print("Use '/transforms clear' to remove all.\n")
-                    }
-                }
-                continue
-            }
-            if trimmed.hasPrefix("/save-history-json") {
-                let parts = trimmed.split(separator: " ", maxSplits: 1)
-                let outputPath = parts.count > 1 ? String(parts[1]) : "session-history.json"
-                do {
-                    _ = try await agentLoop.exportHistoryJSON(to: outputPath)
-                } catch {
-                    renderer.printError("Failed to export JSON history: \(error.localizedDescription)")
-                }
-                continue
-            }
-            if trimmed.hasPrefix("/save-history") {
-                let parts = trimmed.split(separator: " ", maxSplits: 1)
-                let outputPath = parts.count > 1 ? String(parts[1]) : "session-history.md"
-                do {
-                    _ = try await agentLoop.exportHistory(to: outputPath)
-                } catch {
-                    renderer.printError("Failed to export history: \(error.localizedDescription)")
-                }
-                continue
-            }
-            if trimmed.hasPrefix("/load-history-json") {
-                let parts = trimmed.split(separator: " ", maxSplits: 1)
-                let inputPath = parts.count > 1 ? String(parts[1]) : "session-history.json"
-                do {
-                    _ = try await agentLoop.loadHistoryJSON(from: inputPath)
-                } catch {
-                    renderer.printError("Failed to load JSON history: \(error.localizedDescription)")
-                }
-                continue
-            }
-            if trimmed == "/sandbox" {
-                sandboxEnabled.toggle()
-                await agentLoop.setSandbox(sandboxEnabled)
-                continue
-            }
-            if trimmed == "/voice" {
-                #if canImport(Speech)
-                renderer.printStatus("🎤 Starting voice input…")
-                do {
-                    let transcription = try await VoiceInput.transcribe(
-                        silenceTimeout: args.voiceSilenceTimeout,
-                        locale: sessionVoiceLocale
-                    )
-                    renderer.printStatus("🎤 \"\(transcription)\"")
-                    voicePrefill = transcription
-                } catch {
-                    renderer.printError("Voice input: \(error.localizedDescription)")
-                }
-                #else
-                renderer.printError("Voice input requires macOS with the Speech framework.")
-                #endif
-                continue
-            }
-            if trimmed.hasPrefix("/voice-locale") {
-                #if canImport(Speech)
-                let parts = trimmed.split(separator: " ", maxSplits: 1)
-                if parts.count == 1 {
-                    // List available locales, marking the current one.
-                    let current = sessionVoiceLocale?.identifier ?? Locale.current.identifier
-                    let supported = SFSpeechRecognizer.supportedLocales()
-                        .sorted { $0.identifier < $1.identifier }
-                    var lines = ["🗣 Available STT locales (current: \u{001B}[1m\(current)\u{001B}[0m):"]
-                    for loc in supported {
-                        let tag = loc.identifier == current ? " \u{001B}[32m←\u{001B}[0m" : ""
-                        let name = Locale.current.localizedString(forIdentifier: loc.identifier) ?? loc.identifier
-                        let padded = loc.identifier.padding(toLength: 14, withPad: " ", startingAt: 0)
-                        lines.append("  \(padded)\(name)\(tag)")
-                    }
-                    renderer.printStatus(lines.joined(separator: "\n"))
-                } else {
-                    let identifier = String(parts[1]).trimmingCharacters(in: .whitespaces)
-                    let locale = Locale(identifier: identifier)
-                    if let r = SFSpeechRecognizer(locale: locale), r.isAvailable {
-                        sessionVoiceLocale = locale
-                        interactiveInput.voiceLocale = locale
-                        renderer.printStatus("🗣 STT locale set to \(identifier)")
-                    } else {
-                        renderer.printError("Locale '\(identifier)' is not available for speech recognition. Use /voice-locale to list supported locales.")
-                    }
-                }
-                #else
-                renderer.printError("Voice input requires macOS with the Speech framework.")
-                #endif
-                continue
-            }
-            if trimmed == "/plan" {
-                await agentLoop.setMode(.plan)
-                continue
-            }
-            if trimmed == "/agent" {
-                await agentLoop.setMode(.agent)
-                continue
-            }
-            if trimmed.hasPrefix("/task") {
-                let parts = trimmed.split(separator: " ")
-                if parts.count > 1 {
-                    let type = parts[1].lowercased()
-                    if type == "general" {
-                        await agentLoop.setTaskType(.general)
-                    } else if type == "coding" {
-                        await agentLoop.setTaskType(.coding)
-                    } else if type == "reasoning" {
-                        await agentLoop.setTaskType(.reasoning)
-                    } else {
-                        renderer.printError("Invalid task type: \(type). Use 'general', 'coding', or 'reasoning'.")
-                    }
-                } else {
-                    renderer.printStatus("Current task type: \(await agentLoop.taskType.rawValue)")
-                }
-                continue
-            }
-            if trimmed.hasPrefix("/thinking") {
-                let parts = trimmed.split(separator: " ")
-                if parts.count > 1 {
-                    let level = parts[1].lowercased()
-                    switch level {
-                    case "fast", "off":
-                        await agentLoop.setThinkingLevel(.fast)
-                    case "minimal":
-                        await agentLoop.setThinkingLevel(.minimal)
-                    case "low":
-                        await agentLoop.setThinkingLevel(.low)
-                    case "medium":
-                        await agentLoop.setThinkingLevel(.medium)
-                    case "high":
-                        await agentLoop.setThinkingLevel(.high)
-                    default:
-                        renderer.printError("Invalid thinking level: \(level). Use 'fast/off', 'minimal', 'low', 'medium', or 'high'.")
-                    }
-                } else {
-                    // Show current level and budget when no argument given
-                    let current = await agentLoop.thinkingLevel
-                    renderer.printStatus("Thinking level: \(current.displayName)")
-                }
-                continue
-            }
-            if trimmed.hasPrefix("/steer") {
-                let msg = String(trimmed.dropFirst("/steer".count)).trimmingCharacters(in: .whitespacesAndNewlines)
-                if !msg.isEmpty {
-                    await agentLoop.steer(msg)
-                    renderer.printStatus("↩️  Steering message queued: \"\(msg)\"")
-                } else {
-                    let pending = await agentLoop.pendingSteeringMessages()
-                    if pending.isEmpty {
-                        renderer.printStatus("No steering messages queued.")
-                    } else {
-                        print("\nQueued steering messages (\(pending.count)):")
-                        for (i, m) in pending.enumerated() { print("  \(i + 1). \(m)") }
-                        print("")
-                    }
-                }
-                continue
-            }
-            if trimmed.hasPrefix("/followup") {
-                let msg = String(trimmed.dropFirst("/followup".count)).trimmingCharacters(in: .whitespacesAndNewlines)
-                if !msg.isEmpty {
-                    await agentLoop.queueFollowUp(msg)
-                    renderer.printStatus("🔄 Follow-up queued: \"\(msg)\"")
-                } else {
-                    let pending = await agentLoop.pendingFollowUps()
-                    if pending.isEmpty {
-                        renderer.printStatus("No follow-ups queued.")
-                    } else {
-                        print("\nQueued follow-ups (\(pending.count)):")
-                        for (i, m) in pending.enumerated() { print("  \(i + 1). \(m)") }
-                        print("")
-                    }
-                }
-                continue
-            }
+        await ui.run(
+            onSubmit: { line in
+                let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+                if trimmed.isEmpty { return }
 
-            // Memory commands
-            if trimmed.hasPrefix("/memory") {
-                await handleMemoryCommand(
-                    trimmed: trimmed,
-                    workspaceRoot: absWorkspace,
-                    renderer: renderer
-                )
-                continue
-            }
-
-            do {
-                let activeMode = await agentLoop.currentMode
-                if activeMode == .agentGeneralFast && isAppleFoundationModelAvailable() {
-                    if !announcedGeneralFastFoundationRoute {
-                        renderer.printStatus("AGENT (general/fast) is using Apple Foundation model when available.")
-                        announcedGeneralFastFoundationRoute = true
-                    }
-
-                    if await runAppleFoundationSinglePromptWithTools(
-                        prompt: trimmed,
-                        registry: registry,
-                        renderer: renderer
-                    ) {
-                        continue
-                    }
-
-                    renderer.printStatus("Apple Foundation model was not available for this turn. Falling back to local MLX model.")
+                if trimmed == "exit" || trimmed == "quit" {
+                    ui.requestExit()
+                    return
                 }
 
-                renderer.printStatus("[Key mode] Generation active. Press Esc to cancel.")
-                let task = Task {
+                if trimmed == "?" {
+                    renderer.printChunk(replHelpText() + "\n")
+                    return
+                }
+
+                if await session.isGenerationRunning() {
+                    if trimmed.hasPrefix("/steer") {
+                        let msg = String(trimmed.dropFirst("/steer".count)).trimmingCharacters(in: .whitespacesAndNewlines)
+                        guard !msg.isEmpty else { return }
+                        await agentLoop.steer(msg)
+                        renderer.printStatus("↩️  Steering message queued: \"\(msg)\"")
+                        return
+                    }
+                    if trimmed.hasPrefix("/followup") {
+                        let msg = String(trimmed.dropFirst("/followup".count)).trimmingCharacters(in: .whitespacesAndNewlines)
+                        guard !msg.isEmpty else { return }
+                        await agentLoop.queueFollowUp(msg)
+                        renderer.printStatus("🔄 Follow-up queued: \"\(msg)\"")
+                        return
+                    }
+                    renderer.printStatus("Generation active. Use /steer … or /followup … (Esc cancels).")
+                    return
+                }
+
+                // Basic slash commands in TUI mode
+                if trimmed == "/undo" || trimmed == "/revert" {
+                    await agentLoop.undoLastTurn()
+                    return
+                }
+                if trimmed == "/clear" {
+                    await agentLoop.clearHistoryWithCheckpoint()
+                    return
+                }
+                if trimmed == "/context" {
+                    let report = await agentLoop.contextUsageReport()
+                    renderer.printChunk("\n\(report)\n\n")
+                    return
+                }
+                if trimmed == "/sandbox" {
+                    let enabled = await session.toggleSandbox()
+                    await agentLoop.setSandbox(enabled)
+                    ui.setSandboxEnabled(enabled)
+                    return
+                }
+                if trimmed == "/plan" {
+                    await agentLoop.setMode(.plan)
+                    ui.setMode(await agentLoop.currentMode.rawValue)
+                    return
+                }
+                if trimmed == "/agent" {
+                    await agentLoop.setMode(.agent)
+                    ui.setMode(await agentLoop.currentMode.rawValue)
+                    return
+                }
+                if trimmed.hasPrefix("/steer") {
+                    let msg = String(trimmed.dropFirst("/steer".count)).trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !msg.isEmpty {
+                        await agentLoop.steer(msg)
+                        renderer.printStatus("↩️  Steering message queued: \"\(msg)\"")
+                    }
+                    return
+                }
+                if trimmed.hasPrefix("/followup") {
+                    let msg = String(trimmed.dropFirst("/followup".count)).trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !msg.isEmpty {
+                        await agentLoop.queueFollowUp(msg)
+                        renderer.printStatus("🔄 Follow-up queued: \"\(msg)\"")
+                    }
+                    return
+                }
+                if trimmed.hasPrefix("/memory") {
+                    await handleMemoryCommand(trimmed: trimmed, workspaceRoot: absWorkspace, renderer: renderer)
+                    return
+                }
+                if trimmed.hasPrefix("/model") {
+                    let arg = String(trimmed.dropFirst("/model".count)).trimmingCharacters(in: .whitespacesAndNewlines)
+                    if arg.isEmpty {
+                        renderer.printError("In TUI mode, use /model user/model (interactive selector not supported yet).")
+                        return
+                    }
+                    guard let modelID = parseUserModelIdentifier(arg) else {
+                        renderer.printError("Invalid model identifier '\(arg)'. Use format 'user/model'.")
+                        return
+                    }
+                    let modelPath = "~/models/\(modelID)"
+                    guard localModelExists(modelPath) else {
+                        renderer.printError("Model not found at \(modelPath).")
+                        return
+                    }
+                    do {
+                        renderer.printStatus("Switching model to \(modelID)...")
+                        try await agentLoop.switchModel(to: modelPath)
+                        await session.setSelectedModel(modelPath)
+                        renderer.printStatus("Active model: \(modelPath)")
+                    } catch {
+                        renderer.printError("Failed to switch model: \(error.localizedDescription)")
+                    }
+                    return
+                }
+
+                // Start generation in background so UI stays responsive.
+                await session.setGenerationRunning(true)
+                ui.setGenerationActive(true)
+                Task {
+                    defer {
+                        Task {
+                            await session.setGenerationRunning(false)
+                            ui.setGenerationActive(false)
+                        }
+                    }
+                    let activeMode = await agentLoop.currentMode
+                    if activeMode == .agentGeneralFast && isAppleFoundationModelAvailable() {
+                        if await session.shouldAnnounceFoundationRoute() {
+                            renderer.printStatus("AGENT (general/fast) is using Apple Foundation model when available.")
+                            await session.markAnnouncedFoundationRoute()
+                        }
+                        if await runAppleFoundationSinglePromptWithTools(prompt: trimmed, registry: registry, renderer: renderer) {
+                            return
+                        }
+                        renderer.printStatus("Apple Foundation model was not available for this turn. Falling back to local MLX model.")
+                    }
+
+                    renderer.printStatus("Generation active. Esc cancels. /steer and /followup accepted.")
                     let parsed = ImageAttachmentParser.parse(prompt: trimmed)
                     if !parsed.imageURLs.isEmpty {
                         renderer.printStatus("Attaching \(parsed.imageURLs.count) image(s): \(parsed.imageURLs.map(\.lastPathComponent).joined(separator: ", "))")
                     }
-                    try await agentLoop.processUserMessage(parsed.cleanedPrompt, images: parsed.imageURLs)
-                }
-                await CancelController.shared.setTask(task)
-                try await task.value
-                await CancelController.shared.setTask(nil)
-
-                // Auto-process any queued follow-ups after the run completes.
-                let pendingFollowUps = await agentLoop.drainFollowUpQueue()
-                for followUp in pendingFollowUps {
-                    renderer.printStatus("🔄 Auto follow-up: \"\(followUp)\"")
-                    await hooks.emit(.followUpStarted(message: followUp))
-                    let followUpTask = Task {
-                        try await agentLoop.processUserMessage(followUp)
+                    let task = Task {
+                        try await agentLoop.processUserMessage(parsed.cleanedPrompt, images: parsed.imageURLs)
                     }
-                    await CancelController.shared.setTask(followUpTask)
+                    await CancelController.shared.setTask(task)
                     do {
-                        try await followUpTask.value
+                        try await task.value
                     } catch is CancellationError {
-                        renderer.printError("Follow-up cancelled.")
-                        await agentLoop.clearFollowUpQueue()
+                        renderer.printError("Generation cancelled by user.")
                         await CancelController.shared.setTask(nil)
-                        break
+                        return
                     } catch {
-                        renderer.printError("Follow-up error: \(error.localizedDescription)")
-                        await agentLoop.clearFollowUpQueue()
+                        renderer.printError(error.localizedDescription)
                         await CancelController.shared.setTask(nil)
-                        break
+                        return
                     }
                     await CancelController.shared.setTask(nil)
+
+                    let pendingFollowUps = await agentLoop.drainFollowUpQueue()
+                    for followUp in pendingFollowUps {
+                        renderer.printStatus("🔄 Auto follow-up: \"\(followUp)\"")
+                        await hooks.emit(.followUpStarted(message: followUp))
+                        let followUpTask = Task { try await agentLoop.processUserMessage(followUp) }
+                        await CancelController.shared.setTask(followUpTask)
+                        do {
+                            try await followUpTask.value
+                        } catch is CancellationError {
+                            renderer.printError("Follow-up cancelled.")
+                            await agentLoop.clearFollowUpQueue()
+                            await CancelController.shared.setTask(nil)
+                            break
+                        } catch {
+                            renderer.printError("Follow-up error: \(error.localizedDescription)")
+                            await agentLoop.clearFollowUpQueue()
+                            await CancelController.shared.setTask(nil)
+                            break
+                        }
+                        await CancelController.shared.setTask(nil)
+                    }
                 }
-            } catch is CancellationError {
-                renderer.printError("Generation cancelled by user.")
-                await CancelController.shared.setTask(nil)
-            } catch {
-                renderer.printError(error.localizedDescription)
-                await CancelController.shared.setTask(nil)
+            },
+            onModeToggle: {
+                let mode = await agentLoop.cycleMode()
+                return mode
+            },
+            onCancel: {
+                await CancelController.shared.cancel()
             }
-        }
+        )
+
+        await CancelController.shared.setHotkeysEnabled(true)
 
         if let output = args.autoSaveHistory?.trimmingCharacters(in: .whitespacesAndNewlines), !output.isEmpty {
             do {
@@ -577,7 +449,7 @@ struct ChatCommand: AsyncParsableCommand {
 
         await DotnetLSPService.shared.shutdown()
 
-        print("\nGoodbye!")
+        renderer.printChunk("\nGoodbye!\n")
     }
 
     // MARK: - Slash Command Helpers
@@ -586,32 +458,35 @@ struct ChatCommand: AsyncParsableCommand {
         trimmed: String,
         agentLoop: AgentLoop,
         renderer: StreamRenderer,
-        interactiveInput: InteractiveInput,
+        interactiveInput: InteractiveInput?,
         selectedModel: inout String,
         announcedGeneralFastFoundationRoute: inout Bool
     ) async {
         let modelArg = String(trimmed.dropFirst("/model".count)).trimmingCharacters(in: .whitespacesAndNewlines)
 
         if modelArg.isEmpty {
+            guard let interactiveInput else {
+                renderer.printError("Interactive model selector is not available in full-screen TUI yet. Use /model user/model.")
+                return
+            }
+
             let localModels = listHomeModelsAsRepoIDs()
             if localModels.isEmpty {
-                print("\nNo local models found under ~/models.\n")
-            } else {
-                if let selectedIndex = await interactiveInput.selectOption(prompt: "Available local models (user/model)", options: localModels) {
-                    let modelID = localModels[selectedIndex]
-                    let modelPath = "~/models/\(modelID)"
-                    do {
-                        renderer.printStatus("Switching model to \(modelID)...")
-                        try await agentLoop.switchModel(to: modelPath)
-                        selectedModel = modelPath
-                        announcedGeneralFastFoundationRoute = false
-                        renderer.printStatus("Active model: \(selectedModel)")
-                    } catch {
-                        renderer.printError("Failed to switch model: \(error.localizedDescription)")
-                    }
-                } else {
-                    renderer.printStatus("Model selection cancelled.")
+                renderer.printChunk("\nNo local models found under ~/models.\n\n")
+            } else if let selectedIndex = await interactiveInput.selectOption(prompt: "Available local models (user/model)", options: localModels) {
+                let modelID = localModels[selectedIndex]
+                let modelPath = "~/models/\(modelID)"
+                do {
+                    renderer.printStatus("Switching model to \(modelID)...")
+                    try await agentLoop.switchModel(to: modelPath)
+                    selectedModel = modelPath
+                    announcedGeneralFastFoundationRoute = false
+                    renderer.printStatus("Active model: \(selectedModel)")
+                } catch {
+                    renderer.printError("Failed to switch model: \(error.localizedDescription)")
                 }
+            } else {
+                renderer.printStatus("Model selection cancelled.")
             }
             return
         }
@@ -641,8 +516,8 @@ struct ChatCommand: AsyncParsableCommand {
 
 // MARK: - REPL Help Text
 
-func printREPLHelp() {
-    print("""
+func replHelpText() -> String {
+    """
     
     \u{1B}[1mShortcuts:\u{001B}[0m
       \u{001B}[32m?\u{001B}[0m              Show this help message
@@ -675,7 +550,7 @@ func printREPLHelp() {
                      General (low) → Coding (fast) → Coding (low) → Coding (high)
       \u{001B}[32mCtrl+C\u{001B}[0m         Exit REPL
       
-    """)
+    """
 }
 
 // MARK: - Memory Restoration
@@ -986,5 +861,3 @@ func handleMemorySnippet(window: String?, workspaceRoot: String, store: Knowledg
         renderer.printError("Snippet generation failed: \(error)")
     }
 }
-
-

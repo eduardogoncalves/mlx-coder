@@ -57,7 +57,7 @@ extension AgentLoop {
 
             if renderer.verbose, !summary.isEmpty {
                 renderer.printStatus("[debug] Condensed summary for \(toolName):")
-                print(summary)
+                renderer.printChunk("\(summary)\n")
             }
 
             guard !summary.isEmpty else {

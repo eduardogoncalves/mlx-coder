@@ -10,12 +10,24 @@ public final class StreamRenderer: @unchecked Sendable {
 
     /// Whether to show thinking blocks.
     public let verbose: Bool
+
+    public var ui: TerminalUI?
+
+    private var write: @Sendable (String) -> Void
     
     // State for streaming thinking blocks line-by-line
     private var needsPrefix = true
 
-    public init(verbose: Bool = false) {
+    public init(verbose: Bool = false, write: (@Sendable (String) -> Void)? = nil) {
         self.verbose = verbose
+        self.write = write ?? { text in
+            print(text, terminator: "")
+            fflush(stdout)
+        }
+    }
+
+    public func setWriter(_ write: @escaping @Sendable (String) -> Void) {
+        self.write = write
     }
 
     // MARK: - ANSI Colors
@@ -32,13 +44,12 @@ public final class StreamRenderer: @unchecked Sendable {
 
     /// Print a text chunk from the model.
     public func printChunk(_ text: String) {
-        print(text, terminator: "")
-        fflush(stdout)
+        write(text)
     }
 
     /// Print a thinking block (only if verbose).
     public func printThinking(_ text: String) {
-        print("\(Self.dim)+ \(text)\(Self.reset)")
+        write("\(Self.dim)+ \(text)\(Self.reset)\n")
     }
     
     public func startThinking() {
@@ -57,13 +68,12 @@ public final class StreamRenderer: @unchecked Sendable {
                 needsPrefix = true
             }
         }
-        print("\(Self.dim)\(output)\(Self.reset)", terminator: "")
-        fflush(stdout)
+        write("\(Self.dim)\(output)\(Self.reset)")
     }
     
     public func endThinking() {
         if !needsPrefix {
-            print() // ensure we end on a new line
+            write("\n")
         }
         needsPrefix = true
     }
@@ -86,17 +96,17 @@ public final class StreamRenderer: @unchecked Sendable {
                 jsonText = String(describing: payload)
             }
 
-            print("<tool_call>")
-            print(jsonText)
-            print("</tool_call>")
+            write("<tool_call>\n")
+            write("\(jsonText)\n")
+            write("</tool_call>\n")
         }
 
         let argsString = arguments.map { "\($0.key): \($0.value)" }.joined(separator: ", ")
         let width = getTerminalWidth()
         let topBorder = String(repeating: "─", count: max(0, width - 2))
 
-        print("\n\(Self.lineDim)╭\(topBorder)\(Self.reset)")
-        print("\(Self.lineDim)│\(Self.reset) \(Self.bold)\(Self.yellow)🔧 \(name)\(Self.reset)\(Self.dim)(\(argsString))\(Self.reset)")
+        write("\n\(Self.lineDim)╭\(topBorder)\(Self.reset)\n")
+        write("\(Self.lineDim)│\(Self.reset) \(Self.bold)\(Self.yellow)🔧 \(name)\(Self.reset)\(Self.dim)(\(argsString))\(Self.reset)\n")
     }
 
     /// Print a tool result (Bottom of the box).
@@ -111,28 +121,29 @@ public final class StreamRenderer: @unchecked Sendable {
         let lines = result.content.split(separator: "\n")
         if let firstLine = lines.first {
             let truncated = firstLine.count > width - 10 ? String(firstLine.prefix(width - 15)) + "..." : String(firstLine)
-            print("\(Self.lineDim)│\(Self.reset) \(color)\(icon) \(truncated)\(Self.reset)")
+            write("\(Self.lineDim)│\(Self.reset) \(color)\(icon) \(truncated)\(Self.reset)\n")
         }
         
         if let marker = result.truncationMarker {
-            print("\(Self.lineDim)│\(Self.reset) \(Self.dim)\(marker)\(Self.reset)")
+            write("\(Self.lineDim)│\(Self.reset) \(Self.dim)\(marker)\(Self.reset)\n")
         }
         
-        print("\(Self.lineDim)╰\(bottomBorder)\(Self.reset)")
+        write("\(Self.lineDim)╰\(bottomBorder)\(Self.reset)\n")
     }
 
     /// Print a status message.
     public func printStatus(_ message: String) {
-        print("\(Self.dim)\(Self.magenta)▸ \(message)\(Self.reset)")
+        write("\(Self.dim)\(Self.magenta)▸ \(message)\(Self.reset)\n")
     }
 
     /// Print an error.
     public func printError(_ message: String) {
-        print("\(Self.bold)\(Self.red)Error: \(message)\(Self.reset)")
+        write("\(Self.bold)\(Self.red)Error: \(message)\(Self.reset)\n")
     }
 
     /// Print the prompt indicator.
     public func printPrompt() {
+        if ui != nil { return }
         let width = getTerminalWidth()
         print("\n\(Self.lineDim)" + String(repeating: "─", count: width) + "\(Self.reset)")
         print("\(Self.bold)\(Self.magenta)>\(Self.reset) ", terminator: "")
@@ -140,6 +151,7 @@ public final class StreamRenderer: @unchecked Sendable {
     }
     
     public func printPromptFooter(contextPercent: Double, branchName: String? = nil, commitCount: Int = 0) {
+        if ui != nil { return }
         let width = getTerminalWidth()
         print("\(Self.lineDim)" + String(repeating: "─", count: width) + "\(Self.reset)")
         
@@ -163,6 +175,7 @@ public final class StreamRenderer: @unchecked Sendable {
     
     /// Clear the previous N lines from the terminal
     public func clearPreviousLines(count: Int) {
+        if ui != nil { return }
         guard count > 0 else { return }
         print("\r\u{001B}[\(count)A\u{001B}[J", terminator: "")
         fflush(stdout)

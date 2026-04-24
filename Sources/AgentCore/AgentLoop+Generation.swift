@@ -54,7 +54,7 @@ extension AgentLoop {
             : nil
 
         // Start processing spinner before inference begins
-        let spinner = Spinner(message: "Processing...")
+        let spinner = Spinner(message: "Processing...", ui: renderer.ui)
         await spinner.start()
 
         let result = try await modelContainer.perform { [currentGenerationConfig, renderer, chatML, imageURLs, vlmMessageData, vlmLastUserIndex, shouldUseProcessorPath, isVLM] context in
@@ -272,12 +272,12 @@ extension AgentLoop {
                     }
                 case .info(let info):
                     stopSpinnerOnFirstVisibleOutput()
-                    print()
+                    renderer.printChunk("\n")
                     let statMessage = String(format: "Generated %d tokens (%.1f tok/s), prompt: %d tokens (%.1f tok/s)",
                                              info.generationTokenCount, info.tokensPerSecond,
                                              info.promptTokenCount, info.promptTokensPerSecond)
                     renderer.printStatus(statMessage)
-                    print()
+                    renderer.printChunk("\n")
                 }
             }
             
