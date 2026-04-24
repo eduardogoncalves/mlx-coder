@@ -253,8 +253,12 @@ pub const TUI = struct {
             const n = self.token_queue.pop(&tmp);
             if (n == 0) break;
             any = true;
+            std.debug.print("[drainQueue] got {} bytes: {s}\n", .{ n, tmp[0..n] });
             try self.response_buf.appendSlice(self.allocator, tmp[0..n]);
             try self.appendOutput(tmp[0..n], "");
+        }
+        if (!any) {
+            std.debug.print("[drainQueue] queue empty\n", .{});
         }
         return any;
     }
