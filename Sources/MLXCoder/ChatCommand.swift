@@ -65,6 +65,14 @@ struct ChatCommand: AsyncParsableCommand {
         }
         renderer.printStatus("Model loaded successfully")
 
+        // Start update check in background so it runs in parallel with the rest of setup.
+        // We'll collect the result right before the REPL header so the notice always
+        // prints to a clean line, never into the interactive input box.
+        let currentVersion = MLXCoderCLI.configuration.version
+        let updateCheckTask = Task<UpdateInfo?, Never> {
+            await UpdateChecker.checkForUpdate(currentVersion: currentVersion)
+        }
+
         // Set up permissions
         let workspacePath = NSString(string: args.workspace).expandingTildeInPath
         let rawWorkspace = workspacePath.hasPrefix("/") ? workspacePath : FileManager.default.currentDirectoryPath + "/" + workspacePath
@@ -168,20 +176,27 @@ struct ChatCommand: AsyncParsableCommand {
 
         // Clear the 5 startup status lines to make the UI cleaner
         renderer.clearPreviousLines(count: 5)
-        
-        let currentVersion = MLXCoderCLI.configuration.version
 
-        // Passive update check — runs in the background and prints a notice if a newer version is available.
-        Task {
-            if let info = await UpdateChecker.checkForUpdate(currentVersion: currentVersion) {
-                renderer.printStatus("⬆️  mlx-coder \(info.latestVersion) is available (you have \(info.currentVersion)). Run `mlx-coder update` to install.")
+        // Collect update check result (already running in background since model load).
+        // Race against a 2-second deadline so startup is never blocked.
+        let pendingUpdate: UpdateInfo? = await withTaskGroup(of: UpdateInfo?.self) { group in
+            group.addTask { await updateCheckTask.value }
+            group.addTask {
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                return nil
             }
+            let first = await group.next()
+            group.cancelAll()
+            return first ?? nil
         }
 
         // REPL Header
         print("mlx-coder \u{001B}[2m(v\(currentVersion))\u{001B}[0m")
         print("\u{001B}[2mModel: \(selectedModel)\u{001B}[0m")
         print("\u{001B}[2mWorkspace: \(absWorkspace)\u{001B}[0m\n")
+        if let info = pendingUpdate {
+            print("⬆️  mlx-coder \(info.latestVersion) is available. Run \u{001B}[1mmlx-coder update\u{001B}[0m to install.\n")
+        }
         renderer.printStatus("[Key mode] Editing input. Enter sends, Shift+Tab cycles mode, Ctrl+C exits.")
 
         let interactiveInput = InteractiveInput()
