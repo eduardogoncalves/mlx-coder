@@ -102,6 +102,14 @@ mkdir -p "$DIST/lib"
 cp -f "$TUI_BIN" "$DIST/"
 cp -f "$ZIG_LIB_DIR"/*.dylib "$DIST/lib/"
 
+# Copy the MLX metallib bundle so libMLXCLib can find Metal shaders at runtime.
+# The bundle is built as part of the Swift dependency chain and contains default.metallib.
+METALLIB_BUNDLE="$SWIFT_BUILD_OUT/cli/mlx-swift_Cmlx.bundle"
+if [[ -d "$METALLIB_BUNDLE" ]]; then
+    cp -rf "$METALLIB_BUNDLE" "$DIST/"
+    echo "   Metallib: $DIST/mlx-swift_Cmlx.bundle"
+fi
+
 # Fix the rpath in the binary so it finds the dylibs in ../lib relative to itself.
 install_name_tool -add_rpath "@executable_path/../lib" "$DIST/mlx-coder-tui" 2>/dev/null || true
 

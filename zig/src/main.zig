@@ -21,6 +21,10 @@ const tui    = @import("tui.zig");
 // Shared state (process-global, accessed from C callbacks and the main loop)
 // ---------------------------------------------------------------------------
 
+/// Global Io instance for synchronization operations
+pub var g_io: std.Io = undefined;
+pub var g_io_initialized = false;
+
 /// Singleton token queue — bytes arrive from the Swift token callback.
 var g_queue: queue.TokenQueue = .{};
 
@@ -41,7 +45,8 @@ export fn onToken(
     token:     ?[*]const u8,
     len:       usize,
     _user_data: ?*anyopaque,
-) callconv(.C) void {
+) callconv(.c) void {
+    _ = _user_data;
     if (token) |t| {
         g_queue.push(t[0..len]);
     }
@@ -51,8 +56,9 @@ export fn onToken(
 export fn onDone(
     error_msg:  ?[*:0]const u8,
     _user_data: ?*anyopaque,
-) callconv(.C) void {
+) callconv(.c) void {
     _ = error_msg; // TODO: surface errors through the TUI status bar
+    _ = _user_data;
     g_queue.markDone();
     g_done.store(true, .release);
 }
@@ -62,7 +68,8 @@ export fn onLoad(
     success:    bool,
     error_msg:  ?[*:0]const u8,
     _user_data: ?*anyopaque,
-) callconv(.C) void {
+) callconv(.c) void {
+    _ = _user_data;
     if (!success) {
         if (error_msg) |msg| {
             const s = std.mem.sliceTo(msg, 0);
@@ -80,7 +87,7 @@ export fn onApproval(
     tool_name:  ?[*:0]const u8,
     args_json:  ?[*:0]const u8,
     user_data:  ?*anyopaque,
-) callconv(.C) void {
+) callconv(.c) void {
     if (user_data == null) return;
     const ui: *tui.TUI = @ptrCast(@alignCast(user_data));
     if (tool_name) |t| {
@@ -114,20 +121,25 @@ fn leaveRawMode(saved: *const Termios) void {
     std.posix.tcsetattr(std.posix.STDIN_FILENO, .FLUSH, saved.*) catch {};
 }
 
+fn sleepNs(nanoseconds: u64) void {
+    var ts: std.posix.timespec = .{
+        .sec = @intCast(@divFloor(nanoseconds, std.time.ns_per_s)),
+        .nsec = @intCast(@mod(nanoseconds, std.time.ns_per_s)),
+    };
+    _ = std.posix.system.nanosleep(&ts, &ts);
+}
+
 // ---------------------------------------------------------------------------
 // Argument parsing
 // ---------------------------------------------------------------------------
 
 const Args = struct {
-    model_path: []const u8,
+    model_path: [:0]const u8,
 };
 
-fn parseArgs(allocator: std.mem.Allocator) !Args {
-    var args = try std.process.argsWithAllocator(allocator);
-    defer args.deinit();
-    _ = args.next(); // program name
-
-    const model_path = args.next() orelse {
+fn parseArgs(proc_args: std.process.Args, arena: std.mem.Allocator) !Args {
+    const argv = try proc_args.toSlice(arena);
+    if (argv.len < 2) {
         std.debug.print(
             \\Usage: mlx-coder-tui <model-path>
             \\
@@ -136,20 +148,23 @@ fn parseArgs(allocator: std.mem.Allocator) !Args {
             \\
         , .{});
         return error.MissingModelPath;
-    };
-    return Args{ .model_path = model_path };
+    }
+    return Args{ .model_path = argv[1] };
 }
 
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+pub fn main(init: std.process.Init) !void {
+    g_io = init.io;
+    g_io_initialized = true;
+    defer g_io_initialized = false;
 
-    const args = try parseArgs(allocator);
+    const arena = init.arena;
+    const allocator = arena.allocator();
+
+    const args = try parseArgs(init.minimal.args, allocator);
 
     // --- Create MLXCLib session -------------------------------------------
     const session = bridge.mlxclib_session_create() orelse {
@@ -159,7 +174,7 @@ pub fn main() !void {
     defer bridge.mlxclib_session_destroy(session);
 
     // --- Initialise TUI ------------------------------------------------------
-    var ui = tui.TUI.init(allocator, &g_queue);
+    var ui = tui.TUI.init(allocator, g_io, &g_queue);
     defer ui.deinit();
 
     ui.setModelName(args.model_path);
@@ -176,16 +191,16 @@ pub fn main() !void {
 
     bridge.mlxclib_load_model(session, model_path_z.ptr, onLoad, null);
 
-    const stdout = std.io.getStdOut().writer();
-
     // Status message while loading
-    try stdout.print("\r{s}Loading model: {s}…{s}\n", .{
+    var msg_buf: [256]u8 = undefined;
+    const msg = try std.fmt.bufPrint(&msg_buf, "\r{s}Loading model: {s}…{s}\n", .{
         "\x1b[33m", args.model_path, "\x1b[0m",
     });
+    try std.Io.File.writeStreamingAll(std.Io.File.stdout(), g_io, msg);
 
     // Wait for model to load (poll; render loop hasn't started yet).
     while (!g_load_done.load(.acquire)) {
-        std.time.sleep(50 * std.time.ns_per_ms);
+        sleepNs(50 * std.time.ns_per_ms);
     }
 
     if (!g_load_ok.load(.acquire)) {
@@ -207,7 +222,7 @@ pub fn main() !void {
 
     var running = true;
     while (running) {
-        const frame_start = std.time.nanoTimestamp();
+        const frame_start = g_io.vtable.now(g_io.userdata, .real).nanoseconds;
 
         // -- Process keyboard input -----------------------------------------
         var byte: [1]u8 = undefined;
@@ -232,10 +247,10 @@ pub fn main() !void {
                     } else if (!ui.generating) {
                         const prompt = ui.takeInput();
                         if (prompt.len > 0) {
-                            try submitPrompt(allocator, session, prompt);
                             ui.generating = true;
                             g_done.store(false, .release);
                             g_queue.reset();
+                            try submitPrompt(allocator, session, prompt);
                         }
                     }
                 },
@@ -286,8 +301,11 @@ pub fn main() !void {
                         ui.appendInputByte(byte[0]);
                     }
                 },
-                // Printable ASCII
-                32...126 => ui.appendInputByte(byte[0]),
+                // Printable ASCII (excluding n=110, s=115, y=121)
+                32...109 => ui.appendInputByte(byte[0]),
+                111...114 => ui.appendInputByte(byte[0]),
+                116...120 => ui.appendInputByte(byte[0]),
+                122...126 => ui.appendInputByte(byte[0]),
                 else => {},
             }
         }
@@ -301,16 +319,17 @@ pub fn main() !void {
             ui.approval.pending  = false;
             ui.approval.answered = false;
             // Emit newline after response
-            try stdout.writeAll("\n");
+            try std.Io.File.writeStreamingAll(std.Io.File.stdout(), g_io, "\n");
         }
 
         // -- Periodic repaint ------------------------------------------------
         try ui.repaint(session);
 
         // -- Frame-rate cap --------------------------------------------------
-        const elapsed = @as(u64, @intCast(std.time.nanoTimestamp() - frame_start));
+        const frame_end = g_io.vtable.now(g_io.userdata, .real).nanoseconds;
+        const elapsed = @as(u64, @intCast(frame_end - frame_start));
         if (elapsed < frame_ns) {
-            std.time.sleep(frame_ns - elapsed);
+            sleepNs(frame_ns - elapsed);
         }
     }
 }
@@ -324,11 +343,12 @@ fn submitPrompt(
     session:   bridge.MLXCSession,
     prompt:    []const u8,
 ) !void {
-    const w = std.io.getStdOut().writer();
-    try w.print("\n{s}You:{s} {s}\n{s}Assistant:{s} ", .{
+    var msg_buf: [512]u8 = undefined;
+    const msg = try std.fmt.bufPrint(&msg_buf, "\n{s}You:{s} {s}\n{s}Assistant:{s} ", .{
         "\x1b[1;32m", "\x1b[0m", prompt,
         "\x1b[1;36m", "\x1b[0m",
     });
+    try std.Io.File.writeStreamingAll(std.Io.File.stdout(), g_io, msg);
 
     const prompt_z = try allocator.dupeZ(u8, prompt);
     defer allocator.free(prompt_z);

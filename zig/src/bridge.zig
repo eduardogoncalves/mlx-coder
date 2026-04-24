@@ -20,24 +20,24 @@ pub const MLXCTokenCallback = *const fn (
     token:     ?[*]const u8,
     len:       usize,
     user_data: ?*anyopaque,
-) callconv(.C) void;
+) callconv(.c) void;
 
 pub const MLXCDoneCallback = *const fn (
     error_msg: ?[*:0]const u8,
     user_data: ?*anyopaque,
-) callconv(.C) void;
+) callconv(.c) void;
 
 pub const MLXCLoadCallback = *const fn (
     success:   bool,
     error_msg: ?[*:0]const u8,
     user_data: ?*anyopaque,
-) callconv(.C) void;
+) callconv(.c) void;
 
 pub const MLXCApprovalCallback = *const fn (
     tool_name: ?[*:0]const u8,
     args_json: ?[*:0]const u8,
     user_data: ?*anyopaque,
-) callconv(.C) void;
+) callconv(.c) void;
 
 // ---------------------------------------------------------------------------
 // Observability snapshot (must match MLXCStats in mlxclib.h byte-for-byte)

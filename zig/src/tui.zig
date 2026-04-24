@@ -75,8 +75,9 @@ pub const ApprovalRequest = struct {
 
 pub const TUI = struct {
     allocator:   std.mem.Allocator,
-    out:         std.fs.File,   // stdout
-    err:         std.fs.File,   // stderr (for diagnostics only)
+    io:          std.Io,
+    out:         std.Io.File,   // stdout
+    err:         std.Io.File,   // stderr (for diagnostics only)
 
     // Terminal dimensions
     term_rows:   u16 = 24,
@@ -102,18 +103,29 @@ pub const TUI = struct {
 
     // ---------------------------------------------------------------------------
 
-    pub fn init(allocator: std.mem.Allocator, tq: *queue.TokenQueue) TUI {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, tq: *queue.TokenQueue) TUI {
         return .{
             .allocator    = allocator,
-            .out          = std.io.getStdOut(),
-            .err          = std.io.getStdErr(),
+            .io           = io,
+            .out          = std.Io.File.stdout(),
+            .err          = std.Io.File.stderr(),
             .token_queue  = tq,
-            .response_buf = std.ArrayList(u8).init(allocator),
+            .response_buf = std.ArrayList(u8).empty,
         };
     }
 
     pub fn deinit(self: *TUI) void {
-        self.response_buf.deinit();
+        self.response_buf.deinit(self.allocator);
+    }
+
+    fn printFmt(self: *TUI, comptime fmt: []const u8, args: anytype) !void {
+        var buf: [4096]u8 = undefined;
+        const text = try std.fmt.bufPrint(&buf, fmt, args);
+        try std.Io.File.writeStreamingAll(self.out, self.io, text);
+    }
+
+    fn writeAll(self: *TUI, text: []const u8) !void {
+        try std.Io.File.writeStreamingAll(self.out, self.io, text);
     }
 
     // -----------------------------------------------------------------------
@@ -122,20 +134,18 @@ pub const TUI = struct {
 
     pub fn enter(self: *TUI) !void {
         self.queryTermSize();
-        const w = self.out.writer();
-        try w.writeAll(ALT_ON);
-        try w.writeAll(CLEAR_SCREEN);
-        try w.writeAll(HIDE_CURSOR);
+        try std.Io.File.writeStreamingAll(self.out, self.io, ALT_ON);
+        try std.Io.File.writeStreamingAll(self.out, self.io, CLEAR_SCREEN);
+        try std.Io.File.writeStreamingAll(self.out, self.io, HIDE_CURSOR);
         try self.drawStatusBar();
         try self.drawInputLine();
-        try self.out.writer().writeAll(SHOW_CURSOR);
+        try std.Io.File.writeStreamingAll(self.out, self.io, SHOW_CURSOR);
     }
 
     pub fn leave(self: *TUI) !void {
-        const w = self.out.writer();
-        try w.writeAll(ALT_OFF);
-        try w.writeAll(SHOW_CURSOR);
-        try w.writeAll(RESET);
+        try std.Io.File.writeStreamingAll(self.out, self.io, ALT_OFF);
+        try std.Io.File.writeStreamingAll(self.out, self.io, SHOW_CURSOR);
+        try std.Io.File.writeStreamingAll(self.out, self.io, RESET);
     }
 
     // -----------------------------------------------------------------------
@@ -163,21 +173,20 @@ pub const TUI = struct {
     // -----------------------------------------------------------------------
 
     fn drawStatusBar(self: *TUI) !void {
-        const w = self.out.writer();
         // Move to top-left, clear line
-        try w.print("{s}1;1H{s}", .{ ESC, CLEAR_LINE });
+        try self.printFmt("{s}1;1H{s}", .{ ESC, CLEAR_LINE });
 
         const modelLabel = std.mem.sliceTo(&self.model_name, 0);
         const speed = self.last_stats.tokens_per_sec;
         const loaded = self.last_stats.model_loaded != 0;
 
         if (loaded) {
-            try w.print(BOLD ++ CYAN ++ " mlx-coder " ++ RESET
+            try self.printFmt(BOLD ++ CYAN ++ " mlx-coder " ++ RESET
                 ++ " │ model: {s}"
                 ++ DIM ++ "  {d:.1} tok/s" ++ RESET,
                 .{ modelLabel, speed });
         } else {
-            try w.print(BOLD ++ CYAN ++ " mlx-coder " ++ RESET
+            try self.printFmt(BOLD ++ CYAN ++ " mlx-coder " ++ RESET
                 ++ DIM ++ " (loading model…)" ++ RESET,
                 .{});
         }
@@ -188,9 +197,8 @@ pub const TUI = struct {
     // -----------------------------------------------------------------------
 
     pub fn appendOutput(self: *TUI, text: []const u8, comptime color: []const u8) !void {
-        const w = self.out.writer();
         // Move to row 2, scroll area start; append at current cursor position.
-        try w.print("{s}{s}{s}", .{ color, text, RESET });
+        try self.printFmt("{s}{s}{s}", .{ color, text, RESET });
     }
 
     // -----------------------------------------------------------------------
@@ -198,14 +206,13 @@ pub const TUI = struct {
     // -----------------------------------------------------------------------
 
     fn drawInputLine(self: *TUI) !void {
-        const w  = self.out.writer();
         const row = self.term_rows;
-        try w.print("{s}{d};1H{s}", .{ ESC, row, CLEAR_LINE });
+        try self.printFmt("{s}{d};1H{s}", .{ ESC, row, CLEAR_LINE });
 
         const prompt = if (self.generating) DIM ++ "  (generating…)  " ++ RESET
                        else GREEN ++ "> " ++ RESET;
-        try w.writeAll(prompt);
-        try w.writeAll(self.input_buf[0..self.input_len]);
+        try self.writeAll(prompt);
+        try self.writeAll(self.input_buf[0..self.input_len]);
     }
 
     // -----------------------------------------------------------------------
@@ -213,28 +220,27 @@ pub const TUI = struct {
     // -----------------------------------------------------------------------
 
     pub fn drawApprovalModal(self: *TUI) !void {
-        const w      = self.out.writer();
         const midRow = self.term_rows / 2 - 2;
-        const midCol: u16 = @intCast(@max(1, (@as(i32, self.term_cols) - 60) / 2));
+        const midCol: u16 = @intCast(@max(1, @divTrunc(@as(i32, self.term_cols) - 60, 2)));
 
         // Box top
-        try w.print("{s}{d};{d}H", .{ ESC, midRow, midCol });
-        try w.writeAll(BOLD ++ YELLOW);
-        try w.writeAll("┌──────────────────────────────────────────────────────────┐");
-        try w.print("{s}{d};{d}H", .{ ESC, midRow + 1, midCol });
-        try w.print("│  Tool approval required: {s:<32}  │",
+        try self.printFmt("{s}{d};{d}H", .{ ESC, midRow, midCol });
+        try self.writeAll(BOLD ++ YELLOW);
+        try self.writeAll("┌──────────────────────────────────────────────────────────┐");
+        try self.printFmt("{s}{d};{d}H", .{ ESC, midRow + 1, midCol });
+        try self.printFmt("│  Tool approval required: {s:<32}  │",
             .{ self.approval.toolSlice() });
-        try w.print("{s}{d};{d}H", .{ ESC, midRow + 2, midCol });
-        try w.writeAll("│                                                            │");
-        try w.print("{s}{d};{d}H", .{ ESC, midRow + 3, midCol });
-        try w.print("│  Args: {s:<52}  │",
+        try self.printFmt("{s}{d};{d}H", .{ ESC, midRow + 2, midCol });
+        try self.writeAll("│                                                            │");
+        try self.printFmt("{s}{d};{d}H", .{ ESC, midRow + 3, midCol });
+        try self.printFmt("│  Args: {s:<52}  │",
             .{ self.approval.argsSlice()[0..@min(self.approval.argsSlice().len, 52)] });
-        try w.print("{s}{d};{d}H", .{ ESC, midRow + 4, midCol });
-        try w.writeAll("│                                                            │");
-        try w.print("{s}{d};{d}H", .{ ESC, midRow + 5, midCol });
-        try w.writeAll("│  [y] Allow once   [n] Deny   [s] Session-allow            │");
-        try w.print("{s}{d};{d}H", .{ ESC, midRow + 6, midCol });
-        try w.writeAll("└──────────────────────────────────────────────────────────┘" ++ RESET);
+        try self.printFmt("{s}{d};{d}H", .{ ESC, midRow + 4, midCol });
+        try self.writeAll("│                                                            │");
+        try self.printFmt("{s}{d};{d}H", .{ ESC, midRow + 5, midCol });
+        try self.writeAll("│  [y] Allow once   [n] Deny   [s] Session-allow            │");
+        try self.printFmt("{s}{d};{d}H", .{ ESC, midRow + 6, midCol });
+        try self.writeAll("└──────────────────────────────────────────────────────────┘" ++ RESET);
     }
 
     // -----------------------------------------------------------------------
@@ -250,7 +256,7 @@ pub const TUI = struct {
             const n = self.token_queue.pop(&tmp);
             if (n == 0) break;
             any = true;
-            try self.response_buf.appendSlice(tmp[0..n]);
+            try self.response_buf.appendSlice(self.allocator, tmp[0..n]);
             try self.appendOutput(tmp[0..n], "");
         }
         return any;
@@ -264,14 +270,13 @@ pub const TUI = struct {
         // Refresh stats
         bridge.mlxclib_get_stats(session, &self.last_stats);
 
-        const w = self.out.writer();
-        try w.writeAll(SAVE_CURSOR);
+        try self.writeAll(SAVE_CURSOR);
         try self.drawStatusBar();
         if (self.approval.pending and !self.approval.answered) {
             try self.drawApprovalModal();
         }
         try self.drawInputLine();
-        try w.writeAll(RESTORE_CURSOR);
+        try self.writeAll(RESTORE_CURSOR);
     }
 
     // -----------------------------------------------------------------------

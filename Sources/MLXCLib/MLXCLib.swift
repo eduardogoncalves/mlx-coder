@@ -197,7 +197,7 @@ final class MLXCLibSession: @unchecked Sendable {
             }
 
             let t0 = Date()
-            var tokenCount: UInt64 = 0
+            nonisolated(unsafe) var tokenCount = 0
 
             do {
                 try await container.perform { ctx in
@@ -254,7 +254,7 @@ final class MLXCLibSession: @unchecked Sendable {
                 }
 
                 let elapsed = max(-t0.timeIntervalSinceNow, 1e-9)
-                updateStats(tokenCount: tokenCount, elapsed: elapsed)
+                updateStats(tokenCount: UInt64(tokenCount), elapsed: elapsed)
 
                 onDone(nil)
 
@@ -288,12 +288,17 @@ final class MLXCLibSession: @unchecked Sendable {
         approvalLock.unlock()
     }
 
+    /// Synchronous helper: read the approval callback under lock.
+    private func readApprovalCallback() -> (@Sendable (String, String?) -> Void)? {
+        approvalLock.lock()
+        defer { approvalLock.unlock() }
+        return approvalCB
+    }
+
     /// Request approval for `toolName`.  Blocks the calling async task until
     /// `gate.respond(approved:suggestion:)` is called by the Zig side.
     func requestApproval(toolName: String, argsJSON: String?) async -> (Bool, String?) {
-        approvalLock.lock()
-        let cb = approvalCB
-        approvalLock.unlock()
+        let cb = readApprovalCallback()
 
         // Fire the C callback so Zig can show its approval modal.
         cb?(toolName, argsJSON)
@@ -363,12 +368,12 @@ final class MLXCLibSession: @unchecked Sendable {
 
 // Convenience type aliases for the @convention(c) callback signatures used in
 // @_cdecl functions.  These must match the C typedefs in mlxclib.h exactly.
-// Must be internal (not private) because @_cdecl public functions use them as
-// parameter types and Swift requires at least internal visibility there.
-typealias CTokenCB    = @convention(c) (UnsafePointer<CChar>?,    Int,  UnsafeMutableRawPointer?) -> Void
-typealias CDoneCB     = @convention(c) (UnsafePointer<CChar>?,          UnsafeMutableRawPointer?) -> Void
-typealias CLoadCB     = @convention(c) (Bool, UnsafePointer<CChar>?,    UnsafeMutableRawPointer?) -> Void
-typealias CApprovalCB = @convention(c) (UnsafePointer<CChar>?, UnsafePointer<CChar>?, UnsafeMutableRawPointer?) -> Void
+// Must be public because @_cdecl public functions use them as parameter types
+// and Swift requires at least public visibility there.
+public typealias CTokenCB    = @convention(c) (UnsafePointer<CChar>?,    Int,  UnsafeMutableRawPointer?) -> Void
+public typealias CDoneCB     = @convention(c) (UnsafePointer<CChar>?,          UnsafeMutableRawPointer?) -> Void
+public typealias CLoadCB     = @convention(c) (Bool, UnsafePointer<CChar>?,    UnsafeMutableRawPointer?) -> Void
+public typealias CApprovalCB = @convention(c) (UnsafePointer<CChar>?, UnsafePointer<CChar>?, UnsafeMutableRawPointer?) -> Void
 
 // ---------------------------------------------------------------------------
 // Session lifecycle
@@ -396,17 +401,16 @@ public func mlxclib_load_model(
     _ callback:    CLoadCB?,
     _ userData:    UnsafeMutableRawPointer?
 ) {
-    guard let sessionPtr, let modelPath else { return }
+    guard let sessionPtr, let modelPath, let callback else { return }
     let session = Unmanaged<MLXCLibSession>.fromOpaque(sessionPtr).takeUnretainedValue()
     let path    = String(cString: modelPath)
-    let cb      = callback
-    let ud      = userData
+    nonisolated(unsafe) let ud = userData
 
     session.loadModel(path: path) { success, errMsg in
         if let errMsg {
-            errMsg.withCString { cb?(success, $0, ud) }
+            errMsg.withCString { callback(success, $0, ud) }
         } else {
-            cb?(success, nil, ud)
+            callback(success, nil, ud)
         }
     }
 }
@@ -427,20 +431,18 @@ public func mlxclib_generate(
     let session = Unmanaged<MLXCLibSession>.fromOpaque(sessionPtr).takeUnretainedValue()
     let prompt  = String(cString: promptPtr)
     let tcb     = tokenCB
-    let dcb     = doneCB
-    let ud      = userData
+    nonisolated(unsafe) let ud = userData
 
     session.generate(
         prompt: prompt,
         onToken: { cStr, len in
-            // cStr is a valid null-terminated C string for the duration of this call.
             tcb?(cStr, len, ud)
         },
         onDone: { errMsg in
             if let errMsg {
-                errMsg.withCString { dcb?($0, ud) }
+                errMsg.withCString { doneCB($0, ud) }
             } else {
-                dcb?(nil, ud)
+                doneCB(nil, ud)
             }
         }
     )
@@ -464,16 +466,15 @@ public func mlxclib_set_approval_handler(
 ) {
     guard let sessionPtr else { return }
     let session = Unmanaged<MLXCLibSession>.fromOpaque(sessionPtr).takeUnretainedValue()
-    let cb      = callback
-    let ud      = userData
+    nonisolated(unsafe) let ud = userData
 
-    if let cb {
+    if let callback {
         session.setApprovalCallback { toolName, argsJSON in
             toolName.withCString { toolNameC in
                 if let argsJSON {
-                    argsJSON.withCString { argsC in cb(toolNameC, argsC, ud) }
+                    argsJSON.withCString { argsC in callback(toolNameC, argsC, ud) }
                 } else {
-                    cb(toolNameC, nil, ud)
+                    callback(toolNameC, nil, ud)
                 }
             }
         }

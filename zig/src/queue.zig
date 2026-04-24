@@ -10,6 +10,7 @@
 //   • A separate "done" flag lets the render loop drain after generation ends.
 
 const std = @import("std");
+const main = @import("main.zig");
 
 pub const TokenQueue = struct {
     const CAP = 8192;
@@ -22,8 +23,8 @@ pub const TokenQueue = struct {
     read:  usize   = 0,
     done:  bool    = false,  // set by Swift's done-callback; read by drain loop
 
-    mutex: std.Thread.Mutex     = .{},
-    cond:  std.Thread.Condition = .{},
+    mutex: std.Io.Mutex     = std.Io.Mutex.init,
+    cond:  std.Io.Condition = std.Io.Condition.init,
 
     // -----------------------------------------------------------------------
     // Writer side (called from Swift callbacks — arbitrary thread)
@@ -31,27 +32,31 @@ pub const TokenQueue = struct {
 
     /// Push all bytes in `data` into the ring buffer, blocking if full.
     pub fn push(self: *TokenQueue, data: []const u8) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        if (!main.g_io_initialized) return;
+        
+        self.mutex.lock(main.g_io) catch {};
+        defer self.mutex.unlock(main.g_io);
 
         for (data) |b| {
             // Block while buffer is full.
             while ((self.write + 1) % CAP == self.read) {
-                self.cond.wait(&self.mutex);
+                self.cond.wait(main.g_io, &self.mutex) catch {};
             }
             self.buf[self.write] = b;
             self.write = (self.write + 1) % CAP;
         }
 
-        self.cond.signal();
+        self.cond.signal(main.g_io);
     }
 
     /// Signal that the generation run has finished.  May be called from any thread.
     pub fn markDone(self: *TokenQueue) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        if (!main.g_io_initialized) return;
+        
+        self.mutex.lock(main.g_io) catch {};
+        defer self.mutex.unlock(main.g_io);
         self.done = true;
-        self.cond.signal();
+        self.cond.signal(main.g_io);
     }
 
     // -----------------------------------------------------------------------
@@ -61,8 +66,10 @@ pub const TokenQueue = struct {
     /// Drain up to `out.len` bytes from the ring buffer without blocking.
     /// Returns the number of bytes written into `out`.
     pub fn pop(self: *TokenQueue, out: []u8) usize {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        if (!main.g_io_initialized) return 0;
+        
+        self.mutex.lock(main.g_io) catch {};
+        defer self.mutex.unlock(main.g_io);
 
         var i: usize = 0;
         while (i < out.len and self.read != self.write) {
@@ -72,21 +79,25 @@ pub const TokenQueue = struct {
         }
 
         // Wake the writer if it was blocked (buffer had space).
-        if (i > 0) self.cond.signal();
+        if (i > 0) self.cond.signal(main.g_io);
         return i;
     }
 
     /// Returns true when no more data will be pushed and the buffer is empty.
     pub fn isExhausted(self: *TokenQueue) bool {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        if (!main.g_io_initialized) return false;
+        
+        self.mutex.lock(main.g_io) catch {};
+        defer self.mutex.unlock(main.g_io);
         return self.done and self.read == self.write;
     }
 
     /// Reset for reuse between generation runs.
     pub fn reset(self: *TokenQueue) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        if (!main.g_io_initialized) return;
+        
+        self.mutex.lock(main.g_io) catch {};
+        defer self.mutex.unlock(main.g_io);
         self.write = 0;
         self.read  = 0;
         self.done  = false;
@@ -94,8 +105,10 @@ pub const TokenQueue = struct {
 
     /// Return the number of bytes currently available for reading.
     pub fn available(self: *TokenQueue) usize {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        if (!main.g_io_initialized) return 0;
+        
+        self.mutex.lock(main.g_io) catch {};
+        defer self.mutex.unlock(main.g_io);
         return (self.write + CAP - self.read) % CAP;
     }
 };

@@ -32,28 +32,32 @@ pub fn build(b: *std.Build) void {
     // Main executable
     // ---------------------------------------------------------------------------
 
-    const exe = b.addExecutable(.{
-        .name   = "mlx-coder-tui",
+    const root_module = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
     });
 
     // Link the Swift-built MLXCLib dynamic library.
-    exe.addLibraryPath(.{ .cwd_relative = lib_dir });
-    exe.linkSystemLibrary("MLXCLib");
+    root_module.addLibraryPath(.{ .cwd_relative = lib_dir });
+    root_module.linkSystemLibrary("MLXCLib", .{});
+
+    // System frameworks required by Swift/MLX on macOS.
+    root_module.linkFramework("Foundation", .{});
+    root_module.linkFramework("Metal", .{});
+    root_module.linkFramework("Accelerate", .{});
+
+    const exe = b.addExecutable(.{
+        .name   = "mlx-coder-tui",
+        .root_module = root_module,
+    });
 
     // Set rpath so the binary can find libMLXCLib.dylib at runtime.
     // We embed the absolute path used at build time AND the @executable_path
     // convention so the binary is portable if the dylib is co-located.
-    exe.addRPath(.{ .cwd_relative = lib_dir });
-    exe.addRPath(.{ .special = "@executable_path" });
-    exe.addRPath(.{ .special = "@executable_path/../lib" });
-
-    // System frameworks required by Swift/MLX on macOS.
-    exe.linkFramework("Foundation");
-    exe.linkFramework("Metal");
-    exe.linkFramework("Accelerate");
+    exe.root_module.addRPathSpecial("@executable_path");
+    exe.root_module.addRPathSpecial("@executable_path/../lib");
+    exe.root_module.addLibraryPath(.{ .cwd_relative = lib_dir });
 
     b.installArtifact(exe);
 
@@ -75,9 +79,11 @@ pub fn build(b: *std.Build) void {
     // ---------------------------------------------------------------------------
 
     const unit_tests = b.addTest(.{
-        .root_source_file = b.path("src/queue.zig"),
-        .target   = target,
-        .optimize = optimize,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/queue.zig"),
+            .target   = target,
+            .optimize = optimize,
+        }),
     });
     const run_tests = b.addRunArtifact(unit_tests);
     const test_step = b.step("test", "Run unit tests (queue, bridge)");
