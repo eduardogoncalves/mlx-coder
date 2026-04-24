@@ -174,7 +174,7 @@ pub fn main(init: std.process.Init) !void {
     defer bridge.mlxclib_session_destroy(session);
 
     // --- Initialise TUI ------------------------------------------------------
-    var ui = tui.TUI.init(allocator, g_io, &g_queue);
+    var ui = tui.TUI.init(allocator, &g_queue);
     defer ui.deinit();
 
     ui.setModelName(args.model_path);

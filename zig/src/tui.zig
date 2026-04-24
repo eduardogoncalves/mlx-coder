@@ -17,6 +17,7 @@
 const std    = @import("std");
 const queue  = @import("queue.zig");
 const bridge = @import("bridge.zig");
+const main   = @import("main.zig");
 
 // ANSI escape helpers
 const ESC  = "\x1b[";
@@ -76,8 +77,6 @@ pub const ApprovalRequest = struct {
 pub const TUI = struct {
     allocator:   std.mem.Allocator,
     io:          std.Io,
-    out:         std.Io.File,   // stdout
-    err:         std.Io.File,   // stderr (for diagnostics only)
 
     // Terminal dimensions
     term_rows:   u16 = 24,
@@ -103,12 +102,10 @@ pub const TUI = struct {
 
     // ---------------------------------------------------------------------------
 
-    pub fn init(allocator: std.mem.Allocator, io: std.Io, tq: *queue.TokenQueue) TUI {
+    pub fn init(allocator: std.mem.Allocator, tq: *queue.TokenQueue) TUI {
         return .{
             .allocator    = allocator,
-            .io           = io,
-            .out          = std.Io.File.stdout(),
-            .err          = std.Io.File.stderr(),
+            .io           = main.g_io,
             .token_queue  = tq,
             .response_buf = std.ArrayList(u8).empty,
         };
@@ -121,11 +118,11 @@ pub const TUI = struct {
     fn printFmt(self: *TUI, comptime fmt: []const u8, args: anytype) !void {
         var buf: [4096]u8 = undefined;
         const text = try std.fmt.bufPrint(&buf, fmt, args);
-        try std.Io.File.writeStreamingAll(self.out, self.io, text);
+        try std.Io.File.writeStreamingAll(std.Io.File.stdout(), self.io, text);
     }
 
     fn writeAll(self: *TUI, text: []const u8) !void {
-        try std.Io.File.writeStreamingAll(self.out, self.io, text);
+        try std.Io.File.writeStreamingAll(std.Io.File.stdout(), self.io, text);
     }
 
     // -----------------------------------------------------------------------
@@ -134,18 +131,18 @@ pub const TUI = struct {
 
     pub fn enter(self: *TUI) !void {
         self.queryTermSize();
-        try std.Io.File.writeStreamingAll(self.out, self.io, ALT_ON);
-        try std.Io.File.writeStreamingAll(self.out, self.io, CLEAR_SCREEN);
-        try std.Io.File.writeStreamingAll(self.out, self.io, HIDE_CURSOR);
+        try std.Io.File.writeStreamingAll(std.Io.File.stdout(), self.io, ALT_ON);
+        try std.Io.File.writeStreamingAll(std.Io.File.stdout(), self.io, CLEAR_SCREEN);
+        try std.Io.File.writeStreamingAll(std.Io.File.stdout(), self.io, HIDE_CURSOR);
         try self.drawStatusBar();
         try self.drawInputLine();
-        try std.Io.File.writeStreamingAll(self.out, self.io, SHOW_CURSOR);
+        try std.Io.File.writeStreamingAll(std.Io.File.stdout(), self.io, SHOW_CURSOR);
     }
 
     pub fn leave(self: *TUI) !void {
-        try std.Io.File.writeStreamingAll(self.out, self.io, ALT_OFF);
-        try std.Io.File.writeStreamingAll(self.out, self.io, SHOW_CURSOR);
-        try std.Io.File.writeStreamingAll(self.out, self.io, RESET);
+        try std.Io.File.writeStreamingAll(std.Io.File.stdout(), self.io, ALT_OFF);
+        try std.Io.File.writeStreamingAll(std.Io.File.stdout(), self.io, SHOW_CURSOR);
+        try std.Io.File.writeStreamingAll(std.Io.File.stdout(), self.io, RESET);
     }
 
     // -----------------------------------------------------------------------
@@ -158,7 +155,7 @@ pub const TUI = struct {
         // This entire TUI module targets macOS only, matching the MLX requirement.
         const TIOCGWINSZ: u32 = 0x40087468;
         const rc = std.posix.system.ioctl(
-            self.out.handle,
+            std.posix.STDOUT_FILENO,
             TIOCGWINSZ,
             @intFromPtr(&ws),
         );

@@ -23,8 +23,8 @@ pub const TokenQueue = struct {
     read:  usize   = 0,
     done:  bool    = false,  // set by Swift's done-callback; read by drain loop
 
-    mutex: std.Io.Mutex     = std.Io.Mutex.init,
-    cond:  std.Io.Condition = std.Io.Condition.init,
+    mutex: std.Io.Mutex = .init,
+    cond:  std.Io.Condition = .init,
 
     // -----------------------------------------------------------------------
     // Writer side (called from Swift callbacks — arbitrary thread)
