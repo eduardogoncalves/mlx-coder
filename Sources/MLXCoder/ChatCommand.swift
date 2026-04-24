@@ -65,6 +65,14 @@ struct ChatCommand: AsyncParsableCommand {
         }
         renderer.printStatus("Model loaded successfully")
 
+        // Passive update check — runs in the background and prints a notice if a newer version is available.
+        let currentVersion = MLXCoderCLI.configuration.version ?? "0.0.0"
+        Task {
+            if let info = await UpdateChecker.checkForUpdate(currentVersion: currentVersion) {
+                renderer.printStatus("⬆️  mlx-coder \(info.latestVersion) is available (you have \(info.currentVersion)). Run `mlx-coder update` to install.")
+            }
+        }
+
         // Set up permissions
         let workspacePath = NSString(string: args.workspace).expandingTildeInPath
         let rawWorkspace = workspacePath.hasPrefix("/") ? workspacePath : FileManager.default.currentDirectoryPath + "/" + workspacePath
