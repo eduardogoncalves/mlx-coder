@@ -34,6 +34,10 @@ public final class SwiftCoderTUIFrontend: AgentFrontend, @unchecked Sendable {
     // first visible token (so we can transition label Processing→Generating).
     private var isFirstContentToken: Bool = true
 
+    // Set when ESC is pressed; gates out late-arriving stream events from a
+    // cancelled Task so they cannot corrupt the footer after abort.
+    private var isAborted: Bool = false
+
     public init(renderer: Renderer, appConfig: AppConfig) {
         self.renderer = renderer
         self.appConfig = appConfig
@@ -109,6 +113,18 @@ public final class SwiftCoderTUIFrontend: AgentFrontend, @unchecked Sendable {
     // MARK: Event rendering
 
     private func render(_ event: AgentEvent) async {
+        // Drop streaming events from a cancelled task so late-arriving chunks
+        // cannot reactivate the stream zone after ESC has cleaned up the footer.
+        if isAborted {
+            switch event {
+            case .assistantTextChunk, .thinkingStarted, .thinkingChunk, .thinkingEnded,
+                 .toolCallStarted, .toolCallResult:
+                return
+            default:
+                break  // status, stats, generationActivity(.ended) still process
+            }
+        }
+
         switch event {
         case .assistantTextChunk(let text):
             // First visible assistant token: transition spinner label from
@@ -220,6 +236,7 @@ public final class SwiftCoderTUIFrontend: AgentFrontend, @unchecked Sendable {
         case .generationActivity(let activity):
             switch activity {
             case .started(let message):
+                isAborted = false
                 isFirstContentToken = true
                 await renderer.setThinking(message)
                 await renderer.setGenerating(true)
@@ -255,9 +272,11 @@ public final class SwiftCoderTUIFrontend: AgentFrontend, @unchecked Sendable {
     /// without going through the async event queue. Use this when the generation
     /// Task is cancelled externally (e.g. ESC) so the UI stays consistent.
     public func abortGeneration() async {
+        isAborted = true
         stopSpinnerTicker()
         thinkingBuffer = ""
         isFirstContentToken = true
+        await renderer.printScrollLine("\(DesignSystem.dim)· Aborted\(DesignSystem.reset)")
         await renderer.flushStreamLine()
         await renderer.flushThinkLine()
         await renderer.setGenerating(false)

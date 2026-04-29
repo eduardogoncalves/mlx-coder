@@ -110,7 +110,7 @@ public func runSwiftCoderTUISession(
             if await renderer.isAutocompleteActive() {
                 await renderer.clearAutocomplete()
                 await renderer.renderFooter()
-            } else if activeStreamTask != nil {
+            } else if await renderer.getIsGenerating() {
                 activeStreamTask?.cancel()
                 await frontend.abortGeneration()
             }
@@ -199,10 +199,13 @@ public func runSwiftCoderTUISession(
             }
 
             activeStreamTask = Task { @MainActor in
+                defer { activeStreamTask = nil }
                 do {
                     try await agentLoop.processUserMessage(trimmed)
+                } catch is CancellationError {
+                    // abortGeneration() already printed "· Aborted" and cleaned up the UI.
                 } catch {
-                    await renderer.printScrollLine("\(DesignSystem.brightRed)error: \(error.localizedDescription)\(DesignSystem.reset)")
+                    await renderer.printScrollLine("\(DesignSystem.brightRed)✗ \(error.localizedDescription)\(DesignSystem.reset)")
                 }
                 await renderer.flushStreamLine()
                 await renderer.setPendingCount(0)
