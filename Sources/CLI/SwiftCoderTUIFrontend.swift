@@ -276,12 +276,10 @@ public final class SwiftCoderTUIFrontend: AgentFrontend, @unchecked Sendable {
         stopSpinnerTicker()
         thinkingBuffer = ""
         isFirstContentToken = true
-        await renderer.printScrollLine("\(DesignSystem.dim)· Aborted\(DesignSystem.reset)")
-        await renderer.flushStreamLine()
-        await renderer.flushThinkLine()
-        await renderer.setGenerating(false)
-        await renderer.setThinking("")
-        await renderer.renderFooter()
+        // Single atomic renderer call: sets isStreamingAborted inside the actor
+        // so any queued appendStreamChunk/appendThinkChunk calls become no-ops,
+        // then clears all state, prints "· Aborted", and redraws.
+        await renderer.abortGeneration()
     }
 
     private func stopSpinnerTicker() {
