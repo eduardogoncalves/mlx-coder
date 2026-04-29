@@ -26,18 +26,13 @@ public final class SwiftCoderTUIFrontend: AgentFrontend, @unchecked Sendable {
     // generation is in flight.
     private var spinnerTickTask: Task<Void, Never>?
 
-    // Accumulated thinking text for the footer spinner label.
-    // Reset at thinkingStarted, committed to scroll at thinkingEnded.
+    // Accumulated thinking text for the footer spinner label tail.
+    // Reset at thinkingStarted, cleared at thinkingEnded.
     private var thinkingBuffer: String = ""
 
-    // State machine for spinner label transitions:
-    //   Processing… → (first token) → Generating… → (<think>) → Thinking… → (</think>) → Generating…
+    // State machine: tracks whether the next assistantTextChunk is the very
+    // first visible token (so we can transition label Processing→Generating).
     private var isFirstContentToken: Bool = true
-    private var isInThinkingBlock: Bool = false
-
-    // Think-block line formatter: tracks whether the next visible character
-    // needs a `+ ` gutter prefix (i.e. we are at the start of a new line).
-    private var thinkNeedsPrefix: Bool = true
 
     public init(renderer: Renderer, appConfig: AppConfig) {
         self.renderer = renderer
@@ -130,29 +125,26 @@ public final class SwiftCoderTUIFrontend: AgentFrontend, @unchecked Sendable {
 
         case .thinkingStarted:
             thinkingBuffer = ""
-            isInThinkingBlock = true
             isFirstContentToken = false  // thinking IS first content
-            thinkNeedsPrefix = true
-            // Show "Thinking…" in the spinner; thinking tokens stream live
-            // through formatThinkChunk (dim + `+ ` line gutter).
+            // Flush any partial assistant stream line before the think block.
+            await renderer.flushStreamLine()
             await renderer.setThinking("Thinking…")
 
         case .thinkingChunk(let text):
             thinkingBuffer += text
-            // Stream thinking text with think-style formatting (dim, `+ ` prefix)
-            // so it looks distinct from the regular response text.
-            await renderer.appendStreamChunk(formatThinkChunk(text))
-            let tail = thinkingBuffer.replacingOccurrences(of: "\n", with: " ")
-            await renderer.setThinking(String(tail.suffix(60)))
+            // Route through appendThinkChunk: complete lines go directly to
+            // the scroll area; partial line shown in spinner label tail.
+            await renderer.appendThinkChunk(text)
+            let tail = thinkingBuffer
+                .replacingOccurrences(of: "\n", with: " ")
+                .trimmingCharacters(in: .whitespaces)
+            await renderer.setThinking(String(tail.suffix(50)))
 
         case .thinkingEnded:
-            // Flush the partial think line still in the stream zone, then
-            // commit a · thinking… summary marker to close the block visually.
-            // Restore "Generating…" so the user knows the response is coming.
-            await renderer.flushStreamLine()
+            // Flush any remaining partial think line to scroll, reset state,
+            // commit the · thinking… marker, restore "Generating…" label.
+            await renderer.flushThinkLine()
             thinkingBuffer = ""
-            isInThinkingBlock = false
-            thinkNeedsPrefix = true
             let badge = await renderer.getCurrentModeBadgeColor()
             let marker = SessionEntry(role: .thinking(badgeColor: badge), content: "thinking…")
             await renderer.printScrollLine(marker.render())
@@ -229,8 +221,6 @@ public final class SwiftCoderTUIFrontend: AgentFrontend, @unchecked Sendable {
             switch activity {
             case .started(let message):
                 isFirstContentToken = true
-                isInThinkingBlock = false
-                thinkNeedsPrefix = true
                 await renderer.setThinking(message)
                 await renderer.setGenerating(true)
                 await renderer.renderFooter()
@@ -268,9 +258,8 @@ public final class SwiftCoderTUIFrontend: AgentFrontend, @unchecked Sendable {
         stopSpinnerTicker()
         thinkingBuffer = ""
         isFirstContentToken = true
-        isInThinkingBlock = false
-        thinkNeedsPrefix = true
         await renderer.flushStreamLine()
+        await renderer.flushThinkLine()
         await renderer.setGenerating(false)
         await renderer.setThinking("")
         await renderer.renderFooter()
@@ -279,29 +268,6 @@ public final class SwiftCoderTUIFrontend: AgentFrontend, @unchecked Sendable {
     private func stopSpinnerTicker() {
         spinnerTickTask?.cancel()
         spinnerTickTask = nil
-    }
-
-    /// Format a thinking chunk for stream display: dim colour + `+ ` gutter
-    /// prefix at the start of each line, matching the classic CLI style.
-    ///
-    /// `thinkNeedsPrefix` is a persistent flag so the prefix is added at the
-    /// first character after every newline (even when the newline arrived in
-    /// the previous chunk).
-    private func formatThinkChunk(_ text: String) -> String {
-        var result = ""
-        for char in text {
-            if thinkNeedsPrefix {
-                result += "\(DesignSystem.dim)+ "
-                thinkNeedsPrefix = false
-            }
-            if char == "\n" {
-                result += "\(DesignSystem.reset)\n"
-                thinkNeedsPrefix = true
-            } else {
-                result += String(char)
-            }
-        }
-        return result
     }
 
     private func describe(_ m: ModelLifecycleEvent) -> String {

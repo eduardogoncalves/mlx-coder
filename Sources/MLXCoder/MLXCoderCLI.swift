@@ -22,7 +22,7 @@ struct MLXCoderCLI: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "mlx-coder",
         abstract: "Swift terminal agent for Apple Silicon — loads LLM in-process via MLX-Swift",
-        version: "0.1.0.202604291103",
+        version: "0.1.0.202604091520",
         subcommands: [ChatCommand.self, RunCommand.self, ListToolsCommand.self, ShowAuditCommand.self, ShowConfigCommand.self, DoctorCommand.self, UpdateCommand.self],
         defaultSubcommand: ChatCommand.self
     )
