@@ -113,15 +113,21 @@ public final class SwiftCoderTUIFrontend: AgentFrontend, @unchecked Sendable {
     // MARK: Event rendering
 
     private func render(_ event: AgentEvent) async {
-        // Drop streaming events from a cancelled task so late-arriving chunks
-        // cannot reactivate the stream zone after ESC has cleaned up the footer.
+        // Drop all events from a cancelled generation so late-arriving chunks,
+        // stats, and .ended cleanup cannot corrupt the footer after ESC.
+        // Only .generationActivity(.started) passes through to clear isAborted
+        // and set up the UI for the next generation.
         if isAborted {
             switch event {
-            case .assistantTextChunk, .thinkingStarted, .thinkingChunk, .thinkingEnded,
-                 .toolCallStarted, .toolCallResult:
-                return
+            case .generationActivity(let activity):
+                switch activity {
+                case .started: break          // let through — clears isAborted
+                default:       return         // drop .ended, .phase
+                }
+            case .error, .modelLifecycle, .modeChanged:
+                break                         // user-visible, let through
             default:
-                break  // status, stats, generationActivity(.ended) still process
+                return                        // drop everything else (stats, status, chunks…)
             }
         }
 
