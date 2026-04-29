@@ -28,6 +28,8 @@ struct RunCommand: AsyncParsableCommand {
     mutating func run() async throws {
         guard !args.testAbsorber.isTestInvocation else { return }
         let renderer = StreamRenderer(verbose: args.verbose)
+        let interactiveInput = InteractiveInput()
+        let frontend = LegacyTerminalFrontend(renderer: renderer, interactiveInput: interactiveInput)
         defer {
             Task {
                 await DotnetLSPService.shared.shutdown()
@@ -145,6 +147,7 @@ struct RunCommand: AsyncParsableCommand {
             useSandbox: effectiveSandbox,
             config: config,
             renderer: renderer,
+            frontend: frontend,
             mcpConfigs: mergedMCPConfigs(
                 runtimeConfigs: runtimeMCPConfigs,
                 cliConfig: makeMCPServerConfig(from: args)
@@ -169,7 +172,8 @@ struct RunCommand: AsyncParsableCommand {
             registry: registry,
             permissions: permissions,
             generationConfig: config,
-            renderer: renderer,
+            frontend: frontend,
+            verbose: args.verbose,
             systemPrompt: promptComposition.prompt,
             modelPath: selectedModel,
             workspace: absWorkspace,

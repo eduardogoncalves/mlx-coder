@@ -158,7 +158,7 @@ extension AgentLoop {
         
         // Hide cursor
         print("\u{1B}[?25l", terminator: "")
-        renderer.printStatus("[Key mode] Approval required. \(footerHint)")
+        frontend.emitStatus("[Key mode] Approval required. \(footerHint)")
         drawMenu()
         
         var finalSelection = -1

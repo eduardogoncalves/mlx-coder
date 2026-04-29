@@ -10,7 +10,7 @@ extension AgentLoop {
 
     /// Full model unload and reload to ensure fresh weights/cache.
     public func reloadModel() async throws {
-        renderer.printStatus("Reloading model to ensure fresh state...")
+        frontend.emit(.modelLifecycle(.loading("Reloading model to ensure fresh state...")))
 
         // Drop tool references first so old model-bound tools can be deallocated.
         await registry.clear()
@@ -40,7 +40,7 @@ extension AgentLoop {
         // Sweep again after rebinding to reclaim stale buffers from the old model.
         MLX.Memory.clearCache()
         
-        renderer.printStatus("Model reloaded successfully")
+        frontend.emit(.modelLifecycle(.reloaded("Model reloaded successfully")))
     }
 
     /// Switch to a different model path and immediately reload model and dependent tools.
@@ -55,11 +55,11 @@ extension AgentLoop {
         }
 
         if trimmed == modelPath {
-            renderer.printStatus("Model is already active: \(trimmed)")
+            frontend.emit(.modelLifecycle(.alreadyActive(trimmed)))
             return
         }
 
-        renderer.printStatus("Unloading current model...")
+        frontend.emit(.modelLifecycle(.unloading("Unloading current model...")))
         modelPath = trimmed
         pendingReload = false
         try await reloadModel()

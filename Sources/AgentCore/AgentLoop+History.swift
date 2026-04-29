@@ -10,15 +10,15 @@ extension AgentLoop {
     public func clearHistory() {
         history.clear()
         MLX.Memory.clearCache()
-        renderer.printStatus("Conversation history and KV cache cleared")
+        frontend.emitStatus("Conversation history and KV cache cleared")
     }
 
     /// Reverts the last conversation turn (User + Assistant).
     public func undoLastTurn() {
         if history.revertLastTurn() {
-            renderer.printStatus("Reverted the last conversation turn")
+            frontend.emitStatus("Reverted the last conversation turn")
         } else {
-            renderer.printError("Nothing to undo")
+            frontend.emitError("Nothing to undo")
         }
     }
 
@@ -27,7 +27,7 @@ extension AgentLoop {
         let resolved = try permissions.validatePath(path)
         let transcript = history.asMarkdownTranscript()
         try transcript.write(toFile: resolved, atomically: true, encoding: .utf8)
-        renderer.printStatus("Exported history to \(resolved)")
+        frontend.emitStatus("Exported history to \(resolved)")
         return resolved
     }
 
@@ -36,7 +36,7 @@ extension AgentLoop {
         let resolved = try permissions.validatePath(path)
         let transcript = try history.asJSONTranscript()
         try transcript.write(toFile: resolved, atomically: true, encoding: .utf8)
-        renderer.printStatus("Exported JSON history to \(resolved)")
+        frontend.emitStatus("Exported JSON history to \(resolved)")
         return resolved
     }
 
@@ -45,7 +45,7 @@ extension AgentLoop {
         let resolved = try permissions.validatePath(path)
         let data = try Data(contentsOf: URL(filePath: resolved))
         try history.restoreFromJSONTranscript(data)
-        renderer.printStatus("Loaded JSON history from \(resolved)")
+        frontend.emitStatus("Loaded JSON history from \(resolved)")
         return resolved
     }
 

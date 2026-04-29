@@ -49,7 +49,7 @@ extension AgentLoop {
             return nil
         }
 
-        renderer.printStatus("[auto-correct] \(toolName): old_text not found — using LLM to find correct match...")
+        frontend.emitStatus("[auto-correct] \(toolName): old_text not found — using LLM to find correct match...")
 
         // Build a focused, token-efficient prompt
         let maxFileChars = 8000
@@ -133,17 +133,17 @@ extension AgentLoop {
 
             // Verify the corrected text actually exists in the file
             guard fileContent.contains(cleanedOldText) else {
-                renderer.printStatus("[auto-correct] LLM suggestion didn't match file — skipping correction")
+                frontend.emitStatus("[auto-correct] LLM suggestion didn't match file — skipping correction")
                 return nil
             }
 
             // Verify it's different from the original attempt
             guard cleanedOldText != oldText else {
-                renderer.printStatus("[auto-correct] LLM returned same text — skipping correction")
+                frontend.emitStatus("[auto-correct] LLM returned same text — skipping correction")
                 return nil
             }
 
-            renderer.printStatus("[auto-correct] Found correct old_text (\(cleanedOldText.count) chars vs original \(oldText.count) chars)")
+            frontend.emitStatus("[auto-correct] Found correct old_text (\(cleanedOldText.count) chars vs original \(oldText.count) chars)")
 
             await auditLogger?.logParameterCorrection(
                 toolName: toolName,
@@ -157,7 +157,7 @@ extension AgentLoop {
         } catch is CancellationError {
             return nil
         } catch {
-            renderer.printStatus("[auto-correct] LLM correction failed: \(error.localizedDescription)")
+            frontend.emitStatus("[auto-correct] LLM correction failed: \(error.localizedDescription)")
             return nil
         }
     }

@@ -33,7 +33,7 @@ extension AgentLoop {
             modelPath: modelPath,
             useSandbox: useSandbox,
             parentRegistry: registry,
-            renderer: renderer
+            frontend: frontend
         ))
         await registry.register(TodoTool(workspaceRoot: permissions.workspaceRoot))
         await registry.register(ProjectExpertLoRATool(modelContainer: modelContainer, workspaceRoot: permissions.workspaceRoot, modelPath: modelPath))
@@ -152,7 +152,7 @@ extension AgentLoop {
         }
 
         let diff = DiffGenerator.generate(original: originalContent, new: previewContent, path: call.path)
-        renderer.printStatus("\n\(diff)")
+        frontend.emitStatus("\n\(diff)")
 
         // Ask for approval
         let approval: (approved: Bool, suggestion: String?)
@@ -215,7 +215,7 @@ extension AgentLoop {
                 )
                 if correctionResult.wasCorrected {
                     for correction in correctionResult.corrections {
-                        renderer.printStatus("[auto-correct] edit_file (streamed): \(correction)")
+                        frontend.emitStatus("[auto-correct] edit_file (streamed): \(correction)")
                     }
                 }
 
@@ -231,7 +231,7 @@ extension AgentLoop {
                         let fakeArgs: [String: Any] = ["path": call.path, "old_text": oldText, "new_text": tmpContent]
                         let fakeError = ToolResult.error("old_text not found in \(call.path). Make sure the text matches exactly.")
                         if let correction = await attemptSemanticCorrection(toolName: "edit_file", arguments: fakeArgs, errorResult: fakeError) {
-                            renderer.printStatus("[auto-correct] Retrying streamed edit_file with corrected old_text...")
+                            frontend.emitStatus("[auto-correct] Retrying streamed edit_file with corrected old_text...")
                             let corrected = fileContent.replacingOccurrences(of: correction.oldText, with: tmpContent)
                             do {
                                 try corrected.write(toFile: resolvedPath, atomically: true, encoding: .utf8)

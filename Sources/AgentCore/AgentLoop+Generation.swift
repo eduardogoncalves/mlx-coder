@@ -53,11 +53,11 @@ extension AgentLoop {
             transformedMessages.indices.last(where: { transformedMessages[$0].role == .user })
             : nil
 
-        // Start processing spinner before inference begins
-        let spinner = Spinner(message: "Processing...")
-        await spinner.start()
+        // Notify the front-end that generation is starting. Adapters render
+        // their own spinner / progress indicator on this event.
+        frontend.emit(.generationActivity(.started(message: "Processing...")))
 
-        let result = try await modelContainer.perform { [currentGenerationConfig, renderer, chatML, imageURLs, vlmMessageData, vlmLastUserIndex, shouldUseProcessorPath, isVLM] context in
+        let result = try await modelContainer.perform { [currentGenerationConfig, frontend, chatML, imageURLs, vlmMessageData, vlmLastUserIndex, shouldUseProcessorPath, isVLM] context in
             if Task.isCancelled { throw CancellationError() }
 
             // Processor path: for image turns and model families that require processor-driven
@@ -131,10 +131,7 @@ extension AgentLoop {
                 toolCallOpen: ToolCallPattern.toolCallOpen,
                 toolCallClose: ToolCallPattern.toolCallClose,
                 onStatusChange: { message in
-                    Task {
-                        await spinner.updateMessage(message)
-                        await spinner.start()
-                    }
+                    frontend.emit(.generationActivity(.phase(message)))
                 }
             )
             
@@ -142,19 +139,14 @@ extension AgentLoop {
             var pendingChunk = ""
             var isThinking = enableThinking
             if isThinking {
-                renderer.startThinking()
+                frontend.emit(.thinkingStarted)
             }
             var hasShownVisibleOutput = false
 
             func stopSpinnerOnFirstVisibleOutput() {
                 guard !hasShownVisibleOutput else { return }
                 hasShownVisibleOutput = true
-                let semaphore = DispatchSemaphore(value: 0)
-                Task {
-                    await spinner.stop(clearLine: true)
-                    semaphore.signal()
-                }
-                semaphore.wait()
+                frontend.emit(.generationActivity(.ended))
             }
 
             var generationParameters = currentGenerationConfig.generateParameters
@@ -190,7 +182,7 @@ extension AgentLoop {
             )
             for await item in tokenStream {
                 if Task.isCancelled {
-                    Task { await spinner.stop(clearLine: true) }
+                    frontend.emit(.generationActivity(.ended))
                     throw CancellationError()
                 }
                 
@@ -229,9 +221,9 @@ extension AgentLoop {
                                 let before = String(pendingChunk[..<range.lowerBound])
                                 if !before.isEmpty {
                                     stopSpinnerOnFirstVisibleOutput()
-                                    renderer.printChunk(before)
+                                    frontend.emit(.assistantTextChunk(before))
                                 }
-                                renderer.startThinking()
+                                frontend.emit(.thinkingStarted)
                                 isThinking = true
                                 pendingChunk = String(pendingChunk[range.upperBound...])
                                 if pendingChunk.hasPrefix("\n") { pendingChunk.removeFirst() }
@@ -242,7 +234,7 @@ extension AgentLoop {
                                     break
                                 } else {
                                     stopSpinnerOnFirstVisibleOutput()
-                                    renderer.printChunk(pendingChunk)
+                                    frontend.emit(.assistantTextChunk(pendingChunk))
                                     pendingChunk = ""
                                 }
                             }
@@ -251,9 +243,9 @@ extension AgentLoop {
                                 let before = String(pendingChunk[..<range.lowerBound])
                                 if !before.isEmpty {
                                     stopSpinnerOnFirstVisibleOutput()
-                                    renderer.printThinkingChunk(before)
+                                    frontend.emit(.thinkingChunk(before))
                                 }
-                                renderer.endThinking()
+                                frontend.emit(.thinkingEnded)
                                 isThinking = false
                                 pendingChunk = String(pendingChunk[range.upperBound...])
                                 if pendingChunk.hasPrefix("\n") { pendingChunk.removeFirst() }
@@ -264,7 +256,7 @@ extension AgentLoop {
                                     break
                                 } else {
                                     stopSpinnerOnFirstVisibleOutput()
-                                    renderer.printThinkingChunk(pendingChunk)
+                                    frontend.emit(.thinkingChunk(pendingChunk))
                                     pendingChunk = ""
                                 }
                             }
@@ -272,12 +264,10 @@ extension AgentLoop {
                     }
                 case .info(let info):
                     stopSpinnerOnFirstVisibleOutput()
-                    print()
                     let statMessage = String(format: "Generated %d tokens (%.1f tok/s), prompt: %d tokens (%.1f tok/s)",
                                              info.generationTokenCount, info.tokensPerSecond,
                                              info.promptTokenCount, info.promptTokensPerSecond)
-                    renderer.printStatus(statMessage)
-                    print()
+                    frontend.emitStatus(statMessage)
                 }
             }
             
@@ -285,10 +275,10 @@ extension AgentLoop {
             if !pendingChunk.isEmpty {
                 if isThinking {
                     stopSpinnerOnFirstVisibleOutput()
-                    renderer.printThinkingChunk(pendingChunk)
+                    frontend.emit(.thinkingChunk(pendingChunk))
                 } else {
                     stopSpinnerOnFirstVisibleOutput()
-                    renderer.printChunk(pendingChunk)
+                    frontend.emit(.assistantTextChunk(pendingChunk))
                 }
             }
             
@@ -299,8 +289,8 @@ extension AgentLoop {
             return (text: rawResponseText, writer: writer)
         }
 
-        // Cleanup spinner if generation failed or returned nothing
-        Task { await spinner.stop(clearLine: true) }
+        // Cleanup activity indicator on exit (no-op if already ended).
+        frontend.emit(.generationActivity(.ended))
 
         return result
     }

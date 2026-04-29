@@ -4,6 +4,7 @@
 import ArgumentParser
 import Foundation
 import MLXLMCommon
+import SwiftCoderTUI
 #if canImport(Speech)
 import Speech
 #endif
@@ -19,6 +20,10 @@ struct ChatCommand: AsyncParsableCommand {
     mutating func run() async throws {
         guard !args.testAbsorber.isTestInvocation else { return }
         let renderer = StreamRenderer(verbose: args.verbose)
+        let interactiveInput = InteractiveInput()
+        interactiveInput.voiceSilenceTimeout = args.voiceSilenceTimeout
+        interactiveInput.voiceLocale = args.resolvedVoiceLocale
+        let frontend = LegacyTerminalFrontend(renderer: renderer, interactiveInput: interactiveInput)
 
         var selectedModel = args.model
 
@@ -126,6 +131,7 @@ struct ChatCommand: AsyncParsableCommand {
             useSandbox: effectiveSandbox,
             config: config,
             renderer: renderer,
+            frontend: frontend,
             mcpConfigs: mergedMCPConfigs(
                 runtimeConfigs: runtimeMCPConfigs,
                 cliConfig: makeMCPServerConfig(from: args)
@@ -159,7 +165,8 @@ struct ChatCommand: AsyncParsableCommand {
             registry: registry,
             permissions: permissions,
             generationConfig: config,
-            renderer: renderer,
+            frontend: frontend,
+            verbose: args.verbose,
             systemPrompt: promptComposition.prompt,
             modelPath: selectedModel,
             workspace: absWorkspace,
@@ -191,17 +198,22 @@ struct ChatCommand: AsyncParsableCommand {
         }
 
         // REPL Header
-        print("mlx-coder \u{001B}[2m(v\(currentVersion))\u{001B}[0m")
+        print("""
+                       )/_
+             _.--..---"-,--c_
+        \\L..'           ._O__)_
+,-.     _.+  _  \\..--( /    
+  `\\.--''__.-' \\ (     \\_    MLX-Coder  
+    `'''       `\\__   /\\
+                ')
+""")
         print("\u{001B}[2mModel: \(selectedModel)\u{001B}[0m")
-        print("\u{001B}[2mWorkspace: \(absWorkspace)\u{001B}[0m\n")
+        print("\u{001B}[2mWorkspace: \(absWorkspace)\u{001B}[0m")
         if let info = pendingUpdate {
             print("⬆️  mlx-coder \(info.latestVersion) is available. Run \u{001B}[1mmlx-coder update\u{001B}[0m to install.\n")
         }
         renderer.printStatus("[Key mode] Editing input. Enter sends, Shift+Tab cycles mode, Ctrl+C exits.")
 
-        let interactiveInput = InteractiveInput()
-        interactiveInput.voiceSilenceTimeout = args.voiceSilenceTimeout
-        interactiveInput.voiceLocale = args.resolvedVoiceLocale
         var sandboxEnabled = effectiveSandbox
         var announcedGeneralFastFoundationRoute = false
         var voicePrefill: String? = nil
@@ -213,6 +225,23 @@ struct ChatCommand: AsyncParsableCommand {
             await agentLoop.setMode(.agent, silent: true)
         }
         // Default is already planLow from AgentLoop initializer
+
+        // SwiftCoderTUI front-end branch — when --ui tui is selected, replace
+        // the agent's frontend with the SwiftCoderTUI adapter and run the
+        // dedicated TUI session loop. This bypasses the legacy slash-command
+        // dispatch below; the TUI session handles its own (minimal) command
+        // set today.
+        if args.ui.lowercased() == "tui" {
+            let tuiAppConfig = SwiftCoderTUIAppConfigBuilder.build(
+                version: MLXCoderCLI.configuration.version ?? "dev",
+                defaultModelLabel: selectedModel
+            )
+            let tuiRenderer = Renderer(config: tuiAppConfig, terminal: ProcessTerminal())
+            let tuiFrontend = SwiftCoderTUIFrontend(renderer: tuiRenderer, appConfig: tuiAppConfig)
+            await agentLoop.swapFrontend(tuiFrontend)
+            await runSwiftCoderTUISession(agentLoop: agentLoop, frontend: tuiFrontend)
+            return
+        }
 
         while true {
             // Ensure no background stdin listener competes with interactive editing.
@@ -514,7 +543,7 @@ struct ChatCommand: AsyncParsableCommand {
                 await handleMemoryCommand(
                     trimmed: trimmed,
                     workspaceRoot: absWorkspace,
-                    renderer: renderer
+                    frontend: frontend
                 )
                 continue
             }
@@ -755,24 +784,23 @@ func restoreMemorySection(workspaceRoot: String, renderer: StreamRenderer) async
 func handleMemoryCommand(
     trimmed: String,
     workspaceRoot: String,
-    renderer: StreamRenderer
+    frontend: any AgentFrontend
 ) async {
     let parts = trimmed.split(separator: " ", maxSplits: 2, omittingEmptySubsequences: true)
     
     guard parts.count >= 2 else {
-        renderer.printError("Usage: /memory <subcommand> [args]")
-        print("""
-        
-        Memory subcommands:
-          /memory save "<message>"                  Save a session state checkpoint
-          /memory log "<message>" --type <type>     Log typed knowledge (decision|gotcha|plan|pattern)
-          /memory search "<query>"                  FTS5 keyword search
-          /memory list [--type <type>]              Browse recent entries
-          /memory undo                              Delete last entry
-          /memory status                            Entry counts and DB stats
-          /memory snippet [--today|--week]          Generate work summary
-        
-        """)
+        frontend.emit(.memoryEvent(.status(lines: [
+            "Usage: /memory <subcommand> [args]",
+            "",
+            "Memory subcommands:",
+            "  /memory save \"<message>\"                  Save a session state checkpoint",
+            "  /memory log \"<message>\" --type <type>     Log typed knowledge (decision|gotcha|plan|pattern)",
+            "  /memory search \"<query>\"                  FTS5 keyword search",
+            "  /memory list [--type <type>]              Browse recent entries",
+            "  /memory undo                              Delete last entry",
+            "  /memory status                            Entry counts and DB stats",
+            "  /memory snippet [--today|--week]          Generate work summary",
+        ])))
         return
     }
     
@@ -783,55 +811,55 @@ func handleMemoryCommand(
     do {
         try await store.initialize()
     } catch {
-        renderer.printError("Failed to initialize memory store: \(error)")
+        frontend.emit(.memoryEvent(.error("Failed to initialize memory store: \(error)")))
         return
     }
     
     switch subcommand {
     case "save":
         guard parts.count >= 3 else {
-            renderer.printError("Usage: /memory save \"<message>\"")
+            frontend.emit(.memoryEvent(.error("Usage: /memory save \"<message>\"")))
             return
         }
         let message = String(parts[2]).trimmingCharacters(in: CharacterSet(charactersIn: "\""))
-        await handleMemorySave(message: message, workspaceRoot: workspaceRoot, store: store, renderer: renderer)
+        await handleMemorySave(message: message, workspaceRoot: workspaceRoot, store: store, frontend: frontend)
         
     case "log":
         guard parts.count >= 3 else {
-            renderer.printError("Usage: /memory log \"<message>\" --type <type>")
+            frontend.emit(.memoryEvent(.error("Usage: /memory log \"<message>\" --type <type>")))
             return
         }
         let fullArgs = String(parts[2])
-        await handleMemoryLog(args: fullArgs, workspaceRoot: workspaceRoot, store: store, renderer: renderer)
+        await handleMemoryLog(args: fullArgs, workspaceRoot: workspaceRoot, store: store, frontend: frontend)
         
     case "search":
         guard parts.count >= 3 else {
-            renderer.printError("Usage: /memory search \"<query>\"")
+            frontend.emit(.memoryEvent(.error("Usage: /memory search \"<query>\"")))
             return
         }
         let query = String(parts[2]).trimmingCharacters(in: CharacterSet(charactersIn: "\""))
-        await handleMemorySearch(query: query, workspaceRoot: workspaceRoot, store: store, renderer: renderer)
+        await handleMemorySearch(query: query, workspaceRoot: workspaceRoot, store: store, frontend: frontend)
         
     case "list":
         let typeFilter = parts.count >= 3 ? String(parts[2]) : nil
-        await handleMemoryList(typeFilter: typeFilter, workspaceRoot: workspaceRoot, store: store, renderer: renderer)
+        await handleMemoryList(typeFilter: typeFilter, workspaceRoot: workspaceRoot, store: store, frontend: frontend)
         
     case "undo":
-        await handleMemoryUndo(workspaceRoot: workspaceRoot, store: store, renderer: renderer)
+        await handleMemoryUndo(workspaceRoot: workspaceRoot, store: store, frontend: frontend)
         
     case "status":
-        await handleMemoryStatus(store: store, renderer: renderer)
+        await handleMemoryStatus(store: store, frontend: frontend)
         
     case "snippet":
         let windowArg = parts.count >= 3 ? String(parts[2]) : nil
-        await handleMemorySnippet(window: windowArg, workspaceRoot: workspaceRoot, store: store, renderer: renderer)
+        await handleMemorySnippet(window: windowArg, workspaceRoot: workspaceRoot, store: store, frontend: frontend)
         
     default:
-        renderer.printError("Unknown memory subcommand: \(subcommand)")
+        frontend.emit(.memoryEvent(.error("Unknown memory subcommand: \(subcommand)")))
     }
 }
 
-func handleMemorySave(message: String, workspaceRoot: String, store: KnowledgeStore, renderer: StreamRenderer) async {
+func handleMemorySave(message: String, workspaceRoot: String, store: KnowledgeStore, frontend: any AgentFrontend) async {
     let surface = SurfaceDetector.detectSurface(workspacePath: workspaceRoot)
     let branch = SurfaceDetector.currentBranch(in: workspaceRoot)
     let expiresAt = Date().addingTimeInterval(48 * 3600) // 48h TTL
@@ -847,17 +875,16 @@ func handleMemorySave(message: String, workspaceRoot: String, store: KnowledgeSt
     
     do {
         try await store.insert(entry)
-        renderer.printStatus("Session state saved")
+        frontend.emit(.memoryEvent(.checkpointSaved(summary: message)))
     } catch {
-        renderer.printError("Failed to save: \(error)")
+        frontend.emit(.memoryEvent(.checkpointFailed(reason: "\(error)")))
     }
 }
 
-func handleMemoryLog(args: String, workspaceRoot: String, store: KnowledgeStore, renderer: StreamRenderer) async {
-    // Parse: "<message>" --type <type>
+func handleMemoryLog(args: String, workspaceRoot: String, store: KnowledgeStore, frontend: any AgentFrontend) async {
     let components = args.components(separatedBy: "--type")
     guard components.count == 2 else {
-        renderer.printError("Usage: /memory log \"<message>\" --type <type>")
+        frontend.emit(.memoryEvent(.error("Usage: /memory log \"<message>\" --type <type>")))
         return
     }
     
@@ -866,7 +893,7 @@ func handleMemoryLog(args: String, workspaceRoot: String, store: KnowledgeStore,
     let typeStr = components[1].trimmingCharacters(in: .whitespacesAndNewlines)
     
     guard let type = KnowledgeType(rawValue: typeStr) else {
-        renderer.printError("Invalid type. Use: decision, gotcha, plan, pattern, session_state")
+        frontend.emit(.memoryEvent(.error("Invalid type. Use: decision, gotcha, plan, pattern, session_state")))
         return
     }
     
@@ -884,35 +911,35 @@ func handleMemoryLog(args: String, workspaceRoot: String, store: KnowledgeStore,
     
     do {
         try await store.insert(entry)
-        renderer.printStatus("Knowledge logged as \(type.rawValue)")
+        frontend.emit(.memoryEvent(.factSaved(subject: type.rawValue, fact: message)))
     } catch {
-        renderer.printError("Failed to log: \(error)")
+        frontend.emit(.memoryEvent(.error("Failed to log: \(error)")))
     }
 }
 
-func handleMemorySearch(query: String, workspaceRoot: String, store: KnowledgeStore, renderer: StreamRenderer) async {
+func handleMemorySearch(query: String, workspaceRoot: String, store: KnowledgeStore, frontend: any AgentFrontend) async {
     do {
         let entries = try await store.search(query: query, projectRoot: workspaceRoot)
         
         if entries.isEmpty {
-            print("\nNo results found.\n")
+            frontend.emit(.memoryEvent(.searchResults(query: query, lines: ["No results found."])))
             return
         }
         
-        print("\nSearch results (\(entries.count)):\n")
+        var lines: [String] = ["Search results (\(entries.count)):"]
         for entry in entries.prefix(20) {
-            print("[\(entry.type.rawValue)] \(entry.content)")
+            lines.append("[\(entry.type.rawValue)] \(entry.content)")
             if let surface = entry.surface {
-                print("  surface: \(surface)")
+                lines.append("  surface: \(surface)")
             }
-            print("")
         }
+        frontend.emit(.memoryEvent(.searchResults(query: query, lines: lines)))
     } catch {
-        renderer.printError("Search failed: \(error)")
+        frontend.emit(.memoryEvent(.error("Search failed: \(error)")))
     }
 }
 
-func handleMemoryList(typeFilter: String?, workspaceRoot: String, store: KnowledgeStore, renderer: StreamRenderer) async {
+func handleMemoryList(typeFilter: String?, workspaceRoot: String, store: KnowledgeStore, frontend: any AgentFrontend) async {
     do {
         let type: KnowledgeType?
         if let typeFilter {
@@ -920,7 +947,7 @@ func handleMemoryList(typeFilter: String?, workspaceRoot: String, store: Knowled
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             type = KnowledgeType(rawValue: typeStr)
             if type == nil {
-                renderer.printError("Invalid type: \(typeStr)")
+                frontend.emit(.memoryEvent(.error("Invalid type: \(typeStr)")))
                 return
             }
         } else {
@@ -930,7 +957,7 @@ func handleMemoryList(typeFilter: String?, workspaceRoot: String, store: Knowled
         let entries = try await store.list(projectRoot: workspaceRoot, type: type, limit: 50)
         
         if entries.isEmpty {
-            print("\nNo entries found.\n")
+            frontend.emit(.memoryEvent(.factsListed(count: 0, lines: ["No entries found."])))
             return
         }
         
@@ -938,52 +965,50 @@ func handleMemoryList(typeFilter: String?, workspaceRoot: String, store: Knowled
         dateFormatter.dateStyle = .short
         dateFormatter.timeStyle = .short
         
-        print("\nKnowledge entries (\(entries.count)):\n")
+        var lines: [String] = ["Knowledge entries (\(entries.count)):"]
         for entry in entries.prefix(20) {
-            print("[\(entry.type.rawValue)] \(dateFormatter.string(from: entry.createdAt))")
-            print("  \(entry.content)")
+            lines.append("[\(entry.type.rawValue)] \(dateFormatter.string(from: entry.createdAt))")
+            lines.append("  \(entry.content)")
             if let surface = entry.surface {
-                print("  surface: \(surface)")
+                lines.append("  surface: \(surface)")
             }
-            print("")
         }
+        frontend.emit(.memoryEvent(.factsListed(count: entries.count, lines: lines)))
     } catch {
-        renderer.printError("List failed: \(error)")
+        frontend.emit(.memoryEvent(.error("List failed: \(error)")))
     }
 }
 
-func handleMemoryUndo(workspaceRoot: String, store: KnowledgeStore, renderer: StreamRenderer) async {
+func handleMemoryUndo(workspaceRoot: String, store: KnowledgeStore, frontend: any AgentFrontend) async {
     do {
         let entries = try await store.list(projectRoot: workspaceRoot, limit: 1)
         
         guard let lastEntry = entries.first else {
-            renderer.printError("No entries to undo")
+            frontend.emit(.memoryEvent(.error("No entries to undo")))
             return
         }
         
         try await store.delete(id: lastEntry.id)
-        renderer.printStatus("Deleted last entry")
+        frontend.emit(.memoryEvent(.undone(message: "Deleted last entry")))
     } catch {
-        renderer.printError("Undo failed: \(error)")
+        frontend.emit(.memoryEvent(.error("Undo failed: \(error)")))
     }
 }
 
-func handleMemoryStatus(store: KnowledgeStore, renderer: StreamRenderer) async {
+func handleMemoryStatus(store: KnowledgeStore, frontend: any AgentFrontend) async {
     do {
         let stats = try await store.stats()
-        print("""
-        
-        Memory Status:
-        - Entries: \(stats.entryCount)
-        - DB size: \(stats.dbSizeBytes / 1024) KB
-        
-        """)
+        frontend.emit(.memoryEvent(.status(lines: [
+            "Memory Status:",
+            "- Entries: \(stats.entryCount)",
+            "- DB size: \(stats.dbSizeBytes / 1024) KB",
+        ])))
     } catch {
-        renderer.printError("Status failed: \(error)")
+        frontend.emit(.memoryEvent(.error("Status failed: \(error)")))
     }
 }
 
-func handleMemorySnippet(window: String?, workspaceRoot: String, store: KnowledgeStore, renderer: StreamRenderer) async {
+func handleMemorySnippet(window: String?, workspaceRoot: String, store: KnowledgeStore, frontend: any AgentFrontend) async {
     let timeWindow: SnippetGenerator.TimeWindow
     
     if let window {
@@ -1006,9 +1031,9 @@ func handleMemorySnippet(window: String?, workspaceRoot: String, store: Knowledg
             window: timeWindow,
             format: .markdown
         )
-        print("\n\(snippet)\n")
+        frontend.emit(.memoryEvent(.status(lines: snippet.split(separator: "\n").map(String.init))))
     } catch {
-        renderer.printError("Snippet generation failed: \(error)")
+        frontend.emit(.memoryEvent(.error("Snippet generation failed: \(error)")))
     }
 }
 

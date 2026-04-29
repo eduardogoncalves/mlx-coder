@@ -29,7 +29,7 @@ extension AgentLoop {
         history.updateSystemPrompt(composition.prompt)
         
         let status = enabled ? "\u{001B}[32mEnabled\u{001B}[0m" : "\u{001B}[31mDisabled\u{001B}[0m"
-        renderer.printStatus("macOS Seatbelt Sandbox: \(status)")
+        frontend.emitStatus("macOS Seatbelt Sandbox: \(status)")
     }
 
     /// Sets the working mode (agent/plan) and refreshes the system prompt.
@@ -54,8 +54,11 @@ extension AgentLoop {
         history.updateSystemPrompt(composition.prompt)
         
         if !silent {
-            let modeStr = mode == .plan ? "\u{001B}[33mPLAN\u{001B}[0m" : "\u{001B}[32mAGENT\u{001B}[0m"
-            renderer.printStatus("Working Mode: \(modeStr)")
+            frontend.emit(.modeChanged(ModeSnapshot(
+                workingMode: mode.rawValue,
+                thinkingLevel: thinkingLevel.rawValue,
+                taskType: taskType.rawValue
+            )))
         }
     }
 
@@ -79,7 +82,11 @@ extension AgentLoop {
         promptSectionTokenEstimates = composition.sectionTokenEstimates
         history.updateSystemPrompt(composition.prompt)
         
-        renderer.printStatus("Thinking Level: \u{001B}[32m\(level.displayName.uppercased())\u{001B}[0m")
+        frontend.emit(.modeChanged(ModeSnapshot(
+            workingMode: mode.rawValue,
+            thinkingLevel: level.rawValue,
+            taskType: taskType.rawValue
+        )))
     }
 
     /// Sets the task type (general/coding/reasoning) and updates generation parameters.
@@ -91,8 +98,11 @@ extension AgentLoop {
         syncCurrentModeFromSettings()
         updateGenerationConfig()
         
-        let typeStr = type.rawValue.uppercased()
-        renderer.printStatus("Task Type: \u{001B}[32m\(typeStr)\u{001B}[0m")
+        frontend.emit(.modeChanged(ModeSnapshot(
+            workingMode: mode.rawValue,
+            thinkingLevel: thinkingLevel.rawValue,
+            taskType: type.rawValue
+        )))
     }
 
     /// Cycles to the next available mode (triggered by Shift+Tab).

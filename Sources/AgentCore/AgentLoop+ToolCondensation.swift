@@ -37,8 +37,8 @@ extension AgentLoop {
                 charsPerToken: condensationConfig.charsPerTokenEstimate
             )
             await hooks.emit(.compression(toolName: toolName, beforeTokens: beforeTokens, afterTokens: afterTokens, usedFallback: true))
-            if renderer.verbose {
-                renderer.printStatus("[debug] Tool result condensation used non-LLM fallback for \(toolName): before≈\(beforeTokens) tokens, after≈\(afterTokens), saved≈\(max(0, beforeTokens - afterTokens))")
+            if verbose {
+                frontend.emitStatus("[debug] Tool result condensation used non-LLM fallback for \(toolName): before≈\(beforeTokens) tokens, after≈\(afterTokens), saved≈\(max(0, beforeTokens - afterTokens))")
             }
             return fallback
         }
@@ -55,8 +55,8 @@ extension AgentLoop {
                 maxChars: condensationConfig.maxSummaryChars
             )
 
-            if renderer.verbose, !summary.isEmpty {
-                renderer.printStatus("[debug] Condensed summary for \(toolName):")
+            if verbose, !summary.isEmpty {
+                frontend.emitStatus("[debug] Condensed summary for \(toolName):")
                 print(summary)
             }
 
@@ -71,8 +71,8 @@ extension AgentLoop {
                     charsPerToken: condensationConfig.charsPerTokenEstimate
                 )
                 await hooks.emit(.compression(toolName: toolName, beforeTokens: beforeTokens, afterTokens: afterTokens, usedFallback: true))
-                if renderer.verbose {
-                    renderer.printStatus("[debug] Tool result condensation fallback for \(toolName): before≈\(beforeTokens) tokens, after≈\(afterTokens), saved≈\(max(0, beforeTokens - afterTokens))")
+                if verbose {
+                    frontend.emitStatus("[debug] Tool result condensation fallback for \(toolName): before≈\(beforeTokens) tokens, after≈\(afterTokens), saved≈\(max(0, beforeTokens - afterTokens))")
                 }
                 return fallback
             }
@@ -83,8 +83,8 @@ extension AgentLoop {
                 charsPerToken: condensationConfig.charsPerTokenEstimate
             )
             await hooks.emit(.compression(toolName: toolName, beforeTokens: beforeTokens, afterTokens: afterTokens, usedFallback: false))
-            if renderer.verbose {
-                renderer.printStatus("[debug] Tool result condensed for \(toolName): before≈\(beforeTokens) tokens, after≈\(afterTokens), saved≈\(max(0, beforeTokens - afterTokens))")
+            if verbose {
+                frontend.emitStatus("[debug] Tool result condensed for \(toolName): before≈\(beforeTokens) tokens, after≈\(afterTokens), saved≈\(max(0, beforeTokens - afterTokens))")
             }
             return condensed
         } catch {
@@ -98,8 +98,8 @@ extension AgentLoop {
                 charsPerToken: condensationConfig.charsPerTokenEstimate
             )
             await hooks.emit(.compression(toolName: toolName, beforeTokens: beforeTokens, afterTokens: afterTokens, usedFallback: true))
-            if renderer.verbose {
-                renderer.printStatus("[debug] Tool result condensation failed for \(toolName): \(error.localizedDescription). before≈\(beforeTokens) tokens, after≈\(afterTokens), saved≈\(max(0, beforeTokens - afterTokens))")
+            if verbose {
+                frontend.emitStatus("[debug] Tool result condensation failed for \(toolName): \(error.localizedDescription). before≈\(beforeTokens) tokens, after≈\(afterTokens), saved≈\(max(0, beforeTokens - afterTokens))")
             }
             return fallback
         }

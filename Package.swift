@@ -10,6 +10,7 @@ let package = Package(
         .package(url: "https://github.com/huggingface/swift-transformers", from: "1.3.0"),
         .package(url: "https://github.com/apple/swift-argument-parser", from: "1.7.1"),
         .package(url: "https://github.com/jpsim/Yams", from: "6.2.1"),
+        .package(path: "/Users/eduardogoncalves/Developer/Personal/swift-coder-tui"),
     ],
     targets: [
         .systemLibrary(
@@ -28,6 +29,7 @@ let package = Package(
                 .product(name: "Tokenizers",    package: "swift-transformers"),
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
                 .product(name: "Yams",          package: "Yams"),
+                .product(name: "SwiftCoderTUI", package: "swift-coder-tui"),
                 "CSQLite",
             ],
             path: "Sources",

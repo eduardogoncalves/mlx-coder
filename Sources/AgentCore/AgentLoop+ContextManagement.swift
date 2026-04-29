@@ -145,7 +145,7 @@ extension AgentLoop {
             after = history.estimatedTokenCount
         }
 
-        renderer.printStatus("[Context] Turn-aware compaction triggered (\(reason)): before≈\(before), after≈\(after), target≈\(target)")
+        frontend.emitStatus("[Context] Turn-aware compaction triggered (\(reason)): before≈\(before), after≈\(after), target≈\(target)")
         await hooks.emit(.compression(toolName: "context_history", beforeTokens: before, afterTokens: after, usedFallback: false))
     }
 }

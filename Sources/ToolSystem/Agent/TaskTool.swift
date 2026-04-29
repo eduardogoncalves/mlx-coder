@@ -413,7 +413,7 @@ public struct TaskTool: Tool {
     private let modelPath: String
     private let useSandbox: Bool
     private let parentRegistry: ToolRegistry
-    private let renderer: StreamRenderer
+    private let frontend: any AgentFrontend
 
     public init(
         modelContainer: ModelContainer,
@@ -422,7 +422,7 @@ public struct TaskTool: Tool {
         modelPath: String,
         useSandbox: Bool,
         parentRegistry: ToolRegistry,
-        renderer: StreamRenderer
+        frontend: any AgentFrontend
     ) {
         self.modelContainer = modelContainer
         self.permissions = permissions
@@ -430,7 +430,7 @@ public struct TaskTool: Tool {
         self.modelPath = modelPath
         self.useSandbox = useSandbox
         self.parentRegistry = parentRegistry
-        self.renderer = renderer
+        self.frontend = frontend
     }
 
     public func execute(arguments: [String: Any]) async throws -> ToolResult {
@@ -508,7 +508,7 @@ public struct TaskTool: Tool {
             registry: subRegistry,
             permissions: subPermissions,
             generationConfig: generationConfig,
-            renderer: renderer,
+            frontend: frontend,
             systemPrompt: systemPrompt,
             modelPath: modelPath,
             workspace: subPermissions.effectiveWorkspaceRoot,
@@ -517,9 +517,9 @@ public struct TaskTool: Tool {
 
         // Notify user via renderer about sub-agent start
         if let isolatedRoot {
-            renderer.printStatus("Starting sub-agent (profile=\(profileName), isolated_root=\(isolatedRoot)) for task: \(sanitizedDescription)")
+            frontend.emitStatus("Starting sub-agent (profile=\(profileName), isolated_root=\(isolatedRoot)) for task: \(sanitizedDescription)")
         } else {
-            renderer.printStatus("Starting sub-agent (profile=\(profileName)) for task: \(sanitizedDescription)")
+            frontend.emitStatus("Starting sub-agent (profile=\(profileName)) for task: \(sanitizedDescription)")
         }
         
         do {
