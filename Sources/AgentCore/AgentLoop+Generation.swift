@@ -136,9 +136,18 @@ extension AgentLoop {
             )
             
             var rawResponseText = ""
-            var pendingChunk = ""
-            var isThinking = enableThinking
-            if isThinking {
+            // StreamParser handles the think-block state machine and emits the
+            // correct AgentEvents. startsThinking mirrors enableThinking because
+            // the "<think>" open tag is pre-filled in the prompt when thinking is
+            // enabled — the model output begins *inside* the think block.
+            var parser = StreamParser(
+                openTag: ToolCallPattern.thinkOpen,
+                closeTag: ToolCallPattern.thinkClose,
+                startsThinking: enableThinking
+            )
+            if enableThinking {
+                // Emit thinkingStarted immediately: the model is already inside the
+                // think block from token 1 (the open tag is in the prompt, not output).
                 frontend.emit(.thinkingStarted)
             }
             var hasShownVisibleOutput = false
@@ -198,12 +207,7 @@ extension AgentLoop {
                     
                     let newText = String(newSegment.suffix(newSegment.count - segment.count))
                     rawResponseText += newText
-                    
-                    // Normalize streamed text (including tool-call content handling)
-                    // before adding to response/output buffers.
-                    let streamResult = writer.process(newText)
-                    let displayText = streamResult.displayText
-                    
+
                     if newText.hasSuffix("\n") {
                         if let lastToken = segmentTokens.last {
                             segmentTokens = [lastToken]
@@ -212,56 +216,43 @@ extension AgentLoop {
                     } else {
                         segment = newSegment
                     }
-                    
-                    pendingChunk += displayText
-                    
-                    while !pendingChunk.isEmpty {
-                        if !isThinking {
-                            if let range = pendingChunk.range(of: ToolCallPattern.thinkOpen) {
-                                let before = String(pendingChunk[..<range.lowerBound])
-                                if !before.isEmpty {
-                                    stopSpinnerOnFirstVisibleOutput()
-                                    frontend.emit(.assistantTextChunk(before))
-                                }
-                                frontend.emit(.thinkingStarted)
-                                isThinking = true
-                                pendingChunk = String(pendingChunk[range.upperBound...])
-                                if pendingChunk.hasPrefix("\n") { pendingChunk.removeFirst() }
-                            } else {
-                                // Hold if it might be the start of `<think>`
-                                let prefixes = ["<", "<t", "<th", "<thi", "<thin", "<think"]
-                                if prefixes.contains(where: pendingChunk.hasSuffix) {
-                                    break
-                                } else {
-                                    stopSpinnerOnFirstVisibleOutput()
-                                    frontend.emit(.assistantTextChunk(pendingChunk))
-                                    pendingChunk = ""
-                                }
+
+                    // Route each token through the think-block parser. Thinking tokens
+                    // are emitted directly; response tokens flow through the tool-call
+                    // writer so it can detect <tool_call> blocks without being confused
+                    // by reasoning content.
+                    for event in parser.feed(newText) {
+                        switch event {
+                        case .thinkingStarted:
+                            frontend.emit(.thinkingStarted)
+                        case .thinkingChunk(let chunk):
+                            // Don't stop the spinner during thinking: the spinner
+                            // should keep animating with "Thinking…" label while
+                            // reasoning tokens stream in. Stopping it here (before
+                            // the TUI consumer processes the chunk) would tear down
+                            // the footer rendering state before any think line is
+                            // visible, causing all chunks to appear batched at the end.
+                            frontend.emit(.thinkingChunk(chunk))
+                        case .thinkingEnded:
+                            frontend.emit(.thinkingEnded)
+                        case .assistantTextChunk(let chunk):
+                            // Stop the "Processing…" spinner on the first visible
+                            // response token (after thinking, if any).
+                            stopSpinnerOnFirstVisibleOutput()
+                            let result = writer.process(chunk)
+                            if !result.displayText.isEmpty {
+                                frontend.emit(.assistantTextChunk(result.displayText))
                             }
-                        } else {
-                            if let range = pendingChunk.range(of: ToolCallPattern.thinkClose) {
-                                let before = String(pendingChunk[..<range.lowerBound])
-                                if !before.isEmpty {
-                                    stopSpinnerOnFirstVisibleOutput()
-                                    frontend.emit(.thinkingChunk(before))
-                                }
-                                frontend.emit(.thinkingEnded)
-                                isThinking = false
-                                pendingChunk = String(pendingChunk[range.upperBound...])
-                                if pendingChunk.hasPrefix("\n") { pendingChunk.removeFirst() }
-                            } else {
-                                // Hold if it might be the start of `</think>`
-                                let prefixes = ["<", "</", "</t", "</th", "</thi", "</thin", "</think"]
-                                if prefixes.contains(where: pendingChunk.hasSuffix) {
-                                    break
-                                } else {
-                                    stopSpinnerOnFirstVisibleOutput()
-                                    frontend.emit(.thinkingChunk(pendingChunk))
-                                    pendingChunk = ""
-                                }
-                            }
+                        default:
+                            break
                         }
                     }
+                    // Yield to the Swift cooperative scheduler so the consumer task
+                    // (SwiftCoderTUIFrontend) can render the events we just emitted
+                    // before we generate the next token. Without this yield, the
+                    // scheduler may not interleave the consumer between token iterations
+                    // and all events would appear batched at the end of generation.
+                    await Task.yield()
                 case .info(let info):
                     stopSpinnerOnFirstVisibleOutput()
                     let statMessage = String(format: "Generated %d tokens (%.1f tok/s), prompt: %d tokens (%.1f tok/s)",
@@ -271,14 +262,20 @@ extension AgentLoop {
                 }
             }
             
-            // Flush any remaining text in pendingChunk
-            if !pendingChunk.isEmpty {
-                if isThinking {
+            // Flush any remaining buffered state in the parser
+            for event in parser.flush() {
+                switch event {
+                case .thinkingChunk(let chunk):
                     stopSpinnerOnFirstVisibleOutput()
-                    frontend.emit(.thinkingChunk(pendingChunk))
-                } else {
+                    frontend.emit(.thinkingChunk(chunk))
+                case .assistantTextChunk(let chunk):
                     stopSpinnerOnFirstVisibleOutput()
-                    frontend.emit(.assistantTextChunk(pendingChunk))
+                    let result = writer.process(chunk)
+                    if !result.displayText.isEmpty {
+                        frontend.emit(.assistantTextChunk(result.displayText))
+                    }
+                default:
+                    break
                 }
             }
             

@@ -226,6 +226,23 @@ struct ChatCommand: AsyncParsableCommand {
         }
         // Default is already planLow from AgentLoop initializer
 
+        // Debug front-end branch — logs every AgentEvent with timestamps so you
+        // can validate that events arrive per-token and not batched.
+        // Run a second terminal with: tail -f /tmp/mlx-coder-events.log
+        if args.ui.lowercased() == "debug" {
+            let debugFrontend = DebugEventFrontend()
+            await agentLoop.swapFrontend(debugFrontend)
+            print("[debug] Type your message and press Enter. Type 'exit' to quit.")
+            while true {
+                print("[debug] > ", terminator: "")
+                fflush(stdout)
+                guard let line = readLine(), !line.isEmpty else { continue }
+                if line == "exit" || line == "quit" { break }
+                try await agentLoop.processUserMessage(line)
+            }
+            return
+        }
+
         // SwiftCoderTUI front-end branch — when --ui tui is selected, replace
         // the agent's frontend with the SwiftCoderTUI adapter and run the
         // dedicated TUI session loop. This bypasses the legacy slash-command
