@@ -20,7 +20,7 @@ public final class LegacyTerminalFrontend: AgentFrontend, @unchecked Sendable {
     public var approvalHandler: ((ApprovalRequest) async -> ApprovalDecision)?
 
     /// The legacy terminal spinner — owned by this adapter so AgentCore stays
-    /// frontend-agnostic. Created lazily on `.generationActivity(.started)`.
+    /// frontend-agnostic.
     private var spinner: Spinner?
 
     public init(renderer: StreamRenderer, interactiveInput: InteractiveInput) {
@@ -35,14 +35,29 @@ public final class LegacyTerminalFrontend: AgentFrontend, @unchecked Sendable {
         case .assistantTextChunk(let text):
             renderer.printChunk(text)
 
-        case .thinkingStarted:
-            renderer.startThinking()
+        case .thinkingActivity(let lifecycle):
+            if lifecycle == .started {
+                renderer.startThinking()
+            } else {
+                renderer.endThinking()
+            }
+
+        case .tokenProcessingActivity(let lifecycle):
+            if lifecycle == .started {
+                startOrUpdateSpinner(message: "Processing...")
+            } else {
+                startOrUpdateSpinner(message: "Generating...")
+            }
+
+        case .generationActivity(let lifecycle):
+            if lifecycle == .started {
+                startOrUpdateSpinner(message: "Generating...")
+            } else {
+                stopSpinner()
+            }
 
         case .thinkingChunk(let text):
             renderer.printThinkingChunk(text)
-
-        case .thinkingEnded:
-            renderer.endThinking()
 
         case .toolCallStarted(let snapshot):
             // Re-inflate string args into the [String: Any] shape StreamRenderer expects.
@@ -63,6 +78,7 @@ public final class LegacyTerminalFrontend: AgentFrontend, @unchecked Sendable {
             renderer.printStatus(status.text)
 
         case .error(let text):
+            stopSpinner()
             renderer.printError(text)
 
         case .stats(let stats):
@@ -136,25 +152,6 @@ public final class LegacyTerminalFrontend: AgentFrontend, @unchecked Sendable {
         case .steeringInjected(let msg):
             renderer.printStatus("↩️  Steering: \(msg)")
 
-        case .generationActivity(let activity):
-            switch activity {
-            case .started(let message):
-                let s = Spinner(message: message)
-                spinner = s
-                Task { await s.start() }
-            case .phase(let message):
-                if let s = spinner {
-                    Task {
-                        await s.updateMessage(message)
-                        await s.start()
-                    }
-                }
-            case .ended:
-                if let s = spinner {
-                    spinner = nil
-                    Task { await s.stop(clearLine: true) }
-                }
-            }
         }
     }
 
@@ -181,6 +178,26 @@ public final class LegacyTerminalFrontend: AgentFrontend, @unchecked Sendable {
                 placeholder: req.placeholder
             )
             return .textInput(text)
+        }
+    }
+
+    private func startOrUpdateSpinner(message: String) {
+        if let s = spinner {
+            Task {
+                await s.updateMessage(message)
+                await s.start()
+            }
+            return
+        }
+        let s = Spinner(message: message)
+        spinner = s
+        Task { await s.start() }
+    }
+
+    private func stopSpinner() {
+        if let s = spinner {
+            spinner = nil
+            Task { await s.stop(clearLine: true) }
         }
     }
 }

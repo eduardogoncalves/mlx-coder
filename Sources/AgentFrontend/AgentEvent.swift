@@ -20,15 +20,8 @@ public enum AgentEvent: Sendable {
     /// A chunk of visible assistant text (post-think-stripping).
     case assistantTextChunk(String)
 
-    /// A `<think>` block has just opened. Frontends should switch to a
-    /// dimmed/secondary style for subsequent `thinkingChunk` events.
-    case thinkingStarted
-
     /// A chunk of content inside an open `<think>` block.
     case thinkingChunk(String)
-
-    /// The current `<think>` block has closed.
-    case thinkingEnded
 
     // MARK: Tool execution
 
@@ -72,11 +65,16 @@ public enum AgentEvent: Sendable {
     /// A queued steering message was injected before this turn.
     case steeringInjected(String)
 
-    /// Generation activity lifecycle. UIs render this as a spinner / progress
-    /// indicator. AgentCore emits `.started` before inference begins, `.phase`
-    /// when the high-level phase changes (e.g. "Loading prompt", "Generating"),
-    /// and `.ended` when the turn completes (success, error, or cancellation).
-    case generationActivity(GenerationActivity)
+    /// Prompt/token processing lifecycle. This wraps prompt encoding and
+    /// preparation *before* inference begins.
+    case tokenProcessingActivity(ActivityLifecycle)
+
+    /// Inference lifecycle. `.started` means the token stream has opened.
+    /// `.ended` means the stream is drained.
+    case generationActivity(ActivityLifecycle)
+
+    /// `<think>` lifecycle nested inside generation.
+    case thinkingActivity(ActivityLifecycle)
 }
 
 // MARK: - Snapshots
@@ -181,9 +179,8 @@ public enum GitOrchestrationEvent: Sendable {
     case skipped(reason: String)
 }
 
-public enum GenerationActivity: Sendable {
-    case started(message: String)
-    case phase(String)
+public enum ActivityLifecycle: Sendable, Equatable {
+    case started
     case ended
 }
 

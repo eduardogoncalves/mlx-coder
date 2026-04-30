@@ -43,15 +43,21 @@ public final class DebugEventFrontend: AgentFrontend, @unchecked Sendable {
             let escaped = text.replacingOccurrences(of: "\n", with: "\\n")
             log("[\(ts)] assistantTextChunk: \"\(escaped)\"")
 
-        case .thinkingStarted:
-            log("[\(ts)] thinkingStarted")
+        case .thinkingActivity(let lifecycle):
+            switch lifecycle {
+            case .started: log("[\(ts)] thinkingActivity.started")
+            case .ended:   log("[\(ts)] thinkingActivity.ended")
+            }
 
         case .thinkingChunk(let text):
             let escaped = text.replacingOccurrences(of: "\n", with: "\\n")
             log("[\(ts)] thinkingChunk: \"\(escaped)\"")
 
-        case .thinkingEnded:
-            log("[\(ts)] thinkingEnded")
+        case .tokenProcessingActivity(let lifecycle):
+            switch lifecycle {
+            case .started: log("[\(ts)] tokenProcessingActivity.started")
+            case .ended:   log("[\(ts)] tokenProcessingActivity.ended")
+            }
 
         case .toolCallStarted(let snap):
             log("[\(ts)] toolCallStarted: \(snap.name)")
@@ -59,11 +65,10 @@ public final class DebugEventFrontend: AgentFrontend, @unchecked Sendable {
         case .toolCallResult(let snap):
             log("[\(ts)] toolCallResult: \(snap.toolName) error=\(snap.isError)")
 
-        case .generationActivity(let phase):
-            switch phase {
-            case .started(let msg): log("[\(ts)] generationActivity.started: \(msg)")
-            case .phase(let msg):   log("[\(ts)] generationActivity.phase: \(msg)")
-            case .ended:            log("[\(ts)] generationActivity.ended")
+        case .generationActivity(let lifecycle):
+            switch lifecycle {
+            case .started: log("[\(ts)] generationActivity.started")
+            case .ended:   log("[\(ts)] generationActivity.ended")
             }
 
         case .status(let msg):

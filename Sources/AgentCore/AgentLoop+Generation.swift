@@ -53,9 +53,8 @@ extension AgentLoop {
             transformedMessages.indices.last(where: { transformedMessages[$0].role == .user })
             : nil
 
-        // Notify the front-end that generation is starting. Adapters render
-        // their own spinner / progress indicator on this event.
-        frontend.emit(.generationActivity(.started(message: "Processing...")))
+        // Prompt preparation starts before inference/token streaming.
+        frontend.emit(.tokenProcessingActivity(.started))
 
         let result = try await modelContainer.perform { [currentGenerationConfig, frontend, chatML, imageURLs, vlmMessageData, vlmLastUserIndex, shouldUseProcessorPath, isVLM] context in
             if Task.isCancelled { throw CancellationError() }
@@ -131,7 +130,7 @@ extension AgentLoop {
                 toolCallOpen: ToolCallPattern.toolCallOpen,
                 toolCallClose: ToolCallPattern.toolCallClose,
                 onStatusChange: { message in
-                    frontend.emit(.generationActivity(.phase(message)))
+                    frontend.emit(.status(StatusMessage(message, severity: .debug)))
                 }
             )
             
@@ -145,17 +144,24 @@ extension AgentLoop {
                 closeTag: ToolCallPattern.thinkClose,
                 startsThinking: enableThinking
             )
-            if enableThinking {
-                // Emit thinkingStarted immediately: the model is already inside the
-                // think block from token 1 (the open tag is in the prompt, not output).
-                frontend.emit(.thinkingStarted)
-            }
-            var hasShownVisibleOutput = false
+            frontend.emit(.tokenProcessingActivity(.ended))
+            frontend.emit(.generationActivity(.started))
+            var hasOpenThinkingActivity = false
 
-            func stopSpinnerOnFirstVisibleOutput() {
-                guard !hasShownVisibleOutput else { return }
-                hasShownVisibleOutput = true
-                frontend.emit(.generationActivity(.ended))
+            func beginThinkingIfNeeded() {
+                guard !hasOpenThinkingActivity else { return }
+                frontend.emit(.thinkingActivity(.started))
+                hasOpenThinkingActivity = true
+            }
+
+            func endThinkingIfNeeded() {
+                if !hasOpenThinkingActivity {
+                    // Keep lifecycle ordering strict even if the stream closes
+                    // an implicit think block before any visible think chunk.
+                    beginThinkingIfNeeded()
+                }
+                frontend.emit(.thinkingActivity(.ended))
+                hasOpenThinkingActivity = false
             }
 
             var generationParameters = currentGenerationConfig.generateParameters
@@ -191,7 +197,6 @@ extension AgentLoop {
             )
             for await item in tokenStream {
                 if Task.isCancelled {
-                    frontend.emit(.generationActivity(.ended))
                     throw CancellationError()
                 }
                 
@@ -223,9 +228,15 @@ extension AgentLoop {
                     // by reasoning content.
                     for event in parser.feed(newText) {
                         switch event {
-                        case .thinkingStarted:
-                            frontend.emit(.thinkingStarted)
+                        case .thinkingActivity(let lifecycle):
+                            switch lifecycle {
+                            case .started:
+                                beginThinkingIfNeeded()
+                            case .ended:
+                                endThinkingIfNeeded()
+                            }
                         case .thinkingChunk(let chunk):
+                            beginThinkingIfNeeded()
                             // Don't stop the spinner during thinking: the spinner
                             // should keep animating with "Thinking…" label while
                             // reasoning tokens stream in. Stopping it here (before
@@ -233,12 +244,10 @@ extension AgentLoop {
                             // the footer rendering state before any think line is
                             // visible, causing all chunks to appear batched at the end.
                             frontend.emit(.thinkingChunk(chunk))
-                        case .thinkingEnded:
-                            frontend.emit(.thinkingEnded)
                         case .assistantTextChunk(let chunk):
-                            // Stop the "Processing…" spinner on the first visible
-                            // response token (after thinking, if any).
-                            stopSpinnerOnFirstVisibleOutput()
+                            if hasOpenThinkingActivity {
+                                endThinkingIfNeeded()
+                            }
                             let result = writer.process(chunk)
                             if !result.displayText.isEmpty {
                                 frontend.emit(.assistantTextChunk(result.displayText))
@@ -254,7 +263,6 @@ extension AgentLoop {
                     // and all events would appear batched at the end of generation.
                     await Task.yield()
                 case .info(let info):
-                    stopSpinnerOnFirstVisibleOutput()
                     let statMessage = String(format: "Generated %d tokens (%.1f tok/s), prompt: %d tokens (%.1f tok/s)",
                                              info.generationTokenCount, info.tokensPerSecond,
                                              info.promptTokenCount, info.promptTokensPerSecond)
@@ -263,13 +271,22 @@ extension AgentLoop {
             }
             
             // Flush any remaining buffered state in the parser
-            for event in parser.flush() {
+            for event in parser.flush(closeUnterminatedThinkingBlock: true) {
                 switch event {
+                case .thinkingActivity(let lifecycle):
+                    switch lifecycle {
+                    case .started:
+                        beginThinkingIfNeeded()
+                    case .ended:
+                        endThinkingIfNeeded()
+                    }
                 case .thinkingChunk(let chunk):
-                    stopSpinnerOnFirstVisibleOutput()
+                    beginThinkingIfNeeded()
                     frontend.emit(.thinkingChunk(chunk))
                 case .assistantTextChunk(let chunk):
-                    stopSpinnerOnFirstVisibleOutput()
+                    if hasOpenThinkingActivity {
+                        endThinkingIfNeeded()
+                    }
                     let result = writer.process(chunk)
                     if !result.displayText.isEmpty {
                         frontend.emit(.assistantTextChunk(result.displayText))
@@ -286,7 +303,7 @@ extension AgentLoop {
             return (text: rawResponseText, writer: writer)
         }
 
-        // Cleanup activity indicator on exit (no-op if already ended).
+        // Inference stream has drained completely.
         frontend.emit(.generationActivity(.ended))
 
         return result

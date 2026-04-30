@@ -1,7 +1,6 @@
 // Sources/AgentFrontend/StreamParser.swift
 // Pure state machine that splits a streaming token feed into
-// AgentEvent.assistantTextChunk / .thinkingStarted / .thinkingChunk /
-// .thinkingEnded events.
+// AgentEvent.assistantTextChunk / .thinkingActivity / .thinkingChunk events.
 //
 // Ported from the inline parser previously in AgentLoop+Generation.swift
 // (see commit history for the pre-refactor version).
@@ -64,14 +63,23 @@ public struct StreamParser: Sendable {
     }
 
     /// Flush all remaining buffered content as the appropriate event type.
-    /// Call once when the stream ends.
-    public mutating func flush() -> [AgentEvent] {
-        guard !pending.isEmpty else { return [] }
-        let event: AgentEvent = isThinking
-            ? .thinkingChunk(pending)
-            : .assistantTextChunk(pending)
+    /// If `closeUnterminatedThinkingBlock` is true and a think block is still
+    /// open, emits a synthetic `.thinkingActivity(.ended)` so downstream
+    /// consumers never observe a thinking phase outliving generation.
+    public mutating func flush(closeUnterminatedThinkingBlock: Bool = false) -> [AgentEvent] {
+        var events: [AgentEvent] = []
+        if !pending.isEmpty {
+            let event: AgentEvent = isThinking
+                ? .thinkingChunk(pending)
+                : .assistantTextChunk(pending)
+            events.append(event)
+        }
         pending = ""
-        return [event]
+        if closeUnterminatedThinkingBlock && isThinking {
+            events.append(.thinkingActivity(.ended))
+            isThinking = false
+        }
+        return events
     }
 
     // MARK: Driver
@@ -84,7 +92,7 @@ public struct StreamParser: Sendable {
                     if !before.isEmpty {
                         events.append(.thinkingChunk(before))
                     }
-                    events.append(.thinkingEnded)
+                    events.append(.thinkingActivity(.ended))
                     isThinking = false
                     pending = String(pending[range.upperBound...])
                     if pending.hasPrefix("\n") { pending.removeFirst() }
@@ -101,7 +109,7 @@ public struct StreamParser: Sendable {
                     if !before.isEmpty {
                         events.append(.assistantTextChunk(before))
                     }
-                    events.append(.thinkingStarted)
+                    events.append(.thinkingActivity(.started))
                     isThinking = true
                     pending = String(pending[range.upperBound...])
                     if pending.hasPrefix("\n") { pending.removeFirst() }

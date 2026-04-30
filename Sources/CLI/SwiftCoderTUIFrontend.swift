@@ -10,12 +10,17 @@ import SwiftCoderTUI
 
 public final class SwiftCoderTUIFrontend: AgentFrontend, @unchecked Sendable {
 
+    private enum RenderCommand: Sendable {
+        case event(AgentEvent)
+        case spinnerTick
+    }
+
     public let renderer: Renderer
     public let appConfig: AppConfig
 
     // Event pipeline
-    private let continuation: AsyncStream<AgentEvent>.Continuation
-    private let stream: AsyncStream<AgentEvent>
+    private let continuation: AsyncStream<RenderCommand>.Continuation
+    private let stream: AsyncStream<RenderCommand>
     private var consumerTask: Task<Void, Never>?
 
     // Approval bridging — only one outstanding approval at a time.
@@ -27,7 +32,7 @@ public final class SwiftCoderTUIFrontend: AgentFrontend, @unchecked Sendable {
     private var spinnerTickTask: Task<Void, Never>?
 
     // Accumulated thinking text for the footer spinner label tail.
-    // Reset at thinkingStarted, cleared at thinkingEnded.
+    // Reset at thinkingActivity(.started), cleared at thinkingActivity(.ended).
     private var thinkingBuffer: String = ""
 
     // State machine: tracks whether the next assistantTextChunk is the very
@@ -37,19 +42,23 @@ public final class SwiftCoderTUIFrontend: AgentFrontend, @unchecked Sendable {
     // Set when ESC is pressed; gates out late-arriving stream events from a
     // cancelled Task so they cannot corrupt the footer after abort.
     private var isAborted: Bool = false
+    private var tokenProcessingActive: Bool = false
+    private var generationActive: Bool = false
+    private var thinkingActive: Bool = false
+    private var pendingGenerationEnd: Bool = false
 
     public init(renderer: Renderer, appConfig: AppConfig) {
         self.renderer = renderer
         self.appConfig = appConfig
-        var cont: AsyncStream<AgentEvent>.Continuation!
-        self.stream = AsyncStream<AgentEvent>(bufferingPolicy: .unbounded) { c in
+        var cont: AsyncStream<RenderCommand>.Continuation!
+        self.stream = AsyncStream<RenderCommand>(bufferingPolicy: .unbounded) { c in
             cont = c
         }
         self.continuation = cont
         self.consumerTask = Task { [weak self] in
             guard let self else { return }
-            for await event in self.stream {
-                await self.render(event)
+            for await command in self.stream {
+                await self.render(command)
             }
         }
     }
@@ -62,7 +71,7 @@ public final class SwiftCoderTUIFrontend: AgentFrontend, @unchecked Sendable {
     // MARK: AgentFrontend
 
     public func emit(_ event: AgentEvent) {
-        continuation.yield(event)
+        continuation.yield(.event(event))
     }
 
     public func request(_ request: AgentRequest) async -> AgentResponse {
@@ -112,65 +121,75 @@ public final class SwiftCoderTUIFrontend: AgentFrontend, @unchecked Sendable {
 
     // MARK: Event rendering
 
+    private func render(_ command: RenderCommand) async {
+        switch command {
+        case .spinnerTick:
+            await renderSpinnerTick()
+        case .event(let event):
+            await render(event)
+        }
+    }
+
     private func render(_ event: AgentEvent) async {
         // Drop all events from a cancelled generation so late-arriving chunks,
-        // stats, and .ended cleanup cannot corrupt the footer after ESC.
-        // Only .generationActivity(.started) passes through to clear isAborted
-        // and set up the UI for the next generation.
+        // stats, and lifecycle events cannot corrupt the footer after ESC.
+        // Only a new token-processing start opens the next stream lifecycle.
         if isAborted {
             switch event {
-            case .generationActivity(let activity):
-                switch activity {
-                case .started: break          // let through — clears isAborted
-                default:       return         // drop .ended, .phase
-                }
+            case .tokenProcessingActivity(let lifecycle) where lifecycle == .started:
+                break
             case .error, .modelLifecycle, .modeChanged:
-                break                         // user-visible, let through
+                break
             default:
-                return                        // drop everything else (stats, status, chunks…)
+                return
             }
         }
 
         switch event {
         case .assistantTextChunk(let text):
+            guard generationActive else { return }
             // First visible assistant token: transition spinner label from
-            // "Processing…" to "Generating…" so the user sees the model is
-            // actively producing output (not just loading context).
+            // "Processing…" to "Generating…" so the user sees inference output.
             if isFirstContentToken {
                 isFirstContentToken = false
                 await renderer.setThinking("Generating…")
             }
+            // Keep backend output UI-agnostic: this is raw markdown. The TUI
+            // renderer applies incremental ANSI formatting as chunks arrive.
             // Use appendStreamChunk (raw concat, no auto-space) because
             // LLM tokens already carry their own whitespace (e.g. " How").
             // appendStreamWord would add an extra space before each token.
             await renderer.appendStreamChunk(text)
 
-        case .thinkingStarted:
-            thinkingBuffer = ""
-            isFirstContentToken = false  // thinking IS first content
-            // Flush any partial assistant stream line before the think block.
-            await renderer.flushStreamLine()
-            await renderer.setThinking("Thinking…")
+        case .thinkingActivity(let lifecycle):
+            switch lifecycle {
+            case .started:
+                thinkingActive = true
+                thinkingBuffer = ""
+                isFirstContentToken = false  // thinking IS first content
+                // Flush any partial assistant stream line before the think block.
+                await renderer.flushStreamLine()
+                await renderer.setThinking("Thinking…")
+            case .ended:
+                guard thinkingActive else { break }
+                thinkingActive = false
+                // Flush any remaining partial think line to scroll and restore
+                // "Generating…" label.
+                await renderer.flushThinkLine()
+                thinkingBuffer = ""
+                await renderer.setThinking("Generating…")
+                if pendingGenerationEnd {
+                    pendingGenerationEnd = false
+                    await finalizeGenerationUI()
+                }
+            }
 
         case .thinkingChunk(let text):
+            guard thinkingActive else { return }
             thinkingBuffer += text
             // Route through appendThinkChunk: complete lines go directly to
-            // the scroll area; partial line shown in spinner label tail.
+            // the scroll area; partial line is managed by the renderer.
             await renderer.appendThinkChunk(text)
-            let tail = thinkingBuffer
-                .replacingOccurrences(of: "\n", with: " ")
-                .trimmingCharacters(in: .whitespaces)
-            await renderer.setThinking(String(tail.suffix(50)))
-
-        case .thinkingEnded:
-            // Flush any remaining partial think line to scroll, reset state,
-            // commit the · thinking… marker, restore "Generating…" label.
-            await renderer.flushThinkLine()
-            thinkingBuffer = ""
-            let badge = await renderer.getCurrentModeBadgeColor()
-            let marker = SessionEntry(role: .thinking(badgeColor: badge), content: "thinking…")
-            await renderer.printScrollLine(marker.render())
-            await renderer.setThinking("Generating…")
 
         case .toolCallStarted(let snap):
             // SessionEntry(.toolCall) splits content on the FIRST SPACE to get
@@ -193,6 +212,15 @@ public final class SwiftCoderTUIFrontend: AgentFrontend, @unchecked Sendable {
             }
 
         case .status(let s):
+            // Internal status noise (e.g. tool-call writer debug progress)
+            // should not be printed into the user-visible chat transcript.
+            if s.severity == .debug { return }
+            // Hide the generation indicator before printing final token stats.
+            if s.severity == .info && s.text.hasPrefix("Generated ") {
+                if tokenProcessingActive || generationActive || thinkingActive || pendingGenerationEnd {
+                    await finalizeGenerationUI()
+                }
+            }
             // Flush any partial streaming line to scroll BEFORE the status
             // message so the response text always precedes its own stats line.
             await renderer.flushStreamLine()
@@ -206,6 +234,9 @@ public final class SwiftCoderTUIFrontend: AgentFrontend, @unchecked Sendable {
 
         case .error(let msg):
             await renderer.printScrollLine("\(DesignSystem.brightRed)✗ \(msg)\(DesignSystem.reset)")
+            if tokenProcessingActive || generationActive {
+                await finalizeGenerationUI()
+            }
 
         case .stats(let stats):
             await renderer.flushStreamLine()
@@ -239,36 +270,55 @@ public final class SwiftCoderTUIFrontend: AgentFrontend, @unchecked Sendable {
         case .steeringInjected(let s):
             await renderer.printScrollLine("\(DesignSystem.dim)steering: \(s)\(DesignSystem.reset)")
 
-        case .generationActivity(let activity):
-            switch activity {
-            case .started(let message):
+        case .tokenProcessingActivity(let lifecycle):
+            switch lifecycle {
+            case .started:
                 isAborted = false
+                tokenProcessingActive = true
+                generationActive = false
+                thinkingActive = false
+                pendingGenerationEnd = false
+                thinkingBuffer = ""
                 isFirstContentToken = true
-                await renderer.setThinking(message)
+                await renderer.setThinking("Processing…")
                 await renderer.setGenerating(true)
                 await renderer.renderFooter()
                 startSpinnerTicker()
-            case .phase(let message):
-                await renderer.setThinking(message)
             case .ended:
-                stopSpinnerTicker()
-                // Commit any partial response line from the footer stream zone
-                // to the scroll area before hiding the spinner / input box.
-                await renderer.flushStreamLine()
-                await renderer.setGenerating(false)
-                await renderer.setThinking("")
+                tokenProcessingActive = false
+                if !generationActive {
+                    await renderer.setThinking("Generating…")
+                    await renderer.renderFooter()
+                }
+            }
+
+        case .generationActivity(let lifecycle):
+            switch lifecycle {
+            case .started:
+                generationActive = true
+                tokenProcessingActive = false
+                isFirstContentToken = true
+                await renderer.setThinking("Generating…")
                 await renderer.renderFooter()
+            case .ended:
+                let wasActive = tokenProcessingActive || generationActive || thinkingActive || pendingGenerationEnd
+                generationActive = false
+                guard wasActive else { break }
+                if thinkingActive {
+                    pendingGenerationEnd = true
+                } else {
+                    await finalizeGenerationUI()
+                }
             }
         }
     }
 
     private func startSpinnerTicker() {
         spinnerTickTask?.cancel()
-        let r = renderer
+        let cont = continuation
         spinnerTickTask = Task {
             while !Task.isCancelled {
-                await r.advanceSpinner()
-                await r.renderSpinnerTick()
+                cont.yield(.spinnerTick)
                 try? await Task.sleep(nanoseconds: 100_000_000)
             }
         }
@@ -279,6 +329,10 @@ public final class SwiftCoderTUIFrontend: AgentFrontend, @unchecked Sendable {
     /// Task is cancelled externally (e.g. ESC) so the UI stays consistent.
     public func abortGeneration() async {
         isAborted = true
+        tokenProcessingActive = false
+        generationActive = false
+        thinkingActive = false
+        pendingGenerationEnd = false
         stopSpinnerTicker()
         thinkingBuffer = ""
         isFirstContentToken = true
@@ -291,6 +345,26 @@ public final class SwiftCoderTUIFrontend: AgentFrontend, @unchecked Sendable {
     private func stopSpinnerTicker() {
         spinnerTickTask?.cancel()
         spinnerTickTask = nil
+    }
+
+    private func renderSpinnerTick() async {
+        guard tokenProcessingActive || generationActive else { return }
+        await renderer.advanceSpinner()
+        await renderer.renderSpinnerTick()
+    }
+
+    private func finalizeGenerationUI() async {
+        tokenProcessingActive = false
+        generationActive = false
+        thinkingActive = false
+        pendingGenerationEnd = false
+        stopSpinnerTicker()
+        // Commit any partial response line from the footer stream zone
+        // to the scroll area before hiding the spinner / input box.
+        await renderer.flushStreamLine()
+        await renderer.setGenerating(false)
+        await renderer.setThinking("")
+        await renderer.renderFooter()
     }
 
     private func describe(_ m: ModelLifecycleEvent) -> String {
