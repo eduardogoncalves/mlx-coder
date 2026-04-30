@@ -20,6 +20,7 @@ import Darwin
 import Glibc
 #endif
 import Foundation
+import MLX
 import SwiftCoderTUI
 
 @MainActor
@@ -46,8 +47,9 @@ public func runSwiftCoderTUISession(
     let inputHistory = InputHistory()
     var activeStreamTask: Task<Void, Never>? = nil
     var lastShellCommand: String = ""
+    var shouldQuit = false
 
-    for await key in InputHandler.keystrokes() {
+    mainLoop: for await key in InputHandler.keystrokes() {
 
         // Approval intercept — when the agent has paused for a tool decision.
         if frontend.hasPendingApproval {
@@ -143,7 +145,8 @@ public func runSwiftCoderTUISession(
             inputHistory.resetCursor()
 
             if trimmed == "/quit" || trimmed == "exit" || trimmed == "quit" {
-                return
+                shouldQuit = true
+                break mainLoop
             }
             if trimmed == "/clear" {
                 await renderer.clearConversation()
@@ -216,6 +219,23 @@ public func runSwiftCoderTUISession(
             break
         }
     }
+
+    if shouldQuit {
+        let wasGenerating = await renderer.getIsGenerating()
+        let runningTask = activeStreamTask
+        runningTask?.cancel()
+        if wasGenerating {
+            await frontend.abortGeneration()
+        }
+        if let runningTask {
+            await runningTask.value
+        }
+        // TokenIterator uses asyncEval pipelining. Ensure pending MLX work is
+        // fully drained before process teardown to avoid shutdown races.
+        MLX.Stream().synchronize()
+    }
+    await renderer.flushStreamLine()
+    await renderer.teardownScreen()
 }
 
 private func decisionForOption(_ index: Int?) -> ApprovalDecision {

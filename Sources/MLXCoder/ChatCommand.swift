@@ -257,6 +257,8 @@ struct ChatCommand: AsyncParsableCommand {
             let tuiFrontend = SwiftCoderTUIFrontend(renderer: tuiRenderer, appConfig: tuiAppConfig)
             await agentLoop.swapFrontend(tuiFrontend)
             await runSwiftCoderTUISession(agentLoop: agentLoop, frontend: tuiFrontend)
+            await DotnetLSPService.shared.shutdown()
+            print("\nGoodbye!")
             return
         }
 
@@ -1053,5 +1055,4 @@ func handleMemorySnippet(window: String?, workspaceRoot: String, store: Knowledg
         frontend.emit(.memoryEvent(.error("Snippet generation failed: \(error)")))
     }
 }
-
 
