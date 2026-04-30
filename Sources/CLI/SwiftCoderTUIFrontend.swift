@@ -31,7 +31,7 @@ public final class SwiftCoderTUIFrontend: AgentFrontend, @unchecked Sendable {
     // generation is in flight.
     private var spinnerTickTask: Task<Void, Never>?
 
-    // Accumulated thinking text for the footer spinner label tail.
+    // Accumulated rendered thinking text for overlap/duplication filtering.
     // Reset at thinkingActivity(.started), cleared at thinkingActivity(.ended).
     private var thinkingBuffer: String = ""
 
@@ -186,10 +186,12 @@ public final class SwiftCoderTUIFrontend: AgentFrontend, @unchecked Sendable {
 
         case .thinkingChunk(let text):
             guard thinkingActive else { return }
-            thinkingBuffer += text
+            let normalized = normalizedThinkingDelta(incoming: text, alreadyRendered: thinkingBuffer)
+            guard !normalized.isEmpty else { return }
+            thinkingBuffer += normalized
             // Route through appendThinkChunk: complete lines go directly to
             // the scroll area; partial line is managed by the renderer.
-            await renderer.appendThinkChunk(text)
+            await renderer.appendThinkChunk(normalized)
 
         case .toolCallStarted(let snap):
             // SessionEntry(.toolCall) splits content on the FIRST SPACE to get
@@ -365,6 +367,48 @@ public final class SwiftCoderTUIFrontend: AgentFrontend, @unchecked Sendable {
         await renderer.setGenerating(false)
         await renderer.setThinking("")
         await renderer.renderFooter()
+    }
+
+    /// Normalizes streamed think chunks into append-only deltas.
+    ///
+    /// Some model/tokenizer paths can occasionally replay an already-rendered
+    /// snapshot (or an overlapping suffix/prefix) instead of a strict delta.
+    /// This keeps rendering monotonic and prevents duplicated think lines.
+    private func normalizedThinkingDelta(incoming: String, alreadyRendered: String) -> String {
+        guard !incoming.isEmpty else { return "" }
+        guard !alreadyRendered.isEmpty else { return incoming }
+
+        // Snapshot replay case: incoming already includes the full rendered text.
+        if incoming.hasPrefix(alreadyRendered) {
+            return String(incoming.dropFirst(alreadyRendered.count))
+        }
+
+        // Tail replay case: incoming fully matches already-rendered tail.
+        if alreadyRendered.hasSuffix(incoming) {
+            return ""
+        }
+
+        // Large replay case: incoming chunk appears verbatim somewhere in what
+        // we've already rendered. Keep small chunks exempt to avoid suppressing
+        // legitimate repeated short tokens.
+        if incoming.count >= 24 && alreadyRendered.contains(incoming) {
+            return ""
+        }
+
+        // Overlap case: rendered suffix overlaps incoming prefix.
+        let maxOverlap = min(alreadyRendered.count, incoming.count)
+        if maxOverlap > 0 {
+            for overlap in stride(from: maxOverlap, through: 1, by: -1) {
+                let renderedSuffix = String(alreadyRendered.suffix(overlap))
+                let incomingPrefix = String(incoming.prefix(overlap))
+                if renderedSuffix == incomingPrefix {
+                    return String(incoming.dropFirst(overlap))
+                }
+            }
+        }
+
+        // No detectable overlap — treat as a fresh delta.
+        return incoming
     }
 
     private func describe(_ m: ModelLifecycleEvent) -> String {
