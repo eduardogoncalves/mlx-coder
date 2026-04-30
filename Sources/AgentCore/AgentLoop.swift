@@ -324,7 +324,6 @@ public actor AgentLoop {
                     }
                 }
                 
-                print() // newline after response
                 return
             }
 
@@ -409,7 +408,6 @@ public actor AgentLoop {
                 return
             }
 
-            print("")
             let setupOptions = [
                 "Continue from existing worktree branch",
                 "Create a new branch (auto name)",

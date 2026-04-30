@@ -8,6 +8,16 @@ import SwiftCoderTUI
 
 public enum SwiftCoderTUIAppConfigBuilder {
 
+    private static func tbDebugEnabledFromEnvironment() -> Bool {
+        guard let raw = ProcessInfo.processInfo.environment["MLX_CODER_TUI_TB_DEBUG"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        else {
+            return false
+        }
+        return ["1", "true", "yes", "on"].contains(raw)
+    }
+
     /// Build an AppConfig for mlx-coder. `version` should be the value
     /// from `MLXCoderCLI.configuration.version`.
     public static func build(version: String, defaultModelLabel: String) -> AppConfig {
@@ -43,7 +53,8 @@ public enum SwiftCoderTUIAppConfigBuilder {
                 AppConfig.CommandConfig(name: "!!",       description: "Repeat the last shell command"),
             ],
             defaultModelIndex: 0,
-            defaultModeIndex: 1
+            defaultModeIndex: 1,
+            topBarDebugEnabled: tbDebugEnabledFromEnvironment()
         )
     }
 }

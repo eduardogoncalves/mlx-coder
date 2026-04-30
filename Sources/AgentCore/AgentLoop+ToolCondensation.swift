@@ -57,7 +57,7 @@ extension AgentLoop {
 
             if verbose, !summary.isEmpty {
                 frontend.emitStatus("[debug] Condensed summary for \(toolName):")
-                print(summary)
+                frontend.emitStatus(summary)
             }
 
             guard !summary.isEmpty else {

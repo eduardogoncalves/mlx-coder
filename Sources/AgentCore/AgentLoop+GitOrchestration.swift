@@ -148,7 +148,6 @@ extension AgentLoop {
 
         guard let interactiveInput = self.interactiveInput else { return }
 
-        print("")
         let mergeOptions = [
             "Leave for later",
             "Merge now (squash)",
