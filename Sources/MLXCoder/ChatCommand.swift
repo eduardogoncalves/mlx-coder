@@ -519,44 +519,62 @@ struct ChatCommand: AsyncParsableCommand {
                 continue
             }
 
-            // GSD workflow skill commands: /gsd-<name> [args]
-            if trimmed.hasPrefix("/gsd-") {
-                let parts = trimmed.split(separator: " ", maxSplits: 1)
-                let commandName = String(parts[0].dropFirst(1)) // e.g. "gsd-quick"
-                let gsdArgs = parts.count > 1
-                    ? String(parts[1]).trimmingCharacters(in: .whitespacesAndNewlines)
-                    : ""
-
-                let skillBody: String?
-                do {
-                    skillBody = try await skillsRegistry.loadBody(name: commandName)
-                } catch {
-                    renderer.printError("Failed to load GSD skill '\(commandName)': \(error.localizedDescription)")
-                    continue
-                }
-
-                guard let body = skillBody else {
-                    renderer.printError("GSD skill '\(commandName)' not found. Use /skills to list available skills.")
-                    continue
-                }
-
-                let gsdMessage = gsdArgs.isEmpty
-                    ? body
-                    : "\(body)\n\n**Task/Arguments:** \(gsdArgs)"
-
-                renderer.printStatus("[gsd] Activating '\(commandName)' workflow…")
+            // /init [description] — scaffold .planning/ context files for this workspace
+            if trimmed.hasPrefix("/init") {
+                let description = String(trimmed.dropFirst("/init".count)).trimmingCharacters(in: .whitespacesAndNewlines)
+                let initPrompt = buildInitWorkflowPrompt(description: description, workspaceRoot: absWorkspace)
+                renderer.printStatus("[init] Scaffolding project planning structure…")
                 renderer.printStatus("[Key mode] Generation active. Press Esc to cancel.")
-                let gsdTask = Task {
-                    try await agentLoop.processUserMessage(gsdMessage)
-                }
-                await CancelController.shared.setTask(gsdTask)
-                do {
-                    try await gsdTask.value
-                } catch is CancellationError {
-                    renderer.printError("GSD workflow cancelled.")
-                } catch {
-                    renderer.printError(error.localizedDescription)
-                }
+                let initTask = Task { try await agentLoop.processUserMessage(initPrompt) }
+                await CancelController.shared.setTask(initTask)
+                do { try await initTask.value } catch is CancellationError {
+                    renderer.printError("[init] Cancelled.")
+                } catch { renderer.printError(error.localizedDescription) }
+                await CancelController.shared.setTask(nil)
+                continue
+            }
+
+            // /debug [issue] — structured debugging session using the scientific method
+            if trimmed.hasPrefix("/debug") {
+                let issue = String(trimmed.dropFirst("/debug".count)).trimmingCharacters(in: .whitespacesAndNewlines)
+                let debugPrompt = buildDebugWorkflowPrompt(issue: issue)
+                renderer.printStatus("[debug] Starting structured debugging session…")
+                renderer.printStatus("[Key mode] Generation active. Press Esc to cancel.")
+                let debugTask = Task { try await agentLoop.processUserMessage(debugPrompt) }
+                await CancelController.shared.setTask(debugTask)
+                do { try await debugTask.value } catch is CancellationError {
+                    renderer.printError("[debug] Cancelled.")
+                } catch { renderer.printError(error.localizedDescription) }
+                await CancelController.shared.setTask(nil)
+                continue
+            }
+
+            // /review [scope] — structured code review across correctness, security, performance
+            if trimmed.hasPrefix("/review") {
+                let scope = String(trimmed.dropFirst("/review".count)).trimmingCharacters(in: .whitespacesAndNewlines)
+                let reviewPrompt = buildReviewWorkflowPrompt(scope: scope, workspaceRoot: absWorkspace)
+                renderer.printStatus("[review] Starting code review…")
+                renderer.printStatus("[Key mode] Generation active. Press Esc to cancel.")
+                let reviewTask = Task { try await agentLoop.processUserMessage(reviewPrompt) }
+                await CancelController.shared.setTask(reviewTask)
+                do { try await reviewTask.value } catch is CancellationError {
+                    renderer.printError("[review] Cancelled.")
+                } catch { renderer.printError(error.localizedDescription) }
+                await CancelController.shared.setTask(nil)
+                continue
+            }
+
+            // /todo [add <text> | done <n> | list] — manage .planning/todos.md
+            if trimmed.hasPrefix("/todo") {
+                let todoArg = String(trimmed.dropFirst("/todo".count)).trimmingCharacters(in: .whitespacesAndNewlines)
+                let todoPrompt = buildTodoWorkflowPrompt(arg: todoArg, workspaceRoot: absWorkspace)
+                renderer.printStatus("[todo] Managing task list…")
+                renderer.printStatus("[Key mode] Generation active. Press Esc to cancel.")
+                let todoTask = Task { try await agentLoop.processUserMessage(todoPrompt) }
+                await CancelController.shared.setTask(todoTask)
+                do { try await todoTask.value } catch is CancellationError {
+                    renderer.printError("[todo] Cancelled.")
+                } catch { renderer.printError(error.localizedDescription) }
                 await CancelController.shared.setTask(nil)
                 continue
             }
@@ -737,14 +755,11 @@ func printREPLHelp() {
       \u{001B}[32m/voice-locale [id]\u{001B}[0m Set STT language (no arg = list all available locales)
       \u{001B}[32m/memory <cmd>\u{001B}[0m  Memory commands: save, log, search, list, undo, status, snippet
 
-    \u{1B}[1mGSD Workflow Skills\u{001B}[0m (skill files auto-discovered in .github/skills/, .claude/skills/, etc.):
-      \u{001B}[32m/gsd-new-project [idea]\u{001B}[0m Initialize project with PROJECT.md, REQUIREMENTS.md, ROADMAP.md
-      \u{001B}[32m/gsd-plan [task]\u{001B}[0m    Research and create an XML execution plan with verification
-      \u{001B}[32m/gsd-quick [task]\u{001B}[0m   Execute an ad-hoc task with atomic commits and state tracking
-      \u{001B}[32m/gsd-debug [issue]\u{001B}[0m  Systematic debugging using the scientific method
-      \u{001B}[32m/gsd-review\u{001B}[0m         Comprehensive code review (correctness, security, performance)
-      \u{001B}[32m/gsd-next\u{001B}[0m           Auto-detect project state and run the next logical step
-      \u{001B}[32m/gsd-<name> [args]\u{001B}[0m  Activate any custom skill by name with optional arguments
+    \u{1B}[1mWorkflow Commands:\u{001B}[0m
+      \u{001B}[32m/init [description]\u{001B}[0m Scaffold .planning/ context files (PROJECT.md, REQUIREMENTS.md, ROADMAP.md, STATE.md, todos.md)
+      \u{001B}[32m/todo [add <text> | done <n> | list]\u{001B}[0m Manage .planning/todos.md; 'add' also offers to open a worktree branch
+      \u{001B}[32m/debug [issue]\u{001B}[0m  Scientific-method debugging: symptoms → hypotheses → isolate → fix → commit
+      \u{001B}[32m/review [scope]\u{001B}[0m Code review covering correctness, security, performance, and tests
 
       \u{001B}[32mEsc\u{001B}[0m            Cancel current generation
       \u{001B}[32mShift+Tab\u{001B}[0m      Cycle modes (default starts at Plan low):
@@ -755,9 +770,262 @@ func printREPLHelp() {
     """)
 }
 
-// MARK: - Memory Restoration
+// MARK: - Workflow Command Prompts
 
-func restoreMemorySection(workspaceRoot: String, renderer: StreamRenderer) async -> String? {
+func buildInitWorkflowPrompt(description: String, workspaceRoot: String) -> String {
+    let descLine = description.isEmpty
+        ? "No description provided — infer from the existing codebase."
+        : "Project description: \(description)"
+    return """
+    You are running the /init workflow. Your goal is to scaffold a .planning/ directory for this workspace so future sessions can load context efficiently.
+
+    Workspace: \(workspaceRoot)
+    \(descLine)
+
+    Steps:
+    1. Read the existing codebase structure (top-level directories, Package.swift / package.json / Cargo.toml / etc., README if present). Do NOT skip this — the files you create must reflect what actually exists.
+    2. Create .planning/ if it does not exist.
+    3. Create or update the following files (use write_file or patch if they already exist):
+
+    .planning/PROJECT.md
+    ────────────────────
+    # Project: <name>
+
+    ## Vision
+    <one paragraph describing what this project does and why it matters>
+
+    ## Tech Stack
+    <language, framework, key dependencies>
+
+    ## Constraints
+    <performance targets, OS requirements, coding conventions>
+
+    .planning/REQUIREMENTS.md
+    ──────────────────────────
+    # Requirements
+
+    ## In Scope (v1)
+    - [ ] <requirement 1>
+
+    ## Out of Scope / Future
+    - <future idea>
+
+    .planning/ROADMAP.md
+    ─────────────────────
+    # Roadmap
+
+    ## Phase 1: <name>
+    **Goal:** <what this phase achieves>
+    **Status:** not started
+    **Delivers:**
+    - <deliverable>
+
+    .planning/STATE.md
+    ───────────────────
+    # Project State
+
+    **Current phase:** 1
+    **Last updated:** <today's date>
+
+    ## Open Decisions
+    | Decision | Options | Due |
+    |----------|---------|-----|
+
+    ## Blockers
+    None
+
+    .planning/todos.md
+    ───────────────────
+    # Todo List
+
+    | # | Task | Priority | Status | Branch |
+    |---|------|----------|--------|--------|
+
+    4. After writing the files, print a short summary of what was created and suggest: "Run /todo add <first task> to add a task, or just describe what you'd like to build."
+    """
+}
+
+func buildDebugWorkflowPrompt(issue: String) -> String {
+    let issueLine = issue.isEmpty
+        ? "No issue description provided — ask the user to describe the problem before proceeding."
+        : "Issue: \(issue)"
+    return """
+    You are running the /debug workflow. Follow the scientific method strictly — do not guess or apply fixes before confirming the root cause.
+
+    \(issueLine)
+
+    Steps:
+    1. GATHER SYMPTOMS — If not fully described in the issue, ask:
+       a. Expected behavior: what should happen?
+       b. Actual behavior: what happens instead? (include exact error messages or stack traces)
+       c. Reproduction steps: how do you trigger it reliably?
+       d. When did it start? Was it ever working?
+
+    2. COLLECT EVIDENCE — Before forming a hypothesis:
+       - Read the relevant code path(s) end-to-end
+       - Run the reproduction steps via bash; capture exact output
+       - Check recent git history for related changes: git log --oneline -10
+
+    3. FORM HYPOTHESES — List 2–3 candidate root causes in order of likelihood:
+       Hypothesis 1: <most likely>
+       Hypothesis 2: <second candidate>
+       Hypothesis 3: <edge case>
+
+    4. TEST & ELIMINATE — For each hypothesis (most likely first):
+       - Design the minimal test (targeted log, assertion, or isolated repro)
+       - Execute it
+       - Record result: confirmed / eliminated / inconclusive
+       Continue until one hypothesis is confirmed.
+
+    5. FIX — Make the minimal change that addresses the confirmed root cause. Do NOT over-engineer.
+       - Modify only what is needed
+       - Add a regression test if the test infrastructure allows it
+       - Run the full build/test suite to verify
+
+    6. COMMIT — git add + git commit with message:
+       fix: <concise description>
+
+       Root cause: <one sentence>
+       Fix: <one sentence>
+
+    7. REPORT — Summarize: root cause, fix applied, files changed, test result, commit hash.
+    """
+}
+
+func buildReviewWorkflowPrompt(scope: String, workspaceRoot: String) -> String {
+    let scopeLine: String
+    if scope.isEmpty {
+        scopeLine = "No scope provided — review recent changes: run `git diff HEAD~1` to find them, or ask the user what to review."
+    } else {
+        scopeLine = "Review scope: \(scope)"
+    }
+    return """
+    You are running the /review workflow. Perform a thorough code review; be specific and actionable.
+
+    Workspace: \(workspaceRoot)
+    \(scopeLine)
+
+    Steps:
+    1. DETERMINE SCOPE — If scope is a file/directory, read it. If scope refers to recent changes, run `git diff HEAD~1` or `git diff main`. Read all relevant tests too.
+
+    2. REVIEW ACROSS FOUR DIMENSIONS for each file:
+
+       CORRECTNESS
+       - Edge cases: nil/null, empty collections, boundary values, concurrent access
+       - Error handling: are errors caught, propagated, and surfaced correctly?
+       - Logic: off-by-one errors, inverted conditions, wrong comparisons
+
+       SECURITY
+       - Input validation and sanitization (user input, file paths, shell arguments)
+       - Injection risks (shell, SQL, path traversal)
+       - Sensitive data: secrets, tokens, PII — are they logged or exposed?
+       - Permission checks before privileged operations
+
+       PERFORMANCE
+       - Unnecessary allocations in hot paths
+       - N+1 or missing batch operations
+       - Large structures copied when they could be referenced or streamed
+       - Missing caching for expensive repeated operations
+
+       TESTS & MAINTAINABILITY
+       - Critical paths and error paths covered by tests?
+       - Tests deterministic and independent?
+       - Naming clear and consistent with project conventions?
+       - Functions single-purpose and under ~40 lines?
+       - Duplicated logic that should be extracted?
+
+    3. WRITE THE REVIEW:
+
+       ## Code Review: <scope>
+
+       ### Summary
+       <2–3 sentences on overall quality>
+
+       ### Critical (must fix)
+       - **<file>:<line>** <issue> — Suggestion: <concrete fix>
+
+       ### Improvements (should fix)
+       - **<file>:<line>** <issue> — Suggestion: <concrete fix>
+
+       ### Notes (consider)
+       - **<file>:<line>** <minor observation>
+
+       ### Positives
+       - <what is done well — be specific>
+
+    4. OFFER NEXT STEPS — Ask: "Should I apply any of these fixes? Describe which ones or type a specific fix."
+    """
+}
+
+func buildTodoWorkflowPrompt(arg: String, workspaceRoot: String) -> String {
+    let todosPath = "\(workspaceRoot)/.planning/todos.md"
+    if arg.hasPrefix("add ") {
+        let text = String(arg.dropFirst(4)).trimmingCharacters(in: .whitespacesAndNewlines)
+        return """
+        You are running /todo add. Add a new task to the todo list and optionally open a git worktree branch for it.
+
+        Task to add: \(text)
+        Todos file: \(todosPath)
+
+        Steps:
+        1. Read \(todosPath). If it does not exist, create .planning/ and the file with this header:
+           # Todo List
+           | # | Task | Priority | Status | Branch |
+           |---|------|----------|--------|--------|
+        2. Determine the next sequence number (count existing rows + 1).
+        3. Append a new row:
+           | <n> | \(text) | medium | pending | — |
+        4. Ask the user: "Open a git worktree branch for this task? (yes/no)"
+           - If yes: suggest a branch name derived from the task text (lowercase, hyphens, max 40 chars),
+             confirm with the user, then create the worktree branch:
+             git worktree add -b <branch-name> ../<worktree-dir> <base-branch>
+             Update the Branch column in todos.md with the branch name.
+           - If no: leave Branch as —.
+        5. Report: task added at row #<n>, branch (if created).
+        """
+    } else if arg == "list" || arg.isEmpty {
+        return """
+        You are running /todo list. Display the current task list.
+
+        Todos file: \(todosPath)
+
+        Steps:
+        1. Read \(todosPath). If it does not exist, print: "No todo list found. Run /todo add <task> to create one." and stop.
+        2. Print the table contents in a readable format, grouping by status (pending first, then in-progress, then done).
+        3. Show a summary line: "<n> tasks — <p> pending, <i> in-progress, <d> done."
+        4. If any pending tasks have an associated branch, note: "Use /gittree to switch to a task branch."
+        """
+    } else if arg.hasPrefix("done ") {
+        let numStr = String(arg.dropFirst(5)).trimmingCharacters(in: .whitespacesAndNewlines)
+        return """
+        You are running /todo done. Mark a task as complete.
+
+        Task number to mark done: \(numStr)
+        Todos file: \(todosPath)
+
+        Steps:
+        1. Read \(todosPath). If the file does not exist, print: "No todo list found." and stop.
+        2. Find the row with # = \(numStr). If not found, print: "Task #\(numStr) not found." and stop.
+        3. Update that row's Status column from its current value to "done".
+        4. If the row has an associated branch, ask: "Do you want to trigger the merge-approval flow for branch <branch>? (yes/no)"
+           - If yes: finalize the branch using the same merge-approval flow as /merge-approval.
+        5. Save the updated todos.md.
+        6. Report: task #\(numStr) marked done.
+        """
+    } else {
+        return """
+        You are running /todo. Unknown sub-command: "\(arg)"
+
+        Usage:
+          /todo              — list all tasks
+          /todo list         — list all tasks
+          /todo add <text>   — add a new task (offers to open a worktree branch)
+          /todo done <n>     — mark task #n as done (offers merge-approval if it has a branch)
+        """
+    }
+}
+
+// MARK: - Memory Restoration
     let store = KnowledgeStore.shared
     
     // Initialize store (safe to call multiple times)
