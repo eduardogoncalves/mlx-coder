@@ -519,6 +519,48 @@ struct ChatCommand: AsyncParsableCommand {
                 continue
             }
 
+            // GSD workflow skill commands: /gsd-<name> [args]
+            if trimmed.hasPrefix("/gsd-") {
+                let parts = trimmed.split(separator: " ", maxSplits: 1)
+                let commandName = String(parts[0].dropFirst(1)) // e.g. "gsd-quick"
+                let gsdArgs = parts.count > 1
+                    ? String(parts[1]).trimmingCharacters(in: .whitespacesAndNewlines)
+                    : ""
+
+                let skillBody: String?
+                do {
+                    skillBody = try await skillsRegistry.loadBody(name: commandName)
+                } catch {
+                    renderer.printError("Failed to load GSD skill '\(commandName)': \(error.localizedDescription)")
+                    continue
+                }
+
+                guard let body = skillBody else {
+                    renderer.printError("GSD skill '\(commandName)' not found. Use /skills to list available skills.")
+                    continue
+                }
+
+                let gsdMessage = gsdArgs.isEmpty
+                    ? body
+                    : "\(body)\n\n**Task/Arguments:** \(gsdArgs)"
+
+                renderer.printStatus("[gsd] Activating '\(commandName)' workflow…")
+                renderer.printStatus("[Key mode] Generation active. Press Esc to cancel.")
+                let gsdTask = Task {
+                    try await agentLoop.processUserMessage(gsdMessage)
+                }
+                await CancelController.shared.setTask(gsdTask)
+                do {
+                    try await gsdTask.value
+                } catch is CancellationError {
+                    renderer.printError("GSD workflow cancelled.")
+                } catch {
+                    renderer.printError(error.localizedDescription)
+                }
+                await CancelController.shared.setTask(nil)
+                continue
+            }
+
             do {
                 let activeMode = await agentLoop.currentMode
                 if activeMode == .agentGeneralFast && isAppleFoundationModelAvailable() {
@@ -694,6 +736,16 @@ func printREPLHelp() {
       \u{001B}[32m/voice, Ctrl+V\u{001B}[0m  Voice input (STT) — fills transcription into input box for editing
       \u{001B}[32m/voice-locale [id]\u{001B}[0m Set STT language (no arg = list all available locales)
       \u{001B}[32m/memory <cmd>\u{001B}[0m  Memory commands: save, log, search, list, undo, status, snippet
+
+    \u{1B}[1mGSD Workflow Skills\u{001B}[0m (skill files auto-discovered in .github/skills/, .claude/skills/, etc.):
+      \u{001B}[32m/gsd-new-project [idea]\u{001B}[0m Initialize project with PROJECT.md, REQUIREMENTS.md, ROADMAP.md
+      \u{001B}[32m/gsd-plan [task]\u{001B}[0m    Research and create an XML execution plan with verification
+      \u{001B}[32m/gsd-quick [task]\u{001B}[0m   Execute an ad-hoc task with atomic commits and state tracking
+      \u{001B}[32m/gsd-debug [issue]\u{001B}[0m  Systematic debugging using the scientific method
+      \u{001B}[32m/gsd-review\u{001B}[0m         Comprehensive code review (correctness, security, performance)
+      \u{001B}[32m/gsd-next\u{001B}[0m           Auto-detect project state and run the next logical step
+      \u{001B}[32m/gsd-<name> [args]\u{001B}[0m  Activate any custom skill by name with optional arguments
+
       \u{001B}[32mEsc\u{001B}[0m            Cancel current generation
       \u{001B}[32mShift+Tab\u{001B}[0m      Cycle modes (default starts at Plan low):
                      Plan (low) → Plan (high) → General (fast) →
