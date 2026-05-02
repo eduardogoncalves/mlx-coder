@@ -47,6 +47,7 @@ public func runSwiftCoderTUISession(
     let inputHistory = InputHistory()
     var activeStreamTask: Task<Void, Never>? = nil
     var lastShellCommand: String = ""
+    var modelPicker: ModelPickerState? = nil
     var shouldQuit = false
 
     mainLoop: for await key in InputHandler.keystrokes() {
@@ -73,6 +74,34 @@ public func runSwiftCoderTUISession(
             continue
         }
 
+        // Model picker intercept — when /model opened an interactive selector.
+        if var picker = modelPicker {
+            switch key {
+            case .arrowUp:
+                if picker.models.count > 1 {
+                    picker.selectedIndex = (picker.selectedIndex - 1 + picker.models.count) % picker.models.count
+                    modelPicker = picker
+                    await renderModelPicker(state: picker, renderer: renderer)
+                }
+            case .arrowDown:
+                if picker.models.count > 1 {
+                    picker.selectedIndex = (picker.selectedIndex + 1) % picker.models.count
+                    modelPicker = picker
+                    await renderModelPicker(state: picker, renderer: renderer)
+                }
+            case .enter:
+                modelPicker = nil
+                let modelID = picker.models[picker.selectedIndex]
+                await switchToModel(modelID: modelID, agentLoop: agentLoop, renderer: renderer)
+            case .escape:
+                modelPicker = nil
+                await renderer.printScrollLine("\(DesignSystem.dim)  Model selection cancelled.\(DesignSystem.reset)")
+            default:
+                break
+            }
+            continue
+        }
+
         switch key {
         case .character(let ch):
             await renderer.appendChar(ch)
@@ -91,18 +120,25 @@ public func runSwiftCoderTUISession(
             await renderer.renderFooter()
 
         case .arrowUp:
-            if let prev = inputHistory.previous() {
+            if await renderer.isAutocompleteActive() {
+                await renderer.moveAutocompleteSelection(offset: -1)
+                await renderer.renderFooter()
+            } else if let prev = inputHistory.previous() {
                 await renderer.setInputBuffer(prev)
                 await renderer.renderFooter()
             }
 
         case .arrowDown:
-            if let next = inputHistory.next() {
+            if await renderer.isAutocompleteActive() {
+                await renderer.moveAutocompleteSelection(offset: 1)
+                await renderer.renderFooter()
+            } else if let next = inputHistory.next() {
                 await renderer.setInputBuffer(next)
+                await renderer.renderFooter()
             } else {
                 await renderer.setInputBuffer("")
+                await renderer.renderFooter()
             }
-            await renderer.renderFooter()
 
         case .ctrlC:
             activeStreamTask?.cancel()
@@ -162,7 +198,7 @@ public func runSwiftCoderTUISession(
             if trimmed.hasPrefix("/model") {
                 let arg = String(trimmed.dropFirst("/model".count))
                     .trimmingCharacters(in: .whitespacesAndNewlines)
-                await handleModelCommand(arg: arg, agentLoop: agentLoop, renderer: renderer)
+                modelPicker = await handleModelCommand(arg: arg, agentLoop: agentLoop, renderer: renderer)
                 continue
             }
 
@@ -289,7 +325,7 @@ private func helpLines() -> [String] {
     [
         "  /clear   clear the conversation",
         "  /help    this message",
-        "  /model   list local models; /model <n> or /model user/name to switch",
+        "  /model   open interactive local model picker; /model <n> or /model user/name to switch",
         "  /quit    exit the TUI",
         "  ! <cmd>  run a shell command (e.g. ! ls -la)",
         "  !!       repeat the last shell command",
@@ -298,7 +334,7 @@ private func helpLines() -> [String] {
 }
 
 @MainActor
-private func handleModelCommand(arg: String, agentLoop: AgentLoop, renderer: Renderer) async {
+private func handleModelCommand(arg: String, agentLoop: AgentLoop, renderer: Renderer) async -> ModelPickerState? {
     let localModels = listHomeModelsAsRepoIDs()
 
     if arg.isEmpty {
@@ -307,31 +343,19 @@ private func handleModelCommand(arg: String, agentLoop: AgentLoop, renderer: Ren
             await renderer.printScrollLine("  No local models found under ~/models.")
             await renderer.printScrollLine("  Download a model via HuggingFace Hub or mlx_lm.convert.")
         } else {
-            await renderer.printScrollLine("  Local models (~/models):")
-            for (i, model) in localModels.enumerated() {
-                let fullPath = "~/models/\(model)"
-                let marker = fullPath == currentPath ? "  ← active" : ""
-                await renderer.printScrollLine("  \(i + 1). \(model)\(marker)")
-            }
-            await renderer.printScrollLine("  Use /model <number> or /model user/name to switch.")
+            let selectedIndex = localModels.firstIndex(where: { "~/models/\($0)" == currentPath }) ?? 0
+            let state = ModelPickerState(models: localModels, selectedIndex: selectedIndex, activePath: currentPath)
+            await renderModelPicker(state: state, renderer: renderer)
+            return state
         }
-        return
+        return nil
     }
 
     // Try numeric index into the local list.
     if let index = Int(arg), (1...localModels.count).contains(index) {
         let modelID = localModels[index - 1]
-        let modelPath = "~/models/\(modelID)"
-        await renderer.printScrollLine("  Switching to \(modelID)…")
-        do {
-            try await agentLoop.switchModel(to: modelPath)
-            await renderer.printScrollLine("  Active model: \(modelID)")
-        } catch {
-            await renderer.printScrollLine(
-                "\(DesignSystem.brightRed)  Error: \(error.localizedDescription)\(DesignSystem.reset)"
-            )
-        }
-        return
+        await switchToModel(modelID: modelID, agentLoop: agentLoop, renderer: renderer)
+        return nil
     }
 
     // Try user/model identifier.
@@ -339,7 +363,7 @@ private func handleModelCommand(arg: String, agentLoop: AgentLoop, renderer: Ren
         await renderer.printScrollLine(
             "  Invalid model identifier '\(arg)'. Use a number or 'user/model' format."
         )
-        return
+        return nil
     }
 
     let modelPath = "~/models/\(modelID)"
@@ -347,9 +371,37 @@ private func handleModelCommand(arg: String, agentLoop: AgentLoop, renderer: Ren
         await renderer.printScrollLine(
             "  Model not found at \(modelPath). Use /model to list installed models."
         )
-        return
+        return nil
     }
 
+    await switchToModel(modelID: modelID, agentLoop: agentLoop, renderer: renderer)
+    return nil
+}
+
+private struct ModelPickerState {
+    let models: [String]
+    var selectedIndex: Int
+    let activePath: String
+}
+
+@MainActor
+private func renderModelPicker(state: ModelPickerState, renderer: Renderer) async {
+    await renderer.printScrollLine("  Local models (~/models) — interactive picker")
+    await renderer.printScrollLine(
+        "  ▲/▼ move · Enter select · Esc cancel   [\(state.selectedIndex + 1)/\(state.models.count)]"
+    )
+    for (i, model) in state.models.enumerated() {
+        let fullPath = "~/models/\(model)"
+        let selectionMarker = i == state.selectedIndex ? "›" : " "
+        let activeMarker = fullPath == state.activePath ? "  ← active" : ""
+        await renderer.printScrollLine("  \(selectionMarker) \(i + 1). \(model)\(activeMarker)")
+    }
+    await renderer.printScrollLine("  Tip: /model <number> and /model user/name still work.")
+}
+
+@MainActor
+private func switchToModel(modelID: String, agentLoop: AgentLoop, renderer: Renderer) async {
+    let modelPath = "~/models/\(modelID)"
     await renderer.printScrollLine("  Switching to \(modelID)…")
     do {
         try await agentLoop.switchModel(to: modelPath)
