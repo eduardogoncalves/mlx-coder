@@ -20,14 +20,18 @@ public enum SwiftCoderTUIAppConfigBuilder {
 
     /// Build an AppConfig for mlx-coder. `version` should be the value
     /// from `MLXCoderCLI.configuration.version`.
-    public static func build(version: String, defaultModelLabel: String) -> AppConfig {
+    public static func build(
+        version: String,
+        models: [AppConfig.ModelConfig],
+        defaultModelIndex: Int
+    ) -> AppConfig {
         AppConfig(
             appName: "mlx-coder",
             version: version,
             welcomeMessage: "type a prompt and press Enter · type ? for keyboard shortcuts",
-            models: [
-                AppConfig.ModelConfig(id: defaultModelLabel, label: defaultModelLabel)
-            ],
+            models: models.isEmpty
+                ? [AppConfig.ModelConfig(id: "unknown", label: "unknown")]
+                : models,
             modes: [
                 AppConfig.ModeConfig(id: "fast", label: "fast",
                                      barColor: "\u{001B}[34m", badgeColor: "\u{001B}[34m"),
@@ -40,19 +44,30 @@ public enum SwiftCoderTUIAppConfigBuilder {
             ],
             commands: [
                 AppConfig.CommandConfig(name: "/clear",   description: "Clear the conversation"),
+                AppConfig.CommandConfig(name: "/context", description: "Show context-window usage"),
+                AppConfig.CommandConfig(name: "/skills",  description: "List available skills"),
+                AppConfig.CommandConfig(name: "/hooks",   description: "Manage hooks"),
+                AppConfig.CommandConfig(name: "/transforms", description: "Manage prompt transforms"),
+                AppConfig.CommandConfig(name: "/save-history", description: "Save chat history"),
+                AppConfig.CommandConfig(name: "/save-history-json", description: "Save chat history as JSON"),
+                AppConfig.CommandConfig(name: "/load-history-json", description: "Load chat history from JSON"),
+                AppConfig.CommandConfig(name: "/undo",    description: "Undo the last turn"),
+                AppConfig.CommandConfig(name: "/revert",  description: "Revert to a previous turn"),
+                AppConfig.CommandConfig(name: "/plan",    description: "Toggle planning mode"),
+                AppConfig.CommandConfig(name: "/autopilot", description: "Toggle autopilot mode"),
+                AppConfig.CommandConfig(name: "/agent",   description: "Run in agent mode"),
+                AppConfig.CommandConfig(name: "/steer",   description: "Set steering instructions"),
+                AppConfig.CommandConfig(name: "/followup", description: "Set follow-up prompts"),
+                AppConfig.CommandConfig(name: "/merge-approval", description: "Configure merge approvals"),
+                AppConfig.CommandConfig(name: "/gittree", description: "Inspect git tree/worktree"),
+                AppConfig.CommandConfig(name: "/memory",  description: "Memory subsystem (save/list/search/...)"),
                 AppConfig.CommandConfig(name: "/help",    description: "Show help and shortcuts"),
                 AppConfig.CommandConfig(name: "/model",   description: "Switch the active model"),
-                AppConfig.CommandConfig(name: "/mode",    description: "Cycle thinking mode"),
-                AppConfig.CommandConfig(name: "/memory",  description: "Memory subsystem (save/list/search/...)"),
                 AppConfig.CommandConfig(name: "/retry",   description: "Re-run the last prompt"),
                 AppConfig.CommandConfig(name: "/status",  description: "Show session status"),
-                AppConfig.CommandConfig(name: "/context", description: "Show context-window usage"),
-                AppConfig.CommandConfig(name: "/undo",    description: "Undo the last turn"),
                 AppConfig.CommandConfig(name: "/quit",    description: "Quit the application"),
-                AppConfig.CommandConfig(name: "!",        description: "Run a shell command (e.g. ! ls -la)"),
-                AppConfig.CommandConfig(name: "!!",       description: "Repeat the last shell command"),
             ],
-            defaultModelIndex: 0,
+            defaultModelIndex: defaultModelIndex,
             defaultModeIndex: 1,
             topBarDebugEnabled: tbDebugEnabledFromEnvironment()
         )

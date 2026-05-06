@@ -105,46 +105,25 @@ extension AgentLoop {
         )))
     }
 
-    /// Cycles to the next available mode (triggered by Shift+Tab).
+    /// Cycles Shift+Tab across high-level states only:
+    /// coding (empty) -> plan -> autopilot -> coding.
     public func cycleMode() async -> String {
-        let allModes = ModelMode.allCases
-        let currentIndex = allModes.firstIndex(of: currentMode) ?? 0
-        let nextIndex = (currentIndex + 1) % allModes.count
-        let nextMode = allModes[nextIndex]
-        
-        self.currentMode = nextMode
-        
-        // Map ModelMode to underlying settings
-        switch nextMode {
-        case .planLow:
+        // Keep thinking level unchanged; only rotate high-level mode semantics.
+        switch (self.mode, self.taskType) {
+        case (.agent, .coding):
+            // coding -> plan
             self.mode = .plan
-            self.thinkingLevel = .low
-            self.taskType = .general
-        case .planHigh:
-            self.mode = .plan
-            self.thinkingLevel = .high
-            self.taskType = .general
-        case .agentGeneralFast:
-            self.mode = .agent
-            self.thinkingLevel = .fast
-            self.taskType = .general
-        case .agentGeneralLow:
-            self.mode = .agent
-            self.thinkingLevel = .low
-            self.taskType = .general
-        case .agentCodingFast:
-            self.mode = .agent
-            self.thinkingLevel = .fast
             self.taskType = .coding
-        case .agentCodingLow:
+        case (.plan, _):
+            // plan -> autopilot (agent + allow-all-tools semantics in frontends)
             self.mode = .agent
-            self.thinkingLevel = .low
-            self.taskType = .coding
-        case .agentCodingHigh:
+            self.taskType = .general
+        case (.agent, _):
+            // autopilot/non-coding agent -> coding
             self.mode = .agent
-            self.thinkingLevel = .high
             self.taskType = .coding
         }
+        syncCurrentModeFromSettings()
         
         updateGenerationConfig()
         
@@ -171,8 +150,14 @@ extension AgentLoop {
         if needsReload {
             self.pendingReload = true
         }
+
+        frontend.emit(.modeChanged(ModeSnapshot(
+            workingMode: mode.rawValue,
+            thinkingLevel: thinkingLevel.rawValue,
+            taskType: taskType.rawValue
+        )))
         
-        return nextMode.rawValue
+        return currentMode.rawValue
     }
 
     // MARK: - Internal Config Helpers

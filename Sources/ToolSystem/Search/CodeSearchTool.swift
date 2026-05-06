@@ -29,7 +29,7 @@ public struct CodeSearchTool: Tool {
         }
 
         let searchPath = arguments["path"] as? String ?? "."
-        let language = arguments["language"] as? String ?? "swift"
+        let language = arguments["language"] as? String
 
         let resolvedPath: String
         do {
@@ -46,10 +46,9 @@ public struct CodeSearchTool: Tool {
             let process = Process()
             process.executableURL = URL(filePath: "/usr/bin/grep")
 
-            let ext = languageExtension(language)
             process.arguments = [
                 "-rnI", "-E",
-                "--include", "*.\(ext)",
+            ] + includeArguments(for: language) + [
                 "--exclude-dir=.git", "--exclude-dir=.build",
                 "-A", "2",  // 2 lines of context after match
                 pattern,
@@ -78,6 +77,8 @@ public struct CodeSearchTool: Tool {
             allResults.append(contentsOf: lines)
         }
 
+        allResults.append(contentsOf: pathMatches(for: query, in: resolvedPath, language: language))
+
         if allResults.isEmpty {
             return .success("No code symbols matching '\(query)' found")
         }
@@ -94,7 +95,11 @@ public struct CodeSearchTool: Tool {
 
     // MARK: - Private
 
-    private func symbolPatterns(for query: String, language: String) -> [String] {
+    private func symbolPatterns(for query: String, language: String?) -> [String] {
+        guard let language else {
+            return [query]
+        }
+
         switch language.lowercased() {
         case "swift":
             return [
@@ -115,14 +120,57 @@ public struct CodeSearchTool: Tool {
         }
     }
 
-    private func languageExtension(_ language: String) -> String {
+    private func languageExtension(_ language: String) -> String? {
         switch language.lowercased() {
         case "swift": return "swift"
         case "python": return "py"
         case "javascript": return "js"
         case "typescript": return "ts"
-        default: return "*"
+        case "c#", "csharp", "cs": return "cs"
+        default: return nil
         }
+    }
+
+    private func includeArguments(for language: String?) -> [String] {
+        guard let language, let ext = languageExtension(language) else {
+            return []
+        }
+        return ["--include", "*.\(ext)"]
+    }
+
+    private func pathMatches(for query: String, in resolvedPath: String, language: String?) -> [String] {
+        let process = Process()
+        process.executableURL = URL(filePath: "/usr/bin/find")
+
+        var arguments = [resolvedPath, "-type", "f"]
+        if let language, let ext = languageExtension(language) {
+            arguments.append(contentsOf: ["-name", "*.\(ext)"])
+        }
+        arguments.append(contentsOf: ["-iname", "*\(query)*"])
+        process.arguments = arguments
+
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = Pipe()
+
+        do {
+            try process.run()
+            process.waitUntilExit()
+        } catch {
+            return []
+        }
+
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        let output = String(data: data, encoding: .utf8) ?? ""
+
+        return output
+            .components(separatedBy: "\n")
+            .filter { !$0.isEmpty }
+            .map { relativizePath($0) + ":1:[path match]" }
+            .filter { line in
+                let pathPart = String(line.split(separator: ":", maxSplits: 1).first ?? "")
+                return !permissions.isPathIgnored(pathPart)
+            }
     }
 
     private func relativizeGrepLine(_ line: String) -> String {

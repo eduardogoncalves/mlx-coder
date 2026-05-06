@@ -4,6 +4,10 @@
 import Foundation
 
 extension AgentLoop {
+    private enum GitTreeShortcutAction {
+        case switchWorktree
+        case deleteBranch
+    }
 
     public func runMergeApprovalShortcutFlow() async {
         do {
@@ -15,6 +19,18 @@ extension AgentLoop {
     }
 
     public func runGitTreeShortcutFlow() async {
+        await runGitTreeShortcutFlow(preselectedAction: nil)
+    }
+
+    public func runGitTreeSwitchShortcutFlow() async {
+        await runGitTreeShortcutFlow(preselectedAction: .switchWorktree)
+    }
+
+    public func runGitTreeBranchDeleteShortcutFlow() async {
+        await runGitTreeShortcutFlow(preselectedAction: .deleteBranch)
+    }
+
+    private func runGitTreeShortcutFlow(preselectedAction: GitTreeShortcutAction?) async {
         do {
             let manager = try await ensureGitOrchestrationManager()
             let worktrees = try await manager.listAvailableWorktrees()
@@ -39,16 +55,26 @@ extension AgentLoop {
                 return
             }
 
-            let actionOptions = ["Switch workspace to a worktree", "Delete local branch"]
-            if let action = await interactiveInput.selectOption(
-                prompt: "Git tree actions",
-                options: actionOptions
-            ) {
-                if action == 1 {
-                    try await runBranchDeleteFlow(manager: manager, interactiveInput: interactiveInput)
-                    return
+            let action: GitTreeShortcutAction?
+            if let preselectedAction {
+                action = preselectedAction
+            } else {
+                let actionOptions = ["Switch workspace to a worktree", "Delete local branch"]
+                let selectedAction = await interactiveInput.selectOption(
+                    prompt: "Git tree actions",
+                    options: actionOptions
+                )
+                switch selectedAction {
+                case .some(0): action = .switchWorktree
+                case .some(1): action = .deleteBranch
+                default: action = nil
                 }
+            }
 
+            switch action {
+            case .deleteBranch:
+                try await runBranchDeleteFlow(manager: manager, interactiveInput: interactiveInput)
+            case .switchWorktree:
                 if let selected = await interactiveInput.selectOption(
                     prompt: "Select git worktree",
                     options: options
@@ -59,6 +85,8 @@ extension AgentLoop {
                     await switchSessionWorkspace(to: normalizedPath, changeDirectory: true)
                     frontend.emit(.gitOrchestration(.worktreeSwitched(path: normalizedPath, branch: connected.branch)))
                 }
+            case .none:
+                return
             }
         } catch {
             frontend.emit(.gitOrchestration(.warning("Could not open git worktree selector: \(error.localizedDescription)")))

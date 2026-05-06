@@ -249,14 +249,29 @@ struct ChatCommand: AsyncParsableCommand {
         // dispatch below; the TUI session handles its own (minimal) command
         // set today.
         if args.ui.lowercased() == "tui" {
+            let localModelIDs = listHomeModelsAsRepoIDs()
+            var modelConfigs = localModelIDs.map { AppConfig.ModelConfig(id: $0, label: $0) }
+            if !modelConfigs.contains(where: { $0.id.caseInsensitiveCompare(selectedModel) == .orderedSame }) {
+                modelConfigs.insert(AppConfig.ModelConfig(id: selectedModel, label: selectedModel), at: 0)
+            }
+            let defaultModelIndex = modelConfigs.firstIndex {
+                $0.id.caseInsensitiveCompare(selectedModel) == .orderedSame
+            } ?? 0
             let tuiAppConfig = SwiftCoderTUIAppConfigBuilder.build(
                 version: MLXCoderCLI.configuration.version ?? "dev",
-                defaultModelLabel: selectedModel
+                models: modelConfigs,
+                defaultModelIndex: defaultModelIndex
             )
             let tuiRenderer = Renderer(config: tuiAppConfig, terminal: ProcessTerminal())
             let tuiFrontend = SwiftCoderTUIFrontend(renderer: tuiRenderer, appConfig: tuiAppConfig)
             await agentLoop.swapFrontend(tuiFrontend)
-            await runSwiftCoderTUISession(agentLoop: agentLoop, frontend: tuiFrontend)
+            await runSwiftCoderTUISession(
+                agentLoop: agentLoop,
+                frontend: tuiFrontend,
+                skillMetadata: skillMetadata,
+                hooks: hooks,
+                initialSandboxEnabled: effectiveSandbox
+            )
             await DotnetLSPService.shared.shutdown()
             print("\nGoodbye!")
             return
@@ -448,7 +463,26 @@ struct ChatCommand: AsyncParsableCommand {
                 continue
             }
             if trimmed == "/plan" {
-                await agentLoop.setMode(.plan)
+                let isInPlan = await agentLoop.mode == .plan
+                if isInPlan {
+                    await agentLoop.setMode(.agent)
+                    await agentLoop.setTaskType(.coding)
+                } else {
+                    await agentLoop.setMode(.plan)
+                }
+                continue
+            }
+            if trimmed == "/autopilot" {
+                let currentMode = await agentLoop.mode
+                let currentTaskType = await agentLoop.taskType
+                let isAutopilot = currentMode != .plan && currentTaskType == .general
+                if isAutopilot {
+                    await agentLoop.setMode(.agent)
+                    await agentLoop.setTaskType(.coding)
+                } else {
+                    await agentLoop.setMode(.agent)
+                    await agentLoop.setTaskType(.general)
+                }
                 continue
             }
             if trimmed == "/agent" {
@@ -598,9 +632,8 @@ struct ChatCommand: AsyncParsableCommand {
                 try await task.value
                 await CancelController.shared.setTask(nil)
 
-                // Auto-process any queued follow-ups after the run completes.
-                let pendingFollowUps = await agentLoop.drainFollowUpQueue()
-                for followUp in pendingFollowUps {
+                // Auto-process queued follow-ups in FIFO order.
+                while let followUp = await agentLoop.dequeueFollowUp() {
                     renderer.printStatus("🔄 Auto follow-up: \"\(followUp)\"")
                     await hooks.emit(.followUpStarted(message: followUp))
                     let followUpTask = Task {
@@ -729,7 +762,8 @@ func printREPLHelp() {
       \u{001B}[32m/save-history-json [path]\u{001B}[0m Export resumable JSON transcript (default: session-history.json)
       \u{001B}[32m/load-history-json [path]\u{001B}[0m Load JSON transcript into current session
       \u{001B}[32m/undo, /revert\u{001B}[0m Undo the last conversation turn
-      \u{001B}[32m/plan\u{001B}[0m          Switch to PLAN MODE (read-only, safe browsing)
+      \u{001B}[32m/plan\u{001B}[0m          Toggle PLAN MODE on/off (off => coding mode)
+      \u{001B}[32m/autopilot\u{001B}[0m     Toggle AUTOPILOT on/off (off => coding mode)
       \u{001B}[32m/agent\u{001B}[0m         Switch to AGENT MODE (full filesystem/shell access)
       \u{001B}[32m/task [type]\u{001B}[0m   Set task type: general, coding, reasoning
       \u{001B}[32m/thinking [lvl]\u{001B}[0m Set thinking budget: fast/off, minimal, low, medium, high (default: low)
@@ -1055,4 +1089,3 @@ func handleMemorySnippet(window: String?, workspaceRoot: String, store: Knowledg
         frontend.emit(.memoryEvent(.error("Snippet generation failed: \(error)")))
     }
 }
-

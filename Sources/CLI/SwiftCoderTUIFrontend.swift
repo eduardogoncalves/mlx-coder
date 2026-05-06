@@ -46,6 +46,7 @@ public final class SwiftCoderTUIFrontend: AgentFrontend, @unchecked Sendable {
     private var generationActive: Bool = false
     private var thinkingActive: Bool = false
     private var pendingGenerationEnd: Bool = false
+    private var markdownTableNormalizer = StreamingMarkdownTableNormalizer()
 
     public init(renderer: Renderer, appConfig: AppConfig) {
         self.renderer = renderer
@@ -159,7 +160,10 @@ public final class SwiftCoderTUIFrontend: AgentFrontend, @unchecked Sendable {
             // Use appendStreamChunk (raw concat, no auto-space) because
             // LLM tokens already carry their own whitespace (e.g. " How").
             // appendStreamWord would add an extra space before each token.
-            await renderer.appendStreamChunk(text)
+            let normalized = markdownTableNormalizer.consume(text)
+            if !normalized.isEmpty {
+                await renderer.appendStreamChunk(normalized)
+            }
 
         case .thinkingActivity(let lifecycle):
             switch lifecycle {
@@ -252,6 +256,12 @@ public final class SwiftCoderTUIFrontend: AgentFrontend, @unchecked Sendable {
             await renderer.printScrollLine(entry.render())
 
         case .modeChanged(let mode):
+            if let modeIndex = modeIndex(forThinkingLevel: mode.thinkingLevel) {
+                await renderer.setCurrentModeIndex(modeIndex)
+            }
+            let statusModeLabel = statusModeLabel(for: mode)
+            await renderer.setAutopilot(statusModeLabel == "autopilot")
+            await renderer.setStatusModeLabel(statusModeLabel)
             await renderer.printScrollLine("\(DesignSystem.dim)mode: \(mode.workingMode)/\(mode.thinkingLevel)/\(mode.taskType)\(DesignSystem.reset)")
 
         case .modelLifecycle(let m):
@@ -282,6 +292,7 @@ public final class SwiftCoderTUIFrontend: AgentFrontend, @unchecked Sendable {
                 pendingGenerationEnd = false
                 thinkingBuffer = ""
                 isFirstContentToken = true
+                markdownTableNormalizer.reset()
                 await renderer.setThinking("Processing…")
                 await renderer.setGenerating(true)
                 await renderer.renderFooter()
@@ -300,6 +311,7 @@ public final class SwiftCoderTUIFrontend: AgentFrontend, @unchecked Sendable {
                 generationActive = true
                 tokenProcessingActive = false
                 isFirstContentToken = true
+                markdownTableNormalizer.reset()
                 await renderer.setThinking("Generating…")
                 await renderer.renderFooter()
             case .ended:
@@ -338,6 +350,7 @@ public final class SwiftCoderTUIFrontend: AgentFrontend, @unchecked Sendable {
         stopSpinnerTicker()
         thinkingBuffer = ""
         isFirstContentToken = true
+        markdownTableNormalizer.reset()
         // Single atomic renderer call: sets isStreamingAborted inside the actor
         // so any queued appendStreamChunk/appendThinkChunk calls become no-ops,
         // then clears all state, prints "· Aborted", and redraws.
@@ -361,6 +374,10 @@ public final class SwiftCoderTUIFrontend: AgentFrontend, @unchecked Sendable {
         thinkingActive = false
         pendingGenerationEnd = false
         stopSpinnerTicker()
+        let trailing = markdownTableNormalizer.finish()
+        if !trailing.isEmpty {
+            await renderer.appendStreamChunk(trailing)
+        }
         // Commit any partial response line from the footer stream zone
         // to the scroll area before hiding the spinner / input box.
         await renderer.flushStreamLine()
@@ -456,5 +473,21 @@ public final class SwiftCoderTUIFrontend: AgentFrontend, @unchecked Sendable {
         case .proposal(let t, let v): return "\(t): \(v)"
         case .skipped(let r): return "skipped (\(r))"
         }
+    }
+
+    private func modeIndex(forThinkingLevel level: String) -> Int? {
+        if let exact = appConfig.modes.firstIndex(where: { $0.id == level || $0.label == level }) {
+            return exact
+        }
+        if level == "minimal" {
+            return appConfig.modes.firstIndex(where: { $0.id == "low" || $0.label == "low" })
+        }
+        return nil
+    }
+
+    private func statusModeLabel(for mode: ModeSnapshot) -> String {
+        if mode.workingMode == "plan" { return "plan" }
+        if mode.taskType == "general" { return "autopilot" }
+        return ""
     }
 }

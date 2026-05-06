@@ -232,4 +232,33 @@ final class AgentLoopTokenLookupTests: XCTestCase {
         let sanitized = AgentLoop.sanitizeAuditField("line1\\nline2\nrow\rcol\tend")
         XCTAssertEqual(sanitized, #"line1\\\\nline2\nrow\rcol\tend"#)
     }
+
+    func testFollowUpQueueHelpersPreserveFIFOOrderForListingAndExecution() {
+        var queue: [String] = []
+        AgentLoop.enqueueFollowUp("first", onto: &queue)
+        AgentLoop.enqueueFollowUp("second", onto: &queue)
+        AgentLoop.enqueueFollowUp("third", onto: &queue)
+
+        XCTAssertEqual(queue, ["first", "second", "third"])
+        XCTAssertEqual(AgentLoop.dequeueFollowUp(from: &queue), "first")
+        XCTAssertEqual(AgentLoop.dequeueFollowUp(from: &queue), "second")
+        XCTAssertEqual(AgentLoop.dequeueFollowUp(from: &queue), "third")
+        XCTAssertNil(AgentLoop.dequeueFollowUp(from: &queue))
+    }
+
+    func testFollowUpQueueHelpersAppendNewItemsAtEndDuringDraining() {
+        var queue: [String] = []
+        AgentLoop.enqueueFollowUp("a", onto: &queue)
+        AgentLoop.enqueueFollowUp("b", onto: &queue)
+
+        var processed: [String] = []
+        while let message = AgentLoop.dequeueFollowUp(from: &queue) {
+            processed.append(message)
+            if message == "a" {
+                AgentLoop.enqueueFollowUp("c", onto: &queue)
+            }
+        }
+
+        XCTAssertEqual(processed, ["a", "b", "c"])
+    }
 }

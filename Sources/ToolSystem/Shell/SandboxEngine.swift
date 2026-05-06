@@ -34,14 +34,16 @@ public struct SandboxEngine: Sendable {
         let escapedProfile = profile.replacingOccurrences(of: "'", with: "'\\''")
         let escapedCommand = command.replacingOccurrences(of: "'", with: "'\\''")
         
-        // Return the wrapped command
-        // sandbox-exec -p '<profile>' '<command>'
-        // Both profile and command must be quoted to prevent shell injection.
-        return "sandbox-exec -p '\(escapedProfile)' '\(escapedCommand)'"
+        // Return the wrapped command. Use an explicit shell entrypoint so commands with
+        // arguments/operators are executed correctly under sandbox-exec.
+        return "sandbox-exec -p '\(escapedProfile)' /bin/zsh -c '\(escapedCommand)'"
     }
     
     /// Generates a Seatbelt profile string.
     private func generateProfile(workspaceRoot: String) -> String {
+        let canonicalWorkspaceRoot = canonicalWorkspacePath(workspaceRoot)
+        let escapedWorkspaceRoot = escapeForProfileString(canonicalWorkspaceRoot)
+
         let networkRule: String
         switch networkPolicy {
         case .allow:
@@ -64,7 +66,7 @@ public struct SandboxEngine: Sendable {
         (allow file-write* (subpath "/private/var/folders"))
         
         ;; Allow writes within the workspace
-        (allow file-write* (subpath "\(workspaceRoot)"))
+        (allow file-write* (subpath "\(escapedWorkspaceRoot)"))
         
         ;; Ensure we can read everything otherwise (allow default covers this but let's be explicit for write-related reads if any)
         (allow file-read*)
@@ -73,5 +75,18 @@ public struct SandboxEngine: Sendable {
         (allow process*)
         \(networkRule)
         """
+    }
+
+    private func canonicalWorkspacePath(_ workspaceRoot: String) -> String {
+        URL(filePath: workspaceRoot)
+            .standardized
+            .resolvingSymlinksInPath()
+            .path()
+    }
+
+    private func escapeForProfileString(_ value: String) -> String {
+        value
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
     }
 }

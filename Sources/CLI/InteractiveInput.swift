@@ -298,13 +298,10 @@ public final class InteractiveInput: @unchecked Sendable {
                             redraw()
                         }
                     }
-                } else if seq.count >= 2 && (seq[0] == 91 || seq[0] == 79) {
-                    let type = seq.last!
-                    if type == 90 { // Shift+Tab (Z)
-                        if let toggle = onModeToggle {
-                            mode = await toggle()
-                            redraw()
-                        }
+                } else if TerminalKeyParser.isShiftTab(seq) {
+                    if let toggle = onModeToggle {
+                        mode = await toggle()
+                        redraw()
                     }
                 }
             } else if byte == 22 { // Ctrl+V — voice input

@@ -26,6 +26,19 @@ final class TerminalKeyParserTests: XCTestCase {
         XCTAssertNil(TerminalKeyParser.arrowDirection(for: [98]))
     }
 
+    func testShiftTabDetectionForCSIAndSS3Sequences() {
+        XCTAssertTrue(TerminalKeyParser.isShiftTab([91, 90])) // ESC [ Z
+        XCTAssertTrue(TerminalKeyParser.isShiftTab([79, 90])) // ESC O Z
+        XCTAssertTrue(TerminalKeyParser.isShiftTab([91, 49, 59, 50, 90])) // ESC [ 1 ; 2 Z
+    }
+
+    func testShiftTabDetectionRejectsOtherEscapes() {
+        XCTAssertFalse(TerminalKeyParser.isShiftTab([]))
+        XCTAssertFalse(TerminalKeyParser.isShiftTab([98])) // Alt+b
+        XCTAssertFalse(TerminalKeyParser.isShiftTab([91, 65])) // Up arrow
+        XCTAssertFalse(TerminalKeyParser.isShiftTab([91, 9])) // Plain tab byte in CSI payload
+    }
+
     func testNumericSelectionFromByte() {
         XCTAssertEqual(TerminalKeyParser.numericSelection(for: 49, allowThirdOption: true), 0)
         XCTAssertEqual(TerminalKeyParser.numericSelection(for: 50, allowThirdOption: true), 1)

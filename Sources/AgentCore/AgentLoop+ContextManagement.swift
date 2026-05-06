@@ -28,13 +28,12 @@ extension AgentLoop {
     /// The CLI drains this queue and calls `processUserMessage` for each entry without
     /// requiring the user to type anything.
     public func queueFollowUp(_ message: String) {
-        followUpQueue.append(message)
+        Self.enqueueFollowUp(message, onto: &followUpQueue)
     }
 
     /// Dequeues and returns the next follow-up message, or `nil` if the queue is empty.
     public func dequeueFollowUp() -> String? {
-        guard !followUpQueue.isEmpty else { return nil }
-        return followUpQueue.removeFirst()
+        Self.dequeueFollowUp(from: &followUpQueue)
     }
 
     /// Dequeues all pending follow-ups at once and clears the queue in O(1).
@@ -53,6 +52,15 @@ extension AgentLoop {
     /// Clears all pending follow-up messages.
     public func clearFollowUpQueue() {
         followUpQueue.removeAll()
+    }
+
+    static func enqueueFollowUp(_ message: String, onto queue: inout [String]) {
+        queue.append(message)
+    }
+
+    static func dequeueFollowUp(from queue: inout [String]) -> String? {
+        guard !queue.isEmpty else { return nil }
+        return queue.removeFirst()
     }
 
     // MARK: - Context Transforms
