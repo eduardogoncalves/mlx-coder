@@ -87,7 +87,6 @@ extension AgentLoop {
 
         modelPath = trimmed
         pendingReload = true
-        frontend.emit(.modelLifecycle(.loading("Model switch queued; will reload on next message.")))
     }
 
     func requireLoadedModelContainer() throws -> ModelContainer {

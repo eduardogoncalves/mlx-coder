@@ -838,7 +838,9 @@ private func switchToModel(
     deferReload: Bool = false
 ) async {
     let modelPath = localModelExists(model.id) ? model.id : "~/models/\(model.id)"
-    await renderer.printScrollLine(deferReload ? "  Queuing \(model.label)…" : "  Switching to \(model.label)…")
+    if !deferReload {
+        await renderer.printScrollLine("  Switching to \(model.label)…")
+    }
     do {
         if deferReload {
             try await agentLoop.stageModelSwitch(to: modelPath)
@@ -846,9 +848,7 @@ private func switchToModel(
             try await agentLoop.switchModel(to: modelPath)
         }
         await renderer.setCurrentModelIndex(index)
-        if deferReload {
-            await renderer.printScrollLine("  Selected model: \(model.label) (reloads on next message)")
-        } else {
+        if !deferReload {
             await renderer.printScrollLine("  Active model: \(model.label)")
         }
         await renderer.renderFooter()

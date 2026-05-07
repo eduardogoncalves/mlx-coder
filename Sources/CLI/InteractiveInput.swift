@@ -436,7 +436,9 @@ public final class InteractiveInput: @unchecked Sendable {
             }
             isInitialDraw = false
 
-            print("\n\(bold)\(title)\(reset)")
+            // Start the picker on a fresh line so the prompt never appends to the
+            // TUI separator row (which can appear as "──Coding mode git setup").
+            print("\r\n\(bold)\(title)\(reset)")
             print("\(dim)\(footer)\(reset)")
             print("")
 
