@@ -63,6 +63,9 @@ public actor AgentLoop {
     var loadedMemoryLimit: Int?
     var loadedCacheLimit: Int?
     var loadedKVBits: Int?
+    var loadedKVGroupSize: Int?
+    var loadedQuantizedKVStart: Int?
+    var loadedTurboQuantBits: Int?
     var pendingReload: Bool = false
     var pendingImages: [URL] = []
 

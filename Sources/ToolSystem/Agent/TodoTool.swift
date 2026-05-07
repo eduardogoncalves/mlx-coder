@@ -11,7 +11,7 @@ public struct TodoTool: Tool {
         type: "object",
         properties: [
             "action": PropertySchema(type: "string", description: "Action to perform", enumValues: ["read", "add", "complete", "remove"]),
-            "item": PropertySchema(type: "string", description: "Todo item text (for 'add') or index (for 'complete'/'remove')"),
+            "item": PropertySchema(type: "string", description: "Todo item text (for 'add') or numeric index (for 'complete'/'remove')"),
         ],
         required: ["action"]
     )
@@ -36,13 +36,13 @@ public struct TodoTool: Tool {
             }
             return addTodo(item)
         case "complete":
-            guard let item = arguments["item"] as? String, let index = Int(item) else {
-                return .error("Missing or invalid argument: item (provide the todo number)")
+            guard let index = integerTodoIndex(from: arguments["item"]) else {
+                return .error("Missing or invalid argument: item (provide the todo number as a numeric value)")
             }
             return completeTodo(at: index)
         case "remove":
-            guard let item = arguments["item"] as? String, let index = Int(item) else {
-                return .error("Missing or invalid argument: item (provide the todo number)")
+            guard let index = integerTodoIndex(from: arguments["item"]) else {
+                return .error("Missing or invalid argument: item (provide the todo number as a numeric value)")
             }
             return removeTodo(at: index)
         default:
@@ -100,5 +100,16 @@ public struct TodoTool: Tool {
         let removed = todos.remove(at: i)
         saveTodos(todos)
         return .success("Removed: \(removed)")
+    }
+
+    private func integerTodoIndex(from rawValue: Any?) -> Int? {
+        switch rawValue {
+        case let value as Int:
+            return value
+        case let value as NSNumber:
+            return value.intValue
+        default:
+            return nil
+        }
     }
 }

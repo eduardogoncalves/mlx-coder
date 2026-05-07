@@ -256,13 +256,13 @@ public final class SwiftCoderTUIFrontend: AgentFrontend, @unchecked Sendable {
             await renderer.printScrollLine(entry.render())
 
         case .modeChanged(let mode):
-            if let modeIndex = modeIndex(forThinkingLevel: mode.thinkingLevel) {
+            if let modeIndex = modeIndex(for: mode) {
                 await renderer.setCurrentModeIndex(modeIndex)
             }
             let statusModeLabel = statusModeLabel(for: mode)
             await renderer.setAutopilot(statusModeLabel == "autopilot")
             await renderer.setStatusModeLabel(statusModeLabel)
-            await renderer.printScrollLine("\(DesignSystem.dim)mode: \(mode.workingMode)/\(mode.thinkingLevel)/\(mode.taskType)\(DesignSystem.reset)")
+            await renderer.renderFooter()
 
         case .modelLifecycle(let m):
             await renderer.printScrollLine("\(DesignSystem.dim)model: \(describe(m))\(DesignSystem.reset)")
@@ -475,19 +475,32 @@ public final class SwiftCoderTUIFrontend: AgentFrontend, @unchecked Sendable {
         }
     }
 
-    private func modeIndex(forThinkingLevel level: String) -> Int? {
-        if let exact = appConfig.modes.firstIndex(where: { $0.id == level || $0.label == level }) {
-            return exact
-        }
-        if level == "minimal" {
-            return appConfig.modes.firstIndex(where: { $0.id == "low" || $0.label == "low" })
-        }
-        return nil
-    }
-
     private func statusModeLabel(for mode: ModeSnapshot) -> String {
         if mode.workingMode == "plan" { return "plan" }
         if mode.taskType == "general" { return "autopilot" }
         return ""
+    }
+
+    private func modeDisplayLabel(for mode: ModeSnapshot) -> String {
+        if mode.workingMode == "plan" { return "plan" }
+        if mode.taskType == "general" { return "autopilot" }
+        return "coding"
+    }
+
+    private func modeIndex(for mode: ModeSnapshot) -> Int? {
+        let modePrefix: String
+        if mode.workingMode == "plan" {
+            modePrefix = "plan"
+        } else if mode.taskType == "general" {
+            modePrefix = "autopilot"
+        } else {
+            modePrefix = "coding"
+        }
+        let effort = mode.thinkingLevel == "fast" ? "off" : mode.thinkingLevel
+        let id = "\(modePrefix)-\(effort)"
+        if let exact = appConfig.modes.firstIndex(where: { $0.id == id }) {
+            return exact
+        }
+        return appConfig.modes.firstIndex(where: { $0.id == "\(modePrefix)-low" })
     }
 }

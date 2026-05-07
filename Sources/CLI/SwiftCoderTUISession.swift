@@ -25,28 +25,27 @@ import SwiftCoderTUI
 
 struct TUIShellCommandParseResult: Equatable {
     let command: String?
-    let isRepeat: Bool
+    let suppressHistory: Bool
 }
 
 enum TUIShellCommandParser {
-    static func parse(_ input: String, lastShellCommand: String) -> TUIShellCommandParseResult {
-        if isRepeatCommand(input) {
-            return .init(command: lastShellCommand.isEmpty ? nil : lastShellCommand, isRepeat: true)
+    static func parse(_ input: String) -> TUIShellCommandParseResult {
+        if input == "!!" {
+            return .init(command: "", suppressHistory: true)
         }
         if input.hasPrefix("!!"), input.count > 2 {
-            return .init(command: String(input.dropFirst(2)).trimmingCharacters(in: .whitespaces), isRepeat: false)
+            return .init(
+                command: String(input.dropFirst(2)).trimmingCharacters(in: .whitespaces),
+                suppressHistory: true
+            )
         }
         if input.hasPrefix("!"), input.count > 1 {
-            return .init(command: String(input.dropFirst()).trimmingCharacters(in: .whitespaces), isRepeat: false)
+            return .init(
+                command: String(input.dropFirst()).trimmingCharacters(in: .whitespaces),
+                suppressHistory: false
+            )
         }
-        return .init(command: nil, isRepeat: false)
-    }
-
-    static func isRepeatCommand(_ input: String) -> Bool {
-        guard input.hasPrefix("!!") else { return false }
-        guard input.count > 2 else { return true }
-        let next = input[input.index(input.startIndex, offsetBy: 2)]
-        return next.isWhitespace
+        return .init(command: nil, suppressHistory: false)
     }
 }
 
@@ -65,12 +64,15 @@ public func runSwiftCoderTUISession(
     let renderer = frontend.renderer
 
     let staticItems = frontend.appConfig.commands
-        .filter { $0.name != "/model" }
+        .filter { $0.name != "/model" && $0.name != "/effort" }
         .map {
         AutocompleteItem(value: String($0.name.dropFirst()), label: $0.name, description: $0.description)
     }
     let provider = CombinedAutocompleteProvider(
-        commands: [TUIModelSlashCommand(models: frontend.appConfig.models)],
+        commands: [
+            TUIModelSlashCommand(models: frontend.appConfig.models),
+            TUIEffortSlashCommand()
+        ],
         staticCommands: staticItems
     )
     await renderer.setAutocompleteProvider(provider)
@@ -79,8 +81,13 @@ public func runSwiftCoderTUISession(
     await renderer.setSandboxEnabled(initialSandboxEnabled)
     let initialWorkingMode = await agentLoop.mode
     let initialTaskType = await agentLoop.taskType
-    let initialThinkingLevel = await agentLoop.thinkingLevel
-    if let initialModeIndex = modeIndex(for: initialThinkingLevel, appConfig: frontend.appConfig) {
+    let initialThinkingLevel = await agentLoop.thinkingLevel.rawValue
+    if let initialModeIndex = modeIndex(
+        workingMode: initialWorkingMode,
+        taskType: initialTaskType,
+        thinkingLevel: initialThinkingLevel,
+        appConfig: frontend.appConfig
+    ) {
         await renderer.setCurrentModeIndex(initialModeIndex)
     }
     let initialStatusMode = statusModeLabel(workingMode: initialWorkingMode, taskType: initialTaskType)
@@ -93,7 +100,6 @@ public func runSwiftCoderTUISession(
     var activeStreamTask: Task<Void, Never>? = nil
     var sigwinchSource: DispatchSourceSignal? = nil
     var pendingResizeTask: Task<Void, Never>? = nil
-    var lastShellCommand: String = ""
     var lastUserPrompt: String?
     let workspaceRoot = URL(fileURLWithPath: FileManager.default.currentDirectoryPath).standardized.path
     var shouldQuit = false
@@ -201,6 +207,30 @@ public func runSwiftCoderTUISession(
 
         case .shiftTab:
             _ = await agentLoop.cycleMode()
+            await renderer.renderFooter()
+
+        case .ctrlP:
+            await cycleModelShortcut(
+                appConfig: frontend.appConfig,
+                agentLoop: agentLoop,
+                renderer: renderer,
+                reverse: false
+            )
+
+        case .shiftCtrlP:
+            await cycleModelShortcut(
+                appConfig: frontend.appConfig,
+                agentLoop: agentLoop,
+                renderer: renderer,
+                reverse: true
+            )
+
+        case .ctrlV:
+            await pasteFromClipboard(renderer: renderer)
+            await renderer.renderFooter()
+
+        case .paste(let pasted):
+            await renderer.insertText(pasted)
             await renderer.renderFooter()
 
         case .enter:
@@ -354,8 +384,7 @@ public func runSwiftCoderTUISession(
             if commandInput == "/plan" {
                 let isInPlan = await agentLoop.mode == .plan
                 if isInPlan {
-                    await agentLoop.setMode(.agent)
-                    await agentLoop.setTaskType(.coding)
+                    await agentLoop.setMode(.agent, taskType: .coding)
                 } else {
                     await agentLoop.setMode(.plan)
                 }
@@ -367,11 +396,9 @@ public func runSwiftCoderTUISession(
                 let currentTaskType = await agentLoop.taskType
                 let isAutopilot = currentMode != .plan && currentTaskType == .general
                 if isAutopilot {
-                    await agentLoop.setMode(.agent)
-                    await agentLoop.setTaskType(.coding)
+                    await agentLoop.setMode(.agent, taskType: .coding)
                 } else {
-                    await agentLoop.setMode(.agent)
-                    await agentLoop.setTaskType(.general)
+                    await agentLoop.setMode(.agent, taskType: .general)
                 }
                 await renderer.renderFooter()
                 continue
@@ -434,16 +461,19 @@ public func runSwiftCoderTUISession(
                 await handleModelCommand(input: commandInput, appConfig: frontend.appConfig, agentLoop: agentLoop, renderer: renderer)
                 continue
             }
+            if commandInput.hasPrefix("/effort") || commandInput.hasPrefix("/thinking") {
+                await handleEffortCommand(input: commandInput, agentLoop: agentLoop, renderer: renderer)
+                continue
+            }
 
-            // ! <cmd> — run a shell command; !! — repeat last shell command
-            // Also support "!!<cmd>" as shorthand for running "<cmd>".
-            let shellCmd = TUIShellCommandParser.parse(commandInput, lastShellCommand: lastShellCommand).command
-            if let cmd = shellCmd {
+            // !<cmd> runs a shell command and keeps output in transcript.
+            // !!<cmd> runs a shell command but suppresses transcript/history capture.
+            let shellParse = TUIShellCommandParser.parse(commandInput)
+            if let cmd = shellParse.command {
                 if cmd.isEmpty {
                     await renderer.printScrollLine("\(DesignSystem.brightRed)✗ no command to run\(DesignSystem.reset)")
                 } else {
-                    lastShellCommand = cmd
-                    await runShellCommand(cmd, renderer: renderer)
+                    await runShellCommand(cmd, renderer: renderer, suppressHistory: shellParse.suppressHistory)
                 }
                 continue
             }
@@ -519,6 +549,25 @@ public func runSwiftCoderTUISession(
     await renderer.teardownScreen()
 }
 
+@MainActor
+private func pasteFromClipboard(renderer: Renderer) async {
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/usr/bin/pbpaste")
+    let pipe = Pipe()
+    process.standardOutput = pipe
+    process.standardError = Pipe()
+    do {
+        try process.run()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else { return }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        guard let text = String(data: data, encoding: .utf8), !text.isEmpty else { return }
+        await renderer.insertText(text)
+    } catch {
+        // Best effort: if clipboard access fails, keep input unchanged.
+    }
+}
+
 private func normalizedCommandInput(from input: String) -> String {
     var normalized = input.trimmingCharacters(in: .whitespacesAndNewlines)
     while normalized.first == ">" {
@@ -528,14 +577,26 @@ private func normalizedCommandInput(from input: String) -> String {
     return normalized
 }
 
-private func modeIndex(for thinkingLevel: AgentLoop.ThinkingLevel, appConfig: AppConfig) -> Int? {
-    if let exact = appConfig.modes.firstIndex(where: { $0.id == thinkingLevel.rawValue || $0.label == thinkingLevel.rawValue }) {
+private func modeIndex(
+    workingMode: AgentLoop.WorkingMode,
+    taskType: AgentLoop.TaskType,
+    thinkingLevel: String,
+    appConfig: AppConfig
+) -> Int? {
+    let modePrefix: String
+    if workingMode == .plan {
+        modePrefix = "plan"
+    } else if taskType == .general {
+        modePrefix = "autopilot"
+    } else {
+        modePrefix = "coding"
+    }
+    let effort = thinkingLevel == "fast" ? "off" : thinkingLevel
+    let id = "\(modePrefix)-\(effort)"
+    if let exact = appConfig.modes.firstIndex(where: { $0.id == id }) {
         return exact
     }
-    if thinkingLevel == .minimal {
-        return appConfig.modes.firstIndex(where: { $0.id == "low" || $0.label == "low" })
-    }
-    return nil
+    return appConfig.modes.firstIndex(where: { $0.id == "\(modePrefix)-low" })
 }
 
 private func statusModeLabel(workingMode: AgentLoop.WorkingMode, taskType: AgentLoop.TaskType) -> String {
@@ -555,10 +616,14 @@ private func decisionForOption(_ index: Int?) -> ApprovalDecision {
 }
 
 @MainActor
-private func runShellCommand(_ cmd: String, renderer: Renderer) async {
+private func runShellCommand(_ cmd: String, renderer: Renderer, suppressHistory: Bool) async {
     // Render the shell invocation as a tool_call entry.
-    let callEntry = SessionEntry(role: .toolCall, content: "bash \(cmd)")
-    await renderer.printScrollLine(callEntry.render())
+    if suppressHistory {
+        await renderer.printScrollLine("\(DesignSystem.dim)$ \(cmd)\(DesignSystem.reset)")
+    } else {
+        let callEntry = SessionEntry(role: .toolCall, content: "bash \(cmd)")
+        await renderer.printScrollLine(callEntry.render())
+    }
 
     let process = Process()
     process.executableURL = URL(fileURLWithPath: "/bin/bash")
@@ -583,11 +648,19 @@ private func runShellCommand(_ cmd: String, renderer: Renderer) async {
         var body = (out + err).trimmingCharacters(in: .newlines)
         if status != 0 { body += (body.isEmpty ? "" : "\n") + "exit \(status)" }
         if body.isEmpty { body = "(no output)" }
-        let outputEntry = SessionEntry(role: .toolOutput, content: body)
-        await renderer.printScrollLine(outputEntry.render())
+        if suppressHistory {
+            await renderer.printScrollLine(body)
+        } else {
+            let outputEntry = SessionEntry(role: .toolOutput, content: body)
+            await renderer.printScrollLine(outputEntry.render())
+        }
     } catch {
-        let errEntry = SessionEntry(role: .toolOutput, content: "✗ \(error.localizedDescription)")
-        await renderer.printScrollLine(errEntry.render())
+        if suppressHistory {
+            await renderer.printScrollLine("✗ \(error.localizedDescription)")
+        } else {
+            let errEntry = SessionEntry(role: .toolOutput, content: "✗ \(error.localizedDescription)")
+            await renderer.printScrollLine(errEntry.render())
+        }
     }
 }
 
@@ -600,6 +673,7 @@ private func helpLines() -> [String] {
         "  /skills  list discovered skills",
         "  /hooks   list active hooks",
         "  /model   open model chooser; /model <name|id|number> to switch",
+        "  /effort [level] set reasoning effort: off, minimal, low, medium, high",
         "  /transforms show context transforms; '/transforms clear' removes all",
         "  /save-history [path] save session transcript as markdown",
         "  /save-history-json [path] save session transcript as json",
@@ -614,10 +688,50 @@ private func helpLines() -> [String] {
         "  /merge-approval run merge approval flow",
         "  /gittree run git tree flow",
         "  /quit    exit the TUI",
-        "  ! <cmd>  run a shell command (e.g. ! ls -la)",
-        "  !!       repeat the last shell command",
+        "  ! <cmd>  run a shell command and keep output in transcript/context",
+        "  !!<cmd>  run a shell command without adding output to transcript/context",
         "  Enter to submit · Ctrl+C to cancel · Ctrl+L to redraw",
     ]
+}
+
+@MainActor
+private func handleEffortCommand(
+    input: String,
+    agentLoop: AgentLoop,
+    renderer: Renderer
+) async {
+    guard let intent = TUIEffortCommandParser.resolve(input: input) else {
+        return
+    }
+
+    switch intent {
+    case .openMenu(let isLegacyAlias):
+        let current = await agentLoop.thinkingLevel
+        await renderer.openCommandPalette(commands: TUIEffortCommandParser.menuItems(currentLevel: current))
+        await renderer.renderFooter()
+        if isLegacyAlias {
+            await renderer.printScrollLine("  Tip: /thinking is a legacy alias. Prefer /effort.")
+        }
+    case .setLevel(let targetLevel, let isLegacyAlias):
+        await agentLoop.setThinkingLevel(targetLevel)
+        await renderer.printScrollLine("  Reasoning effort set to \(effortDisplayLabel(for: targetLevel)).")
+        if isLegacyAlias {
+            await renderer.printScrollLine("  Tip: /thinking is a legacy alias. Prefer /effort.")
+        }
+    case .invalidLevel(let levelArg, _):
+        await renderer.printScrollLine(
+            "  Invalid effort '\(levelArg)'. Use: off, minimal, low, medium, high."
+        )
+    }
+}
+
+private func effortDisplayLabel(for level: AgentLoop.ThinkingLevel) -> String {
+    switch level {
+    case .fast:
+        return "off"
+    default:
+        return level.rawValue
+    }
 }
 
 @MainActor
@@ -697,4 +811,43 @@ private func switchToModel(
             "\(DesignSystem.brightRed)  Error: \(error.localizedDescription)\(DesignSystem.reset)"
         )
     }
+}
+
+@MainActor
+private func cycleModelShortcut(
+    appConfig: AppConfig,
+    agentLoop: AgentLoop,
+    renderer: Renderer,
+    reverse: Bool
+) async {
+    guard !appConfig.models.isEmpty else {
+        await renderer.printScrollLine("  No models configured.")
+        return
+    }
+
+    let currentLabel = await renderer.getCurrentModelLabel()
+    let fallbackIndex = max(0, min(appConfig.defaultModelIndex, appConfig.models.count - 1))
+    let currentIndex = appConfig.models.firstIndex {
+        $0.label.caseInsensitiveCompare(currentLabel) == .orderedSame
+    } ?? fallbackIndex
+
+    guard let targetIndex = cycledModelIndex(from: currentIndex, count: appConfig.models.count, reverse: reverse) else {
+        return
+    }
+
+    await switchToModel(
+        model: appConfig.models[targetIndex],
+        index: targetIndex,
+        agentLoop: agentLoop,
+        renderer: renderer
+    )
+}
+
+func cycledModelIndex(from currentIndex: Int, count: Int, reverse: Bool) -> Int? {
+    guard count > 0 else { return nil }
+    let normalizedIndex = max(0, min(currentIndex, count - 1))
+    if reverse {
+        return (normalizedIndex - 1 + count) % count
+    }
+    return (normalizedIndex + 1) % count
 }

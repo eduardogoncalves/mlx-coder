@@ -33,6 +33,9 @@ extension AgentLoop {
         self.loadedMemoryLimit = memoryLimit
         self.loadedCacheLimit = cacheLimit
         self.loadedKVBits = currentGenerationConfig.kvBits
+        self.loadedKVGroupSize = currentGenerationConfig.kvGroupSize
+        self.loadedQuantizedKVStart = currentGenerationConfig.quantizedKVStart
+        self.loadedTurboQuantBits = currentGenerationConfig.turboQuantBits
         
         // Re-register tools that depend on modelContainer
         await registerToolsInternal()

@@ -270,7 +270,8 @@ extension AgentLoop {
             cookedTerm.c_cc.16 = 1
             cookedTerm.c_cc.17 = 0
             tcsetattr(STDIN_FILENO, TCSANOW, &cookedTerm)
-            print("[\(name)] Blocked. Suggest changes (or press Enter to deny with no comment): ", terminator: "")
+            // Move to a clean line before prompting so we don't overwrite the TUI footer/status rows.
+            print("\r\n\u{1B}[K[\(name)] Canceled. Suggest changes or press Enter to continue with no comment: ", terminator: "")
             fflush(stdout)
             guard let suggestion = readLine(strippingNewline: true)?.trimmingCharacters(in: .whitespacesAndNewlines), !suggestion.isEmpty else {
                 await auditLogger?.logApprovalDecision(

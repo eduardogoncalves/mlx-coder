@@ -465,8 +465,7 @@ struct ChatCommand: AsyncParsableCommand {
             if trimmed == "/plan" {
                 let isInPlan = await agentLoop.mode == .plan
                 if isInPlan {
-                    await agentLoop.setMode(.agent)
-                    await agentLoop.setTaskType(.coding)
+                    await agentLoop.setMode(.agent, taskType: .coding)
                 } else {
                     await agentLoop.setMode(.plan)
                 }
@@ -477,11 +476,9 @@ struct ChatCommand: AsyncParsableCommand {
                 let currentTaskType = await agentLoop.taskType
                 let isAutopilot = currentMode != .plan && currentTaskType == .general
                 if isAutopilot {
-                    await agentLoop.setMode(.agent)
-                    await agentLoop.setTaskType(.coding)
+                    await agentLoop.setMode(.agent, taskType: .coding)
                 } else {
-                    await agentLoop.setMode(.agent)
-                    await agentLoop.setTaskType(.general)
+                    await agentLoop.setMode(.agent, taskType: .general)
                 }
                 continue
             }
@@ -507,12 +504,13 @@ struct ChatCommand: AsyncParsableCommand {
                 }
                 continue
             }
-            if trimmed.hasPrefix("/thinking") {
+            if trimmed.hasPrefix("/effort") || trimmed.hasPrefix("/thinking") {
+                let isLegacyAlias = trimmed.hasPrefix("/thinking")
                 let parts = trimmed.split(separator: " ")
                 if parts.count > 1 {
                     let level = parts[1].lowercased()
                     switch level {
-                    case "fast", "off":
+                    case "off", "fast":
                         await agentLoop.setThinkingLevel(.fast)
                     case "minimal":
                         await agentLoop.setThinkingLevel(.minimal)
@@ -523,12 +521,18 @@ struct ChatCommand: AsyncParsableCommand {
                     case "high":
                         await agentLoop.setThinkingLevel(.high)
                     default:
-                        renderer.printError("Invalid thinking level: \(level). Use 'fast/off', 'minimal', 'low', 'medium', or 'high'.")
+                        renderer.printError("Invalid effort level: \(level). Use 'off', 'minimal', 'low', 'medium', or 'high'.")
+                    }
+                    if isLegacyAlias {
+                        renderer.printStatus("Tip: /thinking is a legacy alias. Prefer /effort.")
                     }
                 } else {
-                    // Show current level and budget when no argument given
                     let current = await agentLoop.thinkingLevel
-                    renderer.printStatus("Thinking level: \(current.displayName)")
+                    let effort = current == .fast ? "off" : current.rawValue
+                    renderer.printStatus("Reasoning effort: \(effort)")
+                    if isLegacyAlias {
+                        renderer.printStatus("Tip: /thinking is a legacy alias. Prefer /effort.")
+                    }
                 }
                 continue
             }
@@ -766,7 +770,8 @@ func printREPLHelp() {
       \u{001B}[32m/autopilot\u{001B}[0m     Toggle AUTOPILOT on/off (off => coding mode)
       \u{001B}[32m/agent\u{001B}[0m         Switch to AGENT MODE (full filesystem/shell access)
       \u{001B}[32m/task [type]\u{001B}[0m   Set task type: general, coding, reasoning
-      \u{001B}[32m/thinking [lvl]\u{001B}[0m Set thinking budget: fast/off, minimal, low, medium, high (default: low)
+      \u{001B}[32m/effort [lvl]\u{001B}[0m  Set reasoning effort: off, minimal, low, medium, high (default: low)
+      \u{001B}[32m/thinking [lvl]\u{001B}[0m Legacy alias for /effort
       \u{001B}[32m/steer [msg]\u{001B}[0m   Queue a steering message injected between agent turns (no arg = list queue)
       \u{001B}[32m/followup [msg]\u{001B}[0m Queue a follow-up run after the current task (no arg = list queue)
       \u{001B}[32m/btw <question>\u{001B}[0m Ask a quick side question without affecting the main conversation
@@ -775,6 +780,8 @@ func printREPLHelp() {
       \u{001B}[32m/sandbox\u{001B}[0m       Toggle macOS Seatbelt sandbox for shell commands
       \u{001B}[32m/voice, Ctrl+V\u{001B}[0m  Voice input (STT) — fills transcription into input box for editing
       \u{001B}[32m/voice-locale [id]\u{001B}[0m Set STT language (no arg = list all available locales)
+      \u{001B}[32mCtrl+J, Option+Enter, \\+Enter\u{001B}[0m Insert newline in input box
+      \u{001B}[32mCommand+V\u{001B}[0m      Paste text into input box (multiline supported)
       \u{001B}[32m/memory <cmd>\u{001B}[0m  Memory commands: save, log, search, list, undo, status, snippet
       \u{001B}[32mEsc\u{001B}[0m            Cancel current generation
       \u{001B}[32mShift+Tab\u{001B}[0m      Cycle modes (default starts at Plan low):

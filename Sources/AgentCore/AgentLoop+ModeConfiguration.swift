@@ -20,7 +20,7 @@ extension AgentLoop {
             maxTokens: currentGenerationConfig.maxTokens,
             mode: mode,
             thinkingLevel: thinkingLevel,
-            taskType: taskType,
+            taskType: self.taskType,
             memorySection: memoryPromptSection,
             customizationSection: customizationPromptSection,
             skillsMetadata: skillsMetadata
@@ -33,11 +33,19 @@ extension AgentLoop {
     }
 
     /// Sets the working mode (agent/plan) and refreshes the system prompt.
-    public func setMode(_ mode: WorkingMode, silent: Bool = false) async {
+    public func setMode(_ mode: WorkingMode, taskType: TaskType? = nil, silent: Bool = false) async {
         self.mode = mode
+        if let taskType {
+            self.taskType = taskType
+            if taskType != .coding {
+                skipGitOrchestrationInitialization = false
+            }
+        }
+        syncAutopilotApprovalState()
         syncCurrentModeFromSettings()
         
         updateGenerationConfig()
+        updatePendingReloadIfNeeded()
         
         // Update system prompt in history
         let composition = await AgentLoop.buildSystemPromptComposition(
@@ -45,7 +53,7 @@ extension AgentLoop {
             maxTokens: currentGenerationConfig.maxTokens,
             mode: mode,
             thinkingLevel: thinkingLevel,
-            taskType: taskType,
+            taskType: self.taskType,
             memorySection: memoryPromptSection,
             customizationSection: customizationPromptSection,
             skillsMetadata: skillsMetadata
@@ -57,7 +65,7 @@ extension AgentLoop {
             frontend.emit(.modeChanged(ModeSnapshot(
                 workingMode: mode.rawValue,
                 thinkingLevel: thinkingLevel.rawValue,
-                taskType: taskType.rawValue
+                taskType: self.taskType.rawValue
             )))
         }
     }
@@ -67,6 +75,7 @@ extension AgentLoop {
         self.thinkingLevel = level
         syncCurrentModeFromSettings()
         updateGenerationConfig()
+        updatePendingReloadIfNeeded()
         
         // Update system prompt in history
         let composition = await AgentLoop.buildSystemPromptComposition(
@@ -95,8 +104,10 @@ extension AgentLoop {
         if type != .coding {
             skipGitOrchestrationInitialization = false
         }
+        syncAutopilotApprovalState()
         syncCurrentModeFromSettings()
         updateGenerationConfig()
+        updatePendingReloadIfNeeded()
         
         frontend.emit(.modeChanged(ModeSnapshot(
             workingMode: mode.rawValue,
@@ -123,9 +134,11 @@ extension AgentLoop {
             self.mode = .agent
             self.taskType = .coding
         }
+        syncAutopilotApprovalState()
         syncCurrentModeFromSettings()
         
         updateGenerationConfig()
+        updatePendingReloadIfNeeded()
         
         // Update system prompt in history
         let composition = await AgentLoop.buildSystemPromptComposition(
@@ -141,16 +154,6 @@ extension AgentLoop {
         promptSectionTokenEstimates = composition.sectionTokenEstimates
         history.updateSystemPrompt(composition.prompt)
         
-        // Defer reload only if loading parameters changed
-        let needsReload = self.modelPath != self.loadedModelPath ||
-                          self.memoryLimit != self.loadedMemoryLimit ||
-                          self.cacheLimit != self.loadedCacheLimit ||
-                          self.currentGenerationConfig.kvBits != self.loadedKVBits
-                          
-        if needsReload {
-            self.pendingReload = true
-        }
-
         frontend.emit(.modeChanged(ModeSnapshot(
             workingMode: mode.rawValue,
             thinkingLevel: thinkingLevel.rawValue,
@@ -169,6 +172,21 @@ extension AgentLoop {
             taskType: taskType,
             mode: mode
         )
+    }
+
+    func updatePendingReloadIfNeeded() {
+        // Reload only when model loading/runtime-cache parameters changed.
+        let needsReload = self.modelPath != self.loadedModelPath ||
+            self.memoryLimit != self.loadedMemoryLimit ||
+            self.cacheLimit != self.loadedCacheLimit ||
+            self.currentGenerationConfig.kvBits != self.loadedKVBits ||
+            self.currentGenerationConfig.kvGroupSize != self.loadedKVGroupSize ||
+            self.currentGenerationConfig.quantizedKVStart != self.loadedQuantizedKVStart ||
+            self.currentGenerationConfig.turboQuantBits != self.loadedTurboQuantBits
+
+        if needsReload {
+            self.pendingReload = true
+        }
     }
 
     func syncCurrentModeFromSettings() {
@@ -195,6 +213,11 @@ extension AgentLoop {
                 }
             }
         }
+    }
+
+    func syncAutopilotApprovalState() {
+        // In autopilot (agent + general), tool calls should proceed without prompts.
+        autoApproveAllTools = (mode == .agent && taskType == .general)
     }
 
     static func calculateGenerationConfig(
