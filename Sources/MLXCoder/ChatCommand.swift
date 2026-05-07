@@ -626,7 +626,9 @@ struct ChatCommand: AsyncParsableCommand {
 
                 renderer.printStatus("[Key mode] Generation active. Press Esc to cancel.")
                 let task = Task {
-                    let parsed = ImageAttachmentParser.parse(prompt: trimmed)
+                    // Expand @file references to inline content, then parse image attachments.
+                    let expanded = AtFileReferenceExpander.expand(trimmed, workspaceRoot: absWorkspace)
+                    let parsed = ImageAttachmentParser.parse(prompt: expanded)
                     if !parsed.imageURLs.isEmpty {
                         renderer.printStatus("Attaching \(parsed.imageURLs.count) image(s): \(parsed.imageURLs.map(\.lastPathComponent).joined(separator: ", "))")
                     }
@@ -754,6 +756,8 @@ func printREPLHelp() {
     print("""
     
     \u{1B}[1mShortcuts:\u{001B}[0m
+      \u{001B}[32m@file.swift\u{001B}[0m    Attach a file — content is inlined into the prompt
+      \u{001B}[32m@~/path\u{001B}[0m        Tilde-expanded paths are supported
       \u{001B}[32m?\u{001B}[0m              Show this help message
       \u{001B}[32mexit/quit\u{001B}[0m      Exit the application
       \u{001B}[32m/clear\u{001B}[0m         Clear conversation history and free memory

@@ -44,37 +44,51 @@ public struct SandboxEngine: Sendable {
         let canonicalWorkspaceRoot = canonicalWorkspacePath(workspaceRoot)
         let escapedWorkspaceRoot = escapeForProfileString(canonicalWorkspaceRoot)
 
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let packageCachePaths: [String] = [
+            "\(home)/.local/share/NuGet",
+            "\(home)/.nuget",
+            "\(home)/.npm",
+            "\(home)/.cargo",
+            "\(home)/.cache",
+            "\(home)/Library/Caches",
+        ]
+        let packageCacheRules = packageCachePaths
+            .map { "        (allow file-write* (subpath \"\(escapeForProfileString($0))\"))" }
+            .joined(separator: "\n")
+
         let networkRule: String
         switch networkPolicy {
         case .allow:
-            networkRule = "(allow network*)"
+            networkRule = "        (allow network*)"
         case .deny:
-            networkRule = ";; Network connections denied by policy\n        (deny network*)"
+            networkRule = "        ;; Network connections denied by policy\n        (deny network*)"
         }
 
-        return """
-        (version 1)
-        (allow default)
-        
-        ;; Block all writes by default
-        (deny file-write*)
-        
-        ;; Allow writes to system temp and common paths
-        (allow file-write* (subpath "/tmp"))
-        (allow file-write* (subpath "/private/tmp"))
-        (allow file-write* (subpath "/var/folders"))
-        (allow file-write* (subpath "/private/var/folders"))
-        
-        ;; Allow writes within the workspace
-        (allow file-write* (subpath "\(escapedWorkspaceRoot)"))
-        
-        ;; Ensure we can read everything otherwise (allow default covers this but let's be explicit for write-related reads if any)
-        (allow file-read*)
-        
-        ;; Allow process execution and networking (permissive-open style)
-        (allow process*)
-        \(networkRule)
-        """
+        let lines: [String] = [
+            "        (version 1)",
+            "        (allow default)",
+            "        ",
+            "        ;; Block all writes by default",
+            "        (deny file-write*)",
+            "        ",
+            "        ;; Allow writes to system temp and common paths",
+            "        (allow file-write* (subpath \"/tmp\"))",
+            "        (allow file-write* (subpath \"/private/tmp\"))",
+            "        (allow file-write* (subpath \"/var/folders\"))",
+            "        (allow file-write* (subpath \"/private/var/folders\"))",
+            "        ",
+            "        ;; Allow writes within the workspace",
+            "        (allow file-write* (subpath \"\(escapedWorkspaceRoot)\"))",
+            "        ",
+            "        ;; Package manager caches / data dirs (NuGet, npm, cargo, etc.)",
+            packageCacheRules,
+            "        ",
+            "        ;; Allow process execution and networking (permissive-open style)",
+            "        (allow process*)",
+            networkRule,
+        ]
+        return lines.joined(separator: "\n")
     }
 
     private func canonicalWorkspacePath(_ workspaceRoot: String) -> String {

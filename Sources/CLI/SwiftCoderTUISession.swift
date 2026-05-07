@@ -63,15 +63,19 @@ public func runSwiftCoderTUISession(
 
     let renderer = frontend.renderer
 
+    let caffeinateManager = CaffeinateManager()
+
+    let dynamicCommandNames: Set<String> = ["/model", "/effort", "/caffeinate"]
     let staticItems = frontend.appConfig.commands
-        .filter { $0.name != "/model" && $0.name != "/effort" }
+        .filter { !dynamicCommandNames.contains($0.name) }
         .map {
         AutocompleteItem(value: String($0.name.dropFirst()), label: $0.name, description: $0.description)
     }
     let provider = CombinedAutocompleteProvider(
         commands: [
             TUIModelSlashCommand(models: frontend.appConfig.models),
-            TUIEffortSlashCommand()
+            TUIEffortSlashCommand(),
+            CaffeinateSlashCommand(),
         ],
         staticCommands: staticItems
     )
@@ -121,28 +125,13 @@ public func runSwiftCoderTUISession(
     sigwinchSource = resizeSource
 
     mainLoop: for await key in InputHandler.keystrokes() {
-        if case .character(let ch) = key {
-            pendingTypedChunk.append(ch)
-            if ch == "/" || pendingTypedChunk.count >= 32 || ch == "\n" || ch == "\r" {
-                pendingTypedFlushTask?.cancel()
-                await flushPendingTypedChunk(&pendingTypedChunk, renderer: renderer)
-            } else {
-                pendingTypedFlushTask?.cancel()
-                pendingTypedFlushTask = Task { @MainActor in
-                    try? await Task.sleep(nanoseconds: 12_000_000)
-                    guard !Task.isCancelled else { return }
-                    await flushPendingTypedChunk(&pendingTypedChunk, renderer: renderer)
-                    pendingTypedFlushTask = nil
-                }
-            }
-            continue
-        } else {
-            pendingTypedFlushTask?.cancel()
-            await flushPendingTypedChunk(&pendingTypedChunk, renderer: renderer)
-        }
-
         // Approval intercept — when the agent has paused for a tool decision.
+        // Must run before typed-character buffering so numeric choices (1-4)
+        // are handled immediately instead of being swallowed into input.
         if frontend.hasPendingApproval {
+            pendingTypedFlushTask?.cancel()
+            pendingTypedFlushTask = nil
+            pendingTypedChunk.removeAll(keepingCapacity: true)
             switch key {
             case .character(let ch):
                 if let digit = Int(String(ch)), (1...4).contains(digit) {
@@ -161,6 +150,39 @@ public func runSwiftCoderTUISession(
                 break
             }
             continue
+        }
+
+        if case .character(let ch) = key {
+            if ch == " " {
+                pendingTypedFlushTask?.cancel()
+                await flushPendingTypedChunk(&pendingTypedChunk, renderer: renderer)
+                if await renderer.isAutocompleteActive() {
+                    await renderer.acceptAutocomplete()
+                    await renderer.renderFooter()
+                    continue
+                }
+            }
+            pendingTypedChunk.append(ch)
+            if ch == "/" || ch == "@" || pendingTypedChunk.count >= 32 || ch == "\n" || ch == "\r" {
+                pendingTypedFlushTask?.cancel()
+                await flushPendingTypedChunk(&pendingTypedChunk, renderer: renderer)
+            } else {
+                pendingTypedFlushTask?.cancel()
+                pendingTypedFlushTask = Task { @MainActor in
+                    try? await Task.sleep(nanoseconds: 12_000_000)
+                    guard !Task.isCancelled else { return }
+                    await flushPendingTypedChunk(&pendingTypedChunk, renderer: renderer)
+                    pendingTypedFlushTask = nil
+                }
+            }
+            continue
+        } else {
+            pendingTypedFlushTask?.cancel()
+            if case .tab = key {
+                await flushPendingTypedChunk(&pendingTypedChunk, renderer: renderer, render: false)
+            } else {
+                await flushPendingTypedChunk(&pendingTypedChunk, renderer: renderer)
+            }
         }
 
         switch key {
@@ -219,11 +241,18 @@ public func runSwiftCoderTUISession(
 
         case .tab:
             if await renderer.isAutocompleteActive() {
-                await renderer.acceptAutocomplete()
+                let result = await renderer.acceptAutocomplete()
+                await renderer.renderFooter()
+                if result == .directory || result == .slashCommand {
+                    Task {
+                        await renderer.updateAutocomplete()
+                        await renderer.renderFooter()
+                    }
+                }
             } else {
                 await renderer.openCommandPalette()
+                await renderer.renderFooter()
             }
-            await renderer.renderFooter()
 
         case .shiftTab:
             _ = await agentLoop.cycleMode()
@@ -267,7 +296,15 @@ public func runSwiftCoderTUISession(
             // Accept any pending ghost/autocomplete suggestion before submitting,
             // so "/q" + Enter expands to "/quit" and executes it.
             if await renderer.isAutocompleteActive() {
-                await renderer.acceptAutocomplete()
+                let result = await renderer.acceptAutocomplete()
+                await renderer.renderFooter()
+                if result == .directory || result == .slashCommand {
+                    Task {
+                        await renderer.updateAutocomplete()
+                        await renderer.renderFooter()
+                    }
+                }
+                continue
             }
             let prompt = (await renderer.submitInput()) ?? ""
             let trimmed = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -495,6 +532,14 @@ public func runSwiftCoderTUISession(
                 await handleEffortCommand(input: commandInput, agentLoop: agentLoop, renderer: renderer)
                 continue
             }
+            if commandInput.hasPrefix("/caffeinate") {
+                await handleCaffeinateCommand(
+                    input: commandInput,
+                    manager: caffeinateManager,
+                    renderer: renderer
+                )
+                continue
+            }
 
             // !<cmd> runs a shell command and keeps output in transcript.
             // !!<cmd> runs a shell command but suppresses transcript/history capture.
@@ -508,6 +553,10 @@ public func runSwiftCoderTUISession(
                 continue
             }
 
+            // Expand @file references before sending to the agent.
+            let expandedPrompt = AtFileReferenceExpander.expand(trimmed, workspaceRoot: workspaceRoot)
+            let effectivePrompt = expandedPrompt
+
             // Render user turn
             let userEntry = SessionEntry(role: .user, content: trimmed)
             await renderer.printScrollLine(userEntry.render())
@@ -517,7 +566,7 @@ public func runSwiftCoderTUISession(
             // steering message so AgentCore injects it before the next round.
             // The frontend's spinner-tick task continues uninterrupted.
             if await renderer.getIsGenerating() {
-                await agentLoop.steer(trimmed)
+                await agentLoop.steer(effectivePrompt)
                 let pending = await agentLoop.pendingSteeringMessages().count
                 await renderer.setPendingCount(pending)
                 await renderer.renderFooter()
@@ -527,7 +576,13 @@ public func runSwiftCoderTUISession(
             activeStreamTask = Task { @MainActor in
                 defer { activeStreamTask = nil }
                 do {
-                    try await agentLoop.processUserMessage(trimmed)
+                    let parsed = ImageAttachmentParser.parse(prompt: effectivePrompt)
+                    if !parsed.imageURLs.isEmpty {
+                        await renderer.printScrollLine(
+                            "\(DesignSystem.dim)  Attaching \(parsed.imageURLs.count) image(s): \(parsed.imageURLs.map(\.lastPathComponent).joined(separator: ", "))\(DesignSystem.reset)"
+                        )
+                    }
+                    try await agentLoop.processUserMessage(parsed.cleanedPrompt, images: parsed.imageURLs)
                     while let followUp = await agentLoop.dequeueFollowUp() {
                         await renderer.printScrollLine("🔄 Auto follow-up: \"\(followUp)\"")
                         await hooks.emit(.followUpStarted(message: followUp))
@@ -605,13 +660,20 @@ private func normalizedCommandInput(from input: String) -> String {
 
 @MainActor
 private func flushPendingTypedChunk(_ pending: inout String, renderer: Renderer) async {
+    await flushPendingTypedChunk(&pending, renderer: renderer, render: true)
+}
+
+@MainActor
+private func flushPendingTypedChunk(_ pending: inout String, renderer: Renderer, render: Bool) async {
     guard !pending.isEmpty else { return }
     let normalized = pending
         .replacingOccurrences(of: "\r\n", with: "\n")
         .replacingOccurrences(of: "\r", with: "\n")
     pending.removeAll(keepingCapacity: true)
     await renderer.insertText(normalized)
-    await renderer.renderFooter()
+    if render {
+        await renderer.renderFooter()
+    }
 }
 
 private func modeIndex(
@@ -703,6 +765,7 @@ private func runShellCommand(_ cmd: String, renderer: Renderer, suppressHistory:
 
 private func helpLines() -> [String] {
     [
+        "  /caffeinate [on|off|busy|<dur>]  prevent system sleep (e.g. /caffeinate 2h)",
         "  /clear   clear the conversation",
         "  /help    this message",
         "  /memory  memory commands (save/log/search/list/undo/status/snippet)",
@@ -727,6 +790,7 @@ private func helpLines() -> [String] {
         "  /quit    exit the TUI",
         "  ! <cmd>  run a shell command and keep output in transcript/context",
         "  !!<cmd>  run a shell command without adding output to transcript/context",
+        "  @path    attach a file — content is inlined into the prompt (tab-complete with @)",
         "  Enter to submit · Ctrl+C to cancel · Ctrl+L to redraw",
     ]
 }
@@ -889,6 +953,55 @@ private func cycleModelShortcut(
         renderer: renderer,
         deferReload: deferReload
     )
+}
+
+@MainActor
+private func handleCaffeinateCommand(
+    input: String,
+    manager: CaffeinateManager,
+    renderer: Renderer
+) async {
+    guard let intent = CaffeinateCommandParser.resolve(input: input) else { return }
+
+    switch intent {
+    case .openMenu:
+        await renderer.openCommandPalette(commands: CaffeinateCommandParser.menuItems())
+        await renderer.renderFooter()
+
+    case .on:
+        await manager.enable(mode: .on)
+        await renderer.printScrollLine(
+            "\(DesignSystem.dim)Caffeinate: \(await manager.statusDescription)\(DesignSystem.reset)"
+        )
+        await renderer.renderFooter()
+
+    case .busy:
+        await manager.enable(mode: .busy)
+        await renderer.printScrollLine(
+            "\(DesignSystem.dim)Caffeinate: \(await manager.statusDescription)\(DesignSystem.reset)"
+        )
+        await renderer.renderFooter()
+
+    case .off:
+        await manager.disable()
+        await renderer.printScrollLine(
+            "\(DesignSystem.dim)Caffeinate: off\(DesignSystem.reset)"
+        )
+        await renderer.renderFooter()
+
+    case .duration(let seconds):
+        await manager.enable(mode: .duration(seconds: seconds))
+        await renderer.printScrollLine(
+            "\(DesignSystem.dim)Caffeinate: \(await manager.statusDescription)\(DesignSystem.reset)"
+        )
+        await renderer.renderFooter()
+
+    case .invalid(let arg):
+        await renderer.printScrollLine(
+            "\(DesignSystem.brightRed)Unknown caffeinate option '\(arg)'. Usage: /caffeinate [on|off|busy|<duration>]\(DesignSystem.reset)"
+        )
+        await renderer.renderFooter()
+    }
 }
 
 func cycledModelIndex(from currentIndex: Int, count: Int, reverse: Bool) -> Int? {

@@ -68,6 +68,7 @@ public enum SwiftCoderTUIAppConfigBuilder {
                                      barColor: "\u{001B}[32m", badgeColor: "\u{001B}[95m"),
             ],
             commands: [
+                AppConfig.CommandConfig(name: "/caffeinate", description: "Prevent system sleep (on/off/busy/<duration>)"),
                 AppConfig.CommandConfig(name: "/clear",   description: "Clear the conversation"),
                 AppConfig.CommandConfig(name: "/context", description: "Show context-window usage"),
                 AppConfig.CommandConfig(name: "/skills",  description: "List available skills"),
