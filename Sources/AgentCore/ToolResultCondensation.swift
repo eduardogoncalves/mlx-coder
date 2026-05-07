@@ -58,6 +58,13 @@ enum ToolResultCondensationPolicy {
             return false
         }
 
+        // Web tools always go through condensation — their raw content (HTML / search
+        // results) can be huge and must never reach the main context unfiltered.
+        let webToolNames: Set<String> = ["web_fetch", "web_search"]
+        if webToolNames.contains(toolName) {
+            return true
+        }
+
         let estimatedTokens = estimatedTokenCount(for: raw, charsPerToken: config.charsPerTokenEstimate)
         guard estimatedTokens > config.largeResultTokenThreshold else { return false }
 

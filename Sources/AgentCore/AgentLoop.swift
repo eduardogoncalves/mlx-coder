@@ -337,7 +337,7 @@ public actor AgentLoop {
             for streamedCall in streamedCalls {
                 frontend.emit(.toolCallStarted(ToolCallSnapshot(name: streamedCall.toolName, arguments: stringifyArgs(["path": streamedCall.path, "content": "[streamed to tmp]"]))))
                 let streamResult = await handleStreamedToolCall(streamedCall)
-                frontend.emit(.toolCallResult(ToolResultSnapshot(toolName: streamedCall.toolName, isError: streamResult.isError, content: streamResult.content, truncationMarker: streamResult.truncationMarker)))
+                frontend.emit(.toolCallResult(makeDisplaySnapshot(toolName: streamedCall.toolName, result: streamResult)))
                 
                 // Track file modifications
                 if !streamResult.isError {
@@ -649,7 +649,7 @@ public actor AgentLoop {
         let policyDecision = permissions.evaluateToolPolicy(toolName: call.name, targetPath: targetPath)
         if case .denied(let denyReason) = policyDecision {
             let deniedResult = ToolResult.error(denyReason)
-            frontend.emit(.toolCallResult(ToolResultSnapshot(toolName: call.name, isError: deniedResult.isError, content: deniedResult.content, truncationMarker: deniedResult.truncationMarker)))
+            frontend.emit(.toolCallResult(makeDisplaySnapshot(toolName: call.name, result: deniedResult, arguments: call.arguments)))
 
             await auditLogger?.logExecutionResult(
                 toolName: call.name,
@@ -813,7 +813,7 @@ public actor AgentLoop {
             resultPreview: String(result.content.prefix(220))
         ))
 
-        frontend.emit(.toolCallResult(ToolResultSnapshot(toolName: call.name, isError: result.isError, content: result.content, truncationMarker: result.truncationMarker)))
+        frontend.emit(.toolCallResult(makeDisplaySnapshot(toolName: call.name, result: result, arguments: call.arguments)))
         
         // Track if file modification tools executed successfully
         if isFileModificationTool && !result.isError && approval.approved {
@@ -854,5 +854,38 @@ extension AgentLoop {
     /// terminal adapter.
     public func swapFrontend(_ newFrontend: any AgentFrontend) {
         self.frontend = newFrontend
+    }
+}
+
+extension AgentLoop {
+    /// Tools whose raw output should never be displayed in the console —
+    /// the content is large/HTML and is processed in a background context
+    /// before any condensed summary reaches the main history.
+    private static let backgroundContextTools: Set<String> = ["web_fetch", "web_search"]
+
+    /// Returns a `ToolResultSnapshot` suitable for display.
+    ///
+    /// For background-context tools (`web_fetch`, `web_search`) the raw
+    /// content is replaced with a single status line so it doesn't flood
+    /// the console or the main conversation history.  Error results are
+    /// always passed through unchanged so the user can see failure details.
+    func makeDisplaySnapshot(toolName: String, result: ToolResult, arguments: [String: Any] = [:]) -> ToolResultSnapshot {
+        guard Self.backgroundContextTools.contains(toolName), !result.isError else {
+            return ToolResultSnapshot(
+                toolName: toolName,
+                isError: result.isError,
+                content: result.content,
+                truncationMarker: result.truncationMarker
+            )
+        }
+        let byteCount = result.content.count + (result.truncationMarker.map { $0.count + 1 } ?? 0)
+        let urlHint: String
+        if let url = arguments["url"] as? String, !url.isEmpty {
+            urlHint = " from \(url)"
+        } else {
+            urlHint = ""
+        }
+        let preview = "[\(toolName): \(byteCount) chars\(urlHint) — content processed in background context]"
+        return ToolResultSnapshot(toolName: toolName, isError: false, content: preview, truncationMarker: nil)
     }
 }
