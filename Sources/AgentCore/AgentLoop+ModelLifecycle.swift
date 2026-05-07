@@ -68,6 +68,28 @@ extension AgentLoop {
         try await reloadModel()
     }
 
+    /// Stage a model switch to be applied on the next user message turn.
+    /// This updates `modelPath` and marks `pendingReload` without reloading immediately.
+    public func stageModelSwitch(to newModelPath: String) async throws {
+        let trimmed = newModelPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            throw NSError(
+                domain: "AgentLoop",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "Model path cannot be empty."]
+            )
+        }
+
+        if trimmed == modelPath {
+            frontend.emit(.modelLifecycle(.alreadyActive(trimmed)))
+            return
+        }
+
+        modelPath = trimmed
+        pendingReload = true
+        frontend.emit(.modelLifecycle(.loading("Model switch queued; will reload on next message.")))
+    }
+
     func requireLoadedModelContainer() throws -> ModelContainer {
         guard let modelContainer else {
             throw NSError(

@@ -103,6 +103,7 @@ public func runSwiftCoderTUISession(
     var lastUserPrompt: String?
     let workspaceRoot = URL(fileURLWithPath: FileManager.default.currentDirectoryPath).standardized.path
     var shouldQuit = false
+    var pendingTypedChunk = ""
 
     signal(SIGWINCH, SIG_IGN)
     let resizeSource = DispatchSource.makeSignalSource(signal: SIGWINCH, queue: .main)
@@ -119,6 +120,15 @@ public func runSwiftCoderTUISession(
     sigwinchSource = resizeSource
 
     mainLoop: for await key in InputHandler.keystrokes() {
+        if case .character(let ch) = key {
+            pendingTypedChunk.append(ch)
+            if pendingTypedChunk.count >= 32 || ch == "\n" || ch == "\r" {
+                await flushPendingTypedChunk(&pendingTypedChunk, renderer: renderer)
+            }
+            continue
+        } else {
+            await flushPendingTypedChunk(&pendingTypedChunk, renderer: renderer)
+        }
 
         // Approval intercept — when the agent has paused for a tool decision.
         if frontend.hasPendingApproval {
@@ -143,9 +153,8 @@ public func runSwiftCoderTUISession(
         }
 
         switch key {
-        case .character(let ch):
-            await renderer.appendChar(ch)
-            await renderer.renderFooter()
+        case .character:
+            break
 
         case .backspace, .delete:
             await renderer.deleteChar()
@@ -214,7 +223,8 @@ public func runSwiftCoderTUISession(
                 appConfig: frontend.appConfig,
                 agentLoop: agentLoop,
                 renderer: renderer,
-                reverse: false
+                reverse: false,
+                deferReload: true
             )
 
         case .shiftCtrlP:
@@ -222,18 +232,27 @@ public func runSwiftCoderTUISession(
                 appConfig: frontend.appConfig,
                 agentLoop: agentLoop,
                 renderer: renderer,
-                reverse: true
+                reverse: true,
+                deferReload: true
             )
-
-        case .ctrlV:
-            await pasteFromClipboard(renderer: renderer)
-            await renderer.renderFooter()
 
         case .paste(let pasted):
             await renderer.insertText(pasted)
             await renderer.renderFooter()
 
+        case .ctrlV:
+            await startVoiceInput(renderer: renderer)
+            await renderer.renderFooter()
+
+        case .altEnter, .shiftEnter:
+            await renderer.insertText("\n")
+            await renderer.renderFooter()
+
         case .enter:
+            if await renderer.convertBackslashToNewline() {
+                await renderer.renderFooter()
+                continue
+            }
             // Accept any pending ghost/autocomplete suggestion before submitting,
             // so "/q" + Enter expands to "/quit" and executes it.
             if await renderer.isAutocompleteActive() {
@@ -545,26 +564,21 @@ public func runSwiftCoderTUISession(
     pendingResizeTask?.cancel()
     sigwinchSource?.cancel()
     sigwinchSource = nil
+    await flushPendingTypedChunk(&pendingTypedChunk, renderer: renderer)
     await renderer.flushStreamLine()
     await renderer.teardownScreen()
 }
 
 @MainActor
-private func pasteFromClipboard(renderer: Renderer) async {
-    let process = Process()
-    process.executableURL = URL(fileURLWithPath: "/usr/bin/pbpaste")
-    let pipe = Pipe()
-    process.standardOutput = pipe
-    process.standardError = Pipe()
+private func startVoiceInput(renderer: Renderer) async {
     do {
-        try process.run()
-        process.waitUntilExit()
-        guard process.terminationStatus == 0 else { return }
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        guard let text = String(data: data, encoding: .utf8), !text.isEmpty else { return }
-        await renderer.insertText(text)
+        await renderer.printScrollLine("\(DesignSystem.dim)🎙️ Listening…\(DesignSystem.reset)")
+        let spoken = try await VoiceInput.transcribe()
+        if !spoken.isEmpty {
+            await renderer.insertText(spoken)
+        }
     } catch {
-        // Best effort: if clipboard access fails, keep input unchanged.
+        await renderer.printScrollLine("\(DesignSystem.brightRed)✗ Voice input failed: \(error.localizedDescription)\(DesignSystem.reset)")
     }
 }
 
@@ -575,6 +589,17 @@ private func normalizedCommandInput(from input: String) -> String {
         normalized = normalized.trimmingCharacters(in: .whitespacesAndNewlines)
     }
     return normalized
+}
+
+@MainActor
+private func flushPendingTypedChunk(_ pending: inout String, renderer: Renderer) async {
+    guard !pending.isEmpty else { return }
+    let normalized = pending
+        .replacingOccurrences(of: "\r\n", with: "\n")
+        .replacingOccurrences(of: "\r", with: "\n")
+    pending.removeAll(keepingCapacity: true)
+    await renderer.insertText(normalized)
+    await renderer.renderFooter()
 }
 
 private func modeIndex(
@@ -797,14 +822,23 @@ private func switchToModel(
     model: AppConfig.ModelConfig,
     index: Int,
     agentLoop: AgentLoop,
-    renderer: Renderer
+    renderer: Renderer,
+    deferReload: Bool = false
 ) async {
     let modelPath = localModelExists(model.id) ? model.id : "~/models/\(model.id)"
-    await renderer.printScrollLine("  Switching to \(model.label)…")
+    await renderer.printScrollLine(deferReload ? "  Queuing \(model.label)…" : "  Switching to \(model.label)…")
     do {
-        try await agentLoop.switchModel(to: modelPath)
+        if deferReload {
+            try await agentLoop.stageModelSwitch(to: modelPath)
+        } else {
+            try await agentLoop.switchModel(to: modelPath)
+        }
         await renderer.setCurrentModelIndex(index)
-        await renderer.printScrollLine("  Active model: \(model.label)")
+        if deferReload {
+            await renderer.printScrollLine("  Selected model: \(model.label) (reloads on next message)")
+        } else {
+            await renderer.printScrollLine("  Active model: \(model.label)")
+        }
         await renderer.renderFooter()
     } catch {
         await renderer.printScrollLine(
@@ -818,7 +852,8 @@ private func cycleModelShortcut(
     appConfig: AppConfig,
     agentLoop: AgentLoop,
     renderer: Renderer,
-    reverse: Bool
+    reverse: Bool,
+    deferReload: Bool
 ) async {
     guard !appConfig.models.isEmpty else {
         await renderer.printScrollLine("  No models configured.")
@@ -839,7 +874,8 @@ private func cycleModelShortcut(
         model: appConfig.models[targetIndex],
         index: targetIndex,
         agentLoop: agentLoop,
-        renderer: renderer
+        renderer: renderer,
+        deferReload: deferReload
     )
 }
 
