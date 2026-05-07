@@ -104,6 +104,7 @@ public func runSwiftCoderTUISession(
     let workspaceRoot = URL(fileURLWithPath: FileManager.default.currentDirectoryPath).standardized.path
     var shouldQuit = false
     var pendingTypedChunk = ""
+    var pendingTypedFlushTask: Task<Void, Never>? = nil
 
     signal(SIGWINCH, SIG_IGN)
     let resizeSource = DispatchSource.makeSignalSource(signal: SIGWINCH, queue: .main)
@@ -122,11 +123,21 @@ public func runSwiftCoderTUISession(
     mainLoop: for await key in InputHandler.keystrokes() {
         if case .character(let ch) = key {
             pendingTypedChunk.append(ch)
-            if pendingTypedChunk.count >= 32 || ch == "\n" || ch == "\r" {
+            if ch == "/" || pendingTypedChunk.count >= 32 || ch == "\n" || ch == "\r" {
+                pendingTypedFlushTask?.cancel()
                 await flushPendingTypedChunk(&pendingTypedChunk, renderer: renderer)
+            } else {
+                pendingTypedFlushTask?.cancel()
+                pendingTypedFlushTask = Task { @MainActor in
+                    try? await Task.sleep(nanoseconds: 12_000_000)
+                    guard !Task.isCancelled else { return }
+                    await flushPendingTypedChunk(&pendingTypedChunk, renderer: renderer)
+                    pendingTypedFlushTask = nil
+                }
             }
             continue
         } else {
+            pendingTypedFlushTask?.cancel()
             await flushPendingTypedChunk(&pendingTypedChunk, renderer: renderer)
         }
 
@@ -564,6 +575,7 @@ public func runSwiftCoderTUISession(
     pendingResizeTask?.cancel()
     sigwinchSource?.cancel()
     sigwinchSource = nil
+    pendingTypedFlushTask?.cancel()
     await flushPendingTypedChunk(&pendingTypedChunk, renderer: renderer)
     await renderer.flushStreamLine()
     await renderer.teardownScreen()
