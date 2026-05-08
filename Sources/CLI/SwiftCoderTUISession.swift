@@ -160,6 +160,38 @@ public func runSwiftCoderTUISession(
             continue
         }
 
+        // Option-select intercept — when the agent is waiting for the user to
+        // pick one of several options (e.g., git branch setup menu).
+        if frontend.hasPendingOptionSelect {
+            pendingTypedFlushTask?.cancel()
+            pendingTypedFlushTask = nil
+            pendingTypedChunk.removeAll(keepingCapacity: true)
+            let optionCount = await renderer.getOptionSelectOptionCount()
+            let escSelectsLast = await renderer.getOptionSelectEscSelectsLastOption()
+            switch key {
+            case .character(let ch):
+                if let digit = Int(String(ch)), (1...optionCount).contains(digit) {
+                    frontend.resolveOptionSelect(digit - 1)
+                }
+            case .enter:
+                let sel = await renderer.getOptionSelectSelection()
+                frontend.resolveOptionSelect(sel)
+            case .escape:
+                if escSelectsLast {
+                    frontend.resolveOptionSelect(optionCount - 1)
+                } else {
+                    frontend.resolveOptionSelect(nil)
+                }
+            case .arrowUp:
+                await renderer.moveOptionSelectSelection(offset: -1)
+            case .arrowDown:
+                await renderer.moveOptionSelectSelection(offset: 1)
+            default:
+                break
+            }
+            continue
+        }
+
         if case .character(let ch) = key {
             if ch == " " {
                 pendingTypedFlushTask?.cancel()

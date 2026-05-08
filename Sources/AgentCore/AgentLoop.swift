@@ -426,7 +426,7 @@ public actor AgentLoop {
                 "Continue without creating a branch"
             ]
 
-            guard let selected = await interactiveInput.selectOption(
+            guard let selected = await frontendSelectOption(
                 prompt: "Coding mode git setup",
                 options: setupOptions,
                 escSelectsLastOption: true
@@ -457,7 +457,7 @@ public actor AgentLoop {
                     return "\(branch) — \(normalizedPath)\(marker)"
                 }
 
-                guard let worktreeIndex = await interactiveInput.selectOption(
+                guard let worktreeIndex = await frontendSelectOption(
                     prompt: "Select existing worktree branch",
                     options: options,
                     escSelectsLastOption: true
@@ -544,6 +544,19 @@ public actor AgentLoop {
         if let warning, !warning.isEmpty {
             frontend.emitStatus("⚠️  Git setup warning: \(warning)")
         }
+    }
+
+    /// Bridges an option-select prompt through `frontend` so TUI mode shows the
+    /// picker in the renderer footer instead of using raw-terminal print calls.
+    func frontendSelectOption(
+        prompt: String,
+        options: [String],
+        escSelectsLastOption: Bool = false
+    ) async -> Int? {
+        let req = OptionSelectRequest(prompt: prompt, options: options, escSelectsLastOption: escSelectsLastOption)
+        let resp = await frontend.request(.optionSelect(req))
+        if case .optionSelect(let idx) = resp { return idx }
+        return nil
     }
 
     /// Checks for long context and triggers KV quantization if needed.

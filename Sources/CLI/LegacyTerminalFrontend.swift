@@ -167,7 +167,7 @@ public final class LegacyTerminalFrontend: AgentFrontend, @unchecked Sendable {
             return .approval(.deny(suggestion: nil))
 
         case .optionSelect(let req):
-            if let idx = await interactiveInput.selectOption(prompt: req.prompt, options: req.options) {
+            if let idx = await interactiveInput.selectOption(prompt: req.prompt, options: req.options, escSelectsLastOption: req.escSelectsLastOption) {
                 return .optionSelect(idx)
             }
             return .optionSelect(nil)

@@ -60,7 +60,7 @@ extension AgentLoop {
                 action = preselectedAction
             } else {
                 let actionOptions = ["Switch workspace to a worktree", "Delete local branch"]
-                let selectedAction = await interactiveInput.selectOption(
+                let selectedAction = await frontendSelectOption(
                     prompt: "Git tree actions",
                     options: actionOptions
                 )
@@ -75,7 +75,7 @@ extension AgentLoop {
             case .deleteBranch:
                 try await runBranchDeleteFlow(manager: manager, interactiveInput: interactiveInput)
             case .switchWorktree:
-                if let selected = await interactiveInput.selectOption(
+                if let selected = await frontendSelectOption(
                     prompt: "Select git worktree",
                     options: options
                 ) {
@@ -106,7 +106,7 @@ extension AgentLoop {
             branch == currentBranch ? "\(branch) (current)" : branch
         }
 
-        guard let selected = await interactiveInput.selectOption(
+        guard let selected = await frontendSelectOption(
             prompt: "Select local branch to delete",
             options: branchOptions,
             escSelectsLastOption: true
@@ -116,7 +116,7 @@ extension AgentLoop {
 
         let targetBranch = localBranches[selected]
         let deleteOptions = ["Delete safely (-d)", "Force delete (-D)", "Cancel"]
-        guard let deleteAction = await interactiveInput.selectOption(
+        guard let deleteAction = await frontendSelectOption(
             prompt: "Delete branch '\(targetBranch)'?",
             options: deleteOptions,
             escSelectsLastOption: true
@@ -182,7 +182,7 @@ extension AgentLoop {
             "Merge now (merge commit)",
             "Merge now (rebase)"
         ]
-        if let selected = await interactiveInput.selectOption(
+        if let selected = await frontendSelectOption(
             prompt: "Merge decision",
             options: mergeOptions
         ) {
@@ -251,7 +251,7 @@ extension AgentLoop {
         let options = allowSkip
             ? ["Use this message", "No, suggest changes (esc)", "Skip commit for now"]
             : ["Use this message", "No, suggest changes (esc)"]
-        if let selected = await interactiveInput.selectOption(
+        if let selected = await frontendSelectOption(
             prompt: "\(title) options",
             options: options,
             escSelectsLastOption: true

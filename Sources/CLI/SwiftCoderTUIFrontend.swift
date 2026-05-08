@@ -25,6 +25,8 @@ public final class SwiftCoderTUIFrontend: AgentFrontend, @unchecked Sendable {
 
     // Approval bridging — only one outstanding approval at a time.
     private var pendingApproval: CheckedContinuation<ApprovalDecision, Never>?
+    // Option-select bridging — only one outstanding picker at a time.
+    private var pendingOptionSelect: CheckedContinuation<Int?, Never>?
     private let lock = NSLock()
 
     // Spinner ticker — one task at a time, rendering 100ms ticks while a
@@ -94,11 +96,20 @@ public final class SwiftCoderTUIFrontend: AgentFrontend, @unchecked Sendable {
             return .approval(decision)
 
         case .optionSelect(let req):
-            await renderer.printScrollLine("? \(req.prompt)")
-            for (i, opt) in req.options.enumerated() {
-                await renderer.printScrollLine("  \(i + 1)) \(opt)")
+            let index: Int? = await withCheckedContinuation { cont in
+                lock.lock()
+                pendingOptionSelect = cont
+                lock.unlock()
+                Task {
+                    await renderer.requestOptionSelect(
+                        prompt: req.prompt,
+                        options: req.options,
+                        escSelectsLastOption: req.escSelectsLastOption
+                    )
+                }
             }
-            return .optionSelect(nil)
+            await renderer.clearOptionSelect()
+            return .optionSelect(index)
 
         case .textInput(let req):
             await renderer.printScrollLine("? \(req.prompt)")
@@ -119,6 +130,20 @@ public final class SwiftCoderTUIFrontend: AgentFrontend, @unchecked Sendable {
     public var hasPendingApproval: Bool {
         lock.lock(); defer { lock.unlock() }
         return pendingApproval != nil
+    }
+
+    /// Called by the session loop when the user picks an option.
+    public func resolveOptionSelect(_ index: Int?) {
+        lock.lock()
+        let cont = pendingOptionSelect
+        pendingOptionSelect = nil
+        lock.unlock()
+        cont?.resume(returning: index)
+    }
+
+    public var hasPendingOptionSelect: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return pendingOptionSelect != nil
     }
 
     // MARK: Event rendering

@@ -65,10 +65,14 @@ public struct OptionSelectRequest: Sendable {
     public let prompt: String
     public let options: [String]
     public let selectedIndex: Int
-    public init(prompt: String, options: [String], selectedIndex: Int = 0) {
+    /// When `true`, pressing Escape selects the **last** option instead of
+    /// cancelling — matches `InteractiveInput.selectOption(escSelectsLastOption:)`.
+    public let escSelectsLastOption: Bool
+    public init(prompt: String, options: [String], selectedIndex: Int = 0, escSelectsLastOption: Bool = false) {
         self.prompt = prompt
         self.options = options
         self.selectedIndex = selectedIndex
+        self.escSelectsLastOption = escSelectsLastOption
     }
 }
 
