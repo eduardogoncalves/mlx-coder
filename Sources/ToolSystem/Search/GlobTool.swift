@@ -12,6 +12,7 @@ public struct GlobTool: Tool {
         properties: [
             "pattern": PropertySchema(type: "string", description: "Glob pattern to match (e.g. '**/*.swift', 'Sources/**/*.swift')"),
             "path": PropertySchema(type: "string", description: "Directory to search in (relative to workspace root, default: '.')"),
+            "include_build_dirs": PropertySchema(type: "boolean", description: "Include build output / dependency cache directories (bin, obj, node_modules, .build, etc.). Default: false."),
         ],
         required: ["pattern"]
     )
@@ -30,6 +31,7 @@ public struct GlobTool: Tool {
         }
 
         let searchPath = arguments["path"] as? String ?? "."
+        let includeBuildDirs = arguments["include_build_dirs"] as? Bool ?? false
 
         let resolvedPath: String
         do {
@@ -38,10 +40,32 @@ public struct GlobTool: Tool {
             return .error(error.localizedDescription)
         }
 
-        // Use `find` command for glob matching since Foundation lacks glob traversal
+        // Translate ** glob syntax into find(1) arguments.
+        // find(1) uses -name (filename only) or -path (full path), neither
+        // of which supports **. We decompose the pattern into:
+        //   dirPart  — the directory prefix before ** (e.g. "src" from "src/**/*.cs")
+        //   namePart — the filename glob after ** (e.g. "*.cs")
+        // Then use: find <root> [-path "*/dirPart/*"] -name namePart
+        let (dirPart, namePart) = decompose(pattern: pattern)
+
+        var findArgs = [resolvedPath, "-type", "f"]
+
+        if let dir = dirPart, !dir.isEmpty {
+            findArgs += ["-path", "*/\(dir)/*"]
+        }
+        findArgs += ["-name", namePart]
+        findArgs += ["-not", "-path", "*/.*"]
+
+        // Exclude build output dirs via find -prune for efficiency when not requested.
+        if !includeBuildDirs {
+            for ignored in BuildOutputFilter.ignoredNames.sorted() {
+                findArgs += ["-not", "-path", "*/\(ignored)/*"]
+            }
+        }
+
         let process = Process()
         process.executableURL = URL(filePath: "/usr/bin/find")
-        process.arguments = [resolvedPath, "-name", pattern, "-not", "-path", "*/.*"]
+        process.arguments = findArgs
 
         let pipe = Pipe()
         process.standardOutput = pipe
@@ -77,5 +101,34 @@ public struct GlobTool: Tool {
             content: truncated.joined(separator: "\n"),
             truncationMarker: marker
         )
+    }
+
+    /// Splits a glob pattern into an optional directory prefix and a filename glob.
+    ///
+    /// Examples:
+    /// - `"**/*.cs"`          → (nil, "*.cs")
+    /// - `"**/Foo.cs"`        → (nil, "Foo.cs")
+    /// - `"src/**/*.cs"`      → ("src", "*.cs")
+    /// - `"a/b/**/*.swift"`   → ("a/b", "*.swift")
+    /// - `"*.cs"`             → (nil, "*.cs")
+    /// - `"src/*.cs"`         → ("src", "*.cs")
+    private func decompose(pattern: String) -> (dirPart: String?, namePart: String) {
+        if let starRange = pattern.range(of: "**") {
+            let before = String(pattern[pattern.startIndex..<starRange.lowerBound])
+                .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            let after = String(pattern[starRange.upperBound...])
+                .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            let name = after.isEmpty ? "*" : after
+            return (before.isEmpty ? nil : before, name)
+        }
+
+        if pattern.contains("/") {
+            let parts = pattern.components(separatedBy: "/")
+            let name = parts.last ?? pattern
+            let dir = parts.dropLast().joined(separator: "/")
+            return (dir.isEmpty ? nil : dir, name)
+        }
+
+        return (nil, pattern)
     }
 }
