@@ -132,14 +132,22 @@ public func runSwiftCoderTUISession(
             pendingTypedFlushTask?.cancel()
             pendingTypedFlushTask = nil
             pendingTypedChunk.removeAll(keepingCapacity: true)
+            let isPlanMode = await renderer.getApprovalIsPlanMode()
+            let optionCount = await renderer.getApprovalOptionCount()
             switch key {
             case .character(let ch):
-                if let digit = Int(String(ch)), (1...4).contains(digit) {
-                    frontend.resolveApproval(decisionForOption(digit - 1))
+                if let digit = Int(String(ch)), (1...optionCount).contains(digit) {
+                    let decision = isPlanMode
+                        ? planModeDecisionForOption(digit - 1)
+                        : decisionForOption(digit - 1)
+                    frontend.resolveApproval(decision)
                 }
             case .enter:
                 let sel = await renderer.getApprovalSelection()
-                frontend.resolveApproval(decisionForOption(sel))
+                let decision = isPlanMode
+                    ? planModeDecisionForOption(sel)
+                    : decisionForOption(sel)
+                frontend.resolveApproval(decision)
             case .escape:
                 frontend.resolveApproval(.deny(suggestion: nil))
             case .arrowUp:
@@ -710,6 +718,13 @@ private func decisionForOption(_ index: Int?) -> ApprovalDecision {
     case 1: return .allowAlwaysForCommand
     case 2: return .allowAllAutopilot
     case 3: return .deny(suggestion: nil)
+    default: return .deny(suggestion: nil)
+    }
+}
+
+private func planModeDecisionForOption(_ index: Int?) -> ApprovalDecision {
+    switch index {
+    case 0: return .switchToAgentAndAllow
     default: return .deny(suggestion: nil)
     }
 }

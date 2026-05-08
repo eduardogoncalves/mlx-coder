@@ -181,6 +181,12 @@ struct ChatCommand: AsyncParsableCommand {
             cacheLimit: budget.cacheBytes
         )
 
+        // Wire up raw-terminal approval UI for the legacy (non-TUI) path.
+        // The TUI path (SwiftCoderTUIFrontend) handles approvals via renderer.requestApproval.
+        frontend.approvalHandler = { request in
+            await agentLoop.rawTerminalApprovalInteraction(request: request)
+        }
+
         // Clear the 5 startup status lines to make the UI cleaner
         renderer.clearPreviousLines(count: 5)
 

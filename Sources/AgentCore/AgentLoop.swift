@@ -686,7 +686,7 @@ public actor AgentLoop {
             if mode == .plan {
                 approval = await askForToolApproval(name: call.name, arguments: call.arguments, isPlanMode: true)
                 if approval.approved {
-                    await setMode(.agent)
+                    await setMode(.agent, taskType: .coding)
                 }
             } else {
                 approval = await askForToolApproval(name: call.name, arguments: call.arguments, isPlanMode: false)

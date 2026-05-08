@@ -83,9 +83,10 @@ public final class SwiftCoderTUIFrontend: AgentFrontend, @unchecked Sendable {
                 pendingApproval = cont
                 lock.unlock()
                 Task {
-                    await renderer.requestApproval(
+                await renderer.requestApproval(
                         tool: req.toolName,
-                        args: req.display
+                        args: req.display,
+                        isPlanMode: req.isPlanModeBlock
                     )
                 }
             }
