@@ -885,7 +885,17 @@ extension AgentLoop {
         } else {
             urlHint = ""
         }
-        let preview = "[\(toolName): \(byteCount) chars\(urlHint) — content processed in background context]"
+        // Indicate if HTML parsing was applied
+        let parseHint: String
+        if toolName == "web_fetch" {
+            let textOnly = arguments["text_only"] as? Bool ?? false
+            // Heuristic: if the content doesn't contain HTML tags it was stripped
+            let contentLooksStripped = !result.content.contains("<") || textOnly
+            parseHint = contentLooksStripped ? " [HTML→text]" : ""
+        } else {
+            parseHint = ""
+        }
+        let preview = "[\(toolName): \(byteCount) chars\(urlHint)\(parseHint) — content processed in background context]"
         return ToolResultSnapshot(toolName: toolName, isError: false, content: preview, truncationMarker: nil)
     }
 }
