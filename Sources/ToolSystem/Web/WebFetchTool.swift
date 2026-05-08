@@ -172,6 +172,36 @@ extension WebFetchTool: ProgressReportingTool {
 
         let timeout = arguments["timeout"] as? Int ?? 15
 
+        // --- Cache lookup ---
+        let cache = WebFetchCache.shared
+
+        // If text_only and a pre-stripped copy exists, use it immediately
+        if textOnly, let cached = cache.textContent(for: urlString) {
+            reportProgress("cache hit (text) — skipping network request")
+            return buildResult(text: cached)
+        }
+
+        // If a raw copy exists, we can skip the network request entirely
+        if let cachedRaw = cache.rawContent(for: urlString) {
+            reportProgress("cache hit (raw) — skipping network request")
+            if textOnly {
+                let contentType = ""  // no HTTP headers available from cache
+                let isHTML = cachedRaw.prefix(512).lowercased().contains("<!doctype html")
+                    || cachedRaw.prefix(512).lowercased().contains("<html")
+                if isHTML {
+                    reportProgress("parsing HTML → extracting text")
+                    let stripped = HTMLTextExtractor.extract(from: cachedRaw)
+                    // Persist the stripped copy so next call is even faster
+                    cache.save(raw: cachedRaw, text: stripped, for: urlString)
+                    return try await resolveResult(
+                        text: stripped, query: query, reportProgress: reportProgress)
+                }
+            }
+            return try await resolveResult(
+                text: cachedRaw, query: query, reportProgress: reportProgress)
+        }
+
+        // --- Network fetch ---
         var request = URLRequest(url: url)
         request.timeoutInterval = TimeInterval(timeout)
         request.setValue("mlx-coder/0.1", forHTTPHeaderField: "User-Agent")
@@ -197,46 +227,55 @@ extension WebFetchTool: ProgressReportingTool {
 
             // Determine whether to strip HTML markup.
             // Strip when text_only is explicitly true AND the response is HTML.
-            // (Auto-detect HTML from Content-Type or content prefix.)
             let contentType = httpResponse.value(forHTTPHeaderField: "Content-Type") ?? ""
             let isHTML = contentType.lowercased().contains("text/html")
                 || rawText.prefix(512).lowercased().contains("<!doctype html")
                 || rawText.prefix(512).lowercased().contains("<html")
 
-            let text: String
+            let strippedText: String?
             if textOnly && isHTML {
                 reportProgress("parsing HTML → extracting text")
-                text = HTMLTextExtractor.extract(from: rawText)
+                strippedText = HTMLTextExtractor.extract(from: rawText)
             } else {
-                text = rawText
+                strippedText = nil
             }
 
-            // If a query is provided and we have the LLM container, run extraction
-            if let query = query, !query.isEmpty, let container = modelContainer, let config = generationConfig {
-                reportProgress("processing page content")
-                reportProgress("extracting relevant information")
-                let extracted = try await extractWithLLM(text: text, query: query, container: container, config: config)
-                reportProgress("finalizing result")
-                return .success("Extracted information for query '\(query)':\n\n\(extracted)")
-            }
+            // Persist to disk cache
+            reportProgress("saving to cache")
+            cache.save(raw: rawText, text: strippedText, for: urlString)
 
-            // Fallback to (possibly stripped) text
-            if text.count > maxOutputLength {
-                reportProgress("truncating long response")
-                let truncated = String(text.prefix(maxOutputLength))
-                let omitted = text.count - maxOutputLength
-                reportProgress("finalizing result")
-                return ToolResult(
-                    content: truncated,
-                    truncationMarker: "[... \(omitted) characters omitted ...]"
-                )
-            }
-
-            reportProgress("finalizing result")
-            return .success(text)
+            let text = strippedText ?? rawText
+            return try await resolveResult(text: text, query: query, reportProgress: reportProgress)
         } catch {
             return .error("Fetch failed: \(error.localizedDescription)")
         }
+    }
+
+    // Applies truncation limits to build the final ToolResult.
+    private func buildResult(text: String) -> ToolResult {
+        if text.count > maxOutputLength {
+            let truncated = String(text.prefix(maxOutputLength))
+            let omitted = text.count - maxOutputLength
+            return ToolResult(content: truncated, truncationMarker: "[... \(omitted) characters omitted ...]")
+        }
+        return .success(text)
+    }
+
+    // Runs optional LLM query extraction, then applies size limits.
+    private func resolveResult(
+        text: String,
+        query: String?,
+        reportProgress: @escaping ToolProgressHandler
+    ) async throws -> ToolResult {
+        if let query = query, !query.isEmpty, let container = modelContainer, let config = generationConfig {
+            reportProgress("processing page content")
+            reportProgress("extracting relevant information")
+            let extracted = try await extractWithLLM(text: text, query: query, container: container, config: config)
+            reportProgress("finalizing result")
+            return .success("Extracted information for query '\(query)':\n\n\(extracted)")
+        }
+        reportProgress("finalizing result")
+        return buildResult(text: text)
     }
 
     private func extractWithLLM(text: String, query: String, container: ModelContainer, config: GenerationEngine.Config) async throws -> String {
