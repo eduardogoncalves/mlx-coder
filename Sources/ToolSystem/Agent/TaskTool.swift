@@ -645,7 +645,7 @@ public struct TaskTool: Tool {
         case "todo":
             await registry.register(TodoTool(workspaceRoot: permissions.workspaceRoot))
         case "project_expert_lora":
-            await registry.register(ProjectExpertLoRATool(modelContainer: modelContainer, workspaceRoot: permissions.workspaceRoot, modelPath: modelPath))
+            await registry.register(ProjectExpertLoRATool(modelContainer: modelContainer, workspaceRoot: permissions.workspaceRoot, modelPath: modelPath, frontend: frontend))
         case "web_fetch":
             await registry.register(WebFetchTool(modelContainer: modelContainer, generationConfig: generationConfig))
         case "web_search":

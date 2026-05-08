@@ -271,6 +271,7 @@ struct ChatCommand: AsyncParsableCommand {
             let tuiRenderer = Renderer(config: tuiAppConfig, terminal: ProcessTerminal())
             let tuiFrontend = SwiftCoderTUIFrontend(renderer: tuiRenderer, appConfig: tuiAppConfig)
             await agentLoop.swapFrontend(tuiFrontend)
+            await CancelController.shared.setPrintHandler { _ in } // TUI owns the terminal
             await runSwiftCoderTUISession(
                 agentLoop: agentLoop,
                 frontend: tuiFrontend,

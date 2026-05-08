@@ -44,7 +44,7 @@ func registerAllTools(
         frontend: frontend
     ))
     await registry.register(TodoTool(workspaceRoot: permissions.workspaceRoot))
-    await registry.register(ProjectExpertLoRATool(modelContainer: modelContainer, workspaceRoot: permissions.workspaceRoot, modelPath: modelPath))
+    await registry.register(ProjectExpertLoRATool(modelContainer: modelContainer, workspaceRoot: permissions.workspaceRoot, modelPath: modelPath, frontend: frontend))
 
     // Web tools
     await registry.register(WebFetchTool(

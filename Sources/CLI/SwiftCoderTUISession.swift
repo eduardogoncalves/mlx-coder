@@ -647,7 +647,6 @@ public func runSwiftCoderTUISession(
 @MainActor
 private func startVoiceInput(renderer: Renderer) async {
     do {
-        await renderer.printScrollLine("\(DesignSystem.dim)🎙️ Listening…\(DesignSystem.reset)")
         let spoken = try await VoiceInput.transcribe()
         if !spoken.isEmpty {
             await renderer.insertText(spoken)
