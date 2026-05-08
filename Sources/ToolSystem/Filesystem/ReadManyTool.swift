@@ -15,6 +15,7 @@ public struct ReadManyTool: Tool {
                 description: "Array of file paths to read (relative to workspace root)",
                 items: PropertySchema(type: "string")
             ),
+            "include_build_dirs": PropertySchema(type: "boolean", description: "If true, allow reading files inside build-output or dependency-cache directories such as bin, obj, node_modules, __pycache__, .build, target, etc. (default: false)"),
         ],
         required: ["paths"]
     )
@@ -36,10 +37,17 @@ public struct ReadManyTool: Tool {
             return .error("paths array is empty")
         }
 
+        let includeBuildDirs = arguments["include_build_dirs"] as? Bool ?? false
+
         var results: [String] = []
         var totalOmitted = 0
 
         for path in paths {
+            if !includeBuildDirs, let matched = BuildOutputFilter.matchedComponent(in: path) {
+                results.append("=== \(path) ===\nSKIPPED: inside build-output directory '\(matched)'. Use include_build_dirs: true to read.")
+                continue
+            }
+
             let resolvedPath: String
             do {
                 resolvedPath = try permissions.validatePath(path)
