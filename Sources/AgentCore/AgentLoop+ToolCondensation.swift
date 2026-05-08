@@ -24,8 +24,10 @@ extension AgentLoop {
         )
 
         // Some checkpoints are unstable when invoked for secondary summarization
-        // passes after file-read tools. Use bounded raw fallback directly.
-        let nonLLMCondensationTools: Set<String> = ["read_file", "read_many"]
+        // passes after file-read tools or web tools. Use bounded raw fallback directly
+        // to avoid re-entrant MLX model invocations that corrupt the KV-cache state
+        // and cause empty-tensor crashes on the next generation turn.
+        let nonLLMCondensationTools: Set<String> = ["read_file", "read_many", "web_fetch", "web_search"]
         if nonLLMCondensationTools.contains(toolName) {
             let fallback = ToolResultCondensationPolicy.boundedFallbackRawMessage(
                 toolName: toolName,
