@@ -21,6 +21,7 @@ extension AgentLoop {
             mode: mode,
             thinkingLevel: thinkingLevel,
             taskType: self.taskType,
+            workspaceRoot: permissions.effectiveWorkspaceRoot,
             memorySection: memoryPromptSection,
             customizationSection: customizationPromptSection,
             skillsMetadata: skillsMetadata
@@ -54,6 +55,7 @@ extension AgentLoop {
             mode: mode,
             thinkingLevel: thinkingLevel,
             taskType: self.taskType,
+            workspaceRoot: permissions.effectiveWorkspaceRoot,
             memorySection: memoryPromptSection,
             customizationSection: customizationPromptSection,
             skillsMetadata: skillsMetadata
@@ -84,6 +86,7 @@ extension AgentLoop {
             mode: mode,
             thinkingLevel: level,
             taskType: taskType,
+            workspaceRoot: permissions.effectiveWorkspaceRoot,
             memorySection: memoryPromptSection,
             customizationSection: customizationPromptSection,
             skillsMetadata: skillsMetadata
@@ -147,6 +150,7 @@ extension AgentLoop {
             mode: self.mode,
             thinkingLevel: self.thinkingLevel,
             taskType: self.taskType,
+            workspaceRoot: permissions.effectiveWorkspaceRoot,
             memorySection: memoryPromptSection,
             customizationSection: customizationPromptSection,
             skillsMetadata: skillsMetadata

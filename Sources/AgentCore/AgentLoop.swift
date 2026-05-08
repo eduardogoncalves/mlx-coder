@@ -692,11 +692,12 @@ public actor AgentLoop {
         
         // Check if tool is allowed in current mode
         let isDestructive = isDestructiveToolCall(call)
+        let allowReadOnlyBashInPlanMode = mode == .plan && isReadOnlyBashCall(call)
         
         let approval: (approved: Bool, suggestion: String?)
         if isDestructive {
-            await hooks.emit(.permissionRequest(toolName: call.name, isPlanMode: mode == .plan))
-            if mode == .plan {
+            await hooks.emit(.permissionRequest(toolName: call.name, isPlanMode: mode == .plan && !allowReadOnlyBashInPlanMode))
+            if mode == .plan && !allowReadOnlyBashInPlanMode {
                 approval = await askForToolApproval(name: call.name, arguments: call.arguments, isPlanMode: true)
                 if approval.approved {
                     await setMode(.agent, taskType: .coding)

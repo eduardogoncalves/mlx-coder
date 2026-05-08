@@ -12,6 +12,7 @@ extension AgentLoop {
         mode: WorkingMode = .agent,
         thinkingLevel: ThinkingLevel = .high,
         taskType: TaskType = .general,
+        workspaceRoot: String? = nil,
         baseInstructions: String? = nil,
         memorySection: String? = nil,
         customizationSection: String? = nil,
@@ -45,9 +46,11 @@ extension AgentLoop {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withDashSeparatorInDate, .withColonSeparatorInTime]
         let dateString = formatter.string(from: now)
+        let currentWorkdir = workspaceRoot ?? FileManager.default.currentDirectoryPath
         
         let runtimeSection = """
         Current time: \(dateString)
+        Current workdir (workspace): \(currentWorkdir)
 
         When you need to use a tool, respond with the tool call in this format:
         \(ToolCallPattern.toolCallOpen)
@@ -99,6 +102,7 @@ extension AgentLoop {
         mode: WorkingMode = .agent,
         thinkingLevel: ThinkingLevel = .high,
         taskType: TaskType = .general,
+        workspaceRoot: String? = nil,
         baseInstructions: String? = nil,
         memorySection: String? = nil,
         customizationSection: String? = nil,
@@ -110,6 +114,7 @@ extension AgentLoop {
             mode: mode,
             thinkingLevel: thinkingLevel,
             taskType: taskType,
+            workspaceRoot: workspaceRoot,
             baseInstructions: baseInstructions,
             memorySection: memorySection,
             customizationSection: customizationSection,

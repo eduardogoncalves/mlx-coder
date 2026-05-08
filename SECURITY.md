@@ -137,6 +137,7 @@ This project has implemented fixes for the following vulnerability categories.
 ### Sandbox Functionality
 - Seatbelt sandboxing works on macOS 10.5+
 - Default sandbox profile allows network access for AI tooling flexibility; set `networkPolicy: .deny` on `SandboxEngine` to block outbound connections for offline workloads
+- Default profile keeps a write-deny baseline and grants explicit write access only to workspace/temp paths, `/dev/null` + `/dev/tty`, and selected package/tool caches (NuGet, npm/pnpm/yarn, cargo, Maven/Gradle, Go, SwiftPM, Python pip/uv)
 - More restrictive profiles can be implemented if needed
 
 ## Responsible Disclosure

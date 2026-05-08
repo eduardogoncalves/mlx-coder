@@ -13,6 +13,7 @@ public struct ListDirTool: Tool {
             "path": PropertySchema(type: "string", description: "Path to the directory to list (relative to workspace root)"),
             "recursive": PropertySchema(type: "boolean", description: "If true, list contents recursively (default: false)"),
             "max_depth": PropertySchema(type: "integer", description: "Maximum recursion depth (default: 3)"),
+            "include_hidden": PropertySchema(type: "boolean", description: "If true, include hidden files/directories (default: true)"),
             "include_build_dirs": PropertySchema(type: "boolean", description: "If true, include build-output and dependency-cache directories such as bin, obj, node_modules, __pycache__, .build, target, etc. (default: false)"),
         ],
         required: ["path"]
@@ -33,6 +34,7 @@ public struct ListDirTool: Tool {
 
         let recursive = arguments["recursive"] as? Bool ?? false
         let maxDepth = max(0, arguments["max_depth"] as? Int ?? 3)
+        let includeHidden = arguments["include_hidden"] as? Bool ?? true
         let includeBuildDirs = arguments["include_build_dirs"] as? Bool ?? false
 
         let resolvedPath: String
@@ -62,8 +64,7 @@ public struct ListDirTool: Tool {
             for item in contents.sorted() {
                 guard entries.count < maxEntries else { break }
 
-                // Skip hidden files
-                if item.hasPrefix(".") && !BuildOutputFilter.ignoredNames.contains(item) { continue }
+                if !includeHidden && item.hasPrefix(".") { continue }
 
                 let fullPath = (dirPath as NSString).appendingPathComponent(item)
                 

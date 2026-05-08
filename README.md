@@ -206,6 +206,17 @@ mlx-coder doctor --strict --json
 | `--voice-silence-timeout` | `2.0` | Seconds of silence before voice recording stops automatically |
 | `--voice-locale` | device locale | BCP 47 locale tag for speech recognition, e.g. `en-US`, `fr-FR` |
 
+### Sandbox default profile (balanced)
+
+When sandbox mode is enabled, shell commands run with:
+
+- default write deny (`deny file-write*`)
+- explicit write allows for workspace, temp dirs, and common package/tool caches
+- explicit device access for `/dev/null` and `/dev/tty` (required by git and many CLIs)
+- network allowed by default (can be disabled via `SandboxEngine(networkPolicy: .deny)`)
+
+Common cache/tool paths covered include NuGet, npm/pnpm/yarn, cargo, Maven/Gradle, Go module/bin dirs, SwiftPM, and Python pip/uv caches.
+
 ## Interactive Commands
 
 Inside `mlx-coder chat`, these session commands are available:

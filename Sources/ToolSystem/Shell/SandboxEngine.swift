@@ -45,11 +45,31 @@ public struct SandboxEngine: Sendable {
         let escapedWorkspaceRoot = escapeForProfileString(canonicalWorkspaceRoot)
 
         let home = FileManager.default.homeDirectoryForCurrentUser.path
+        // Balanced developer baseline:
+        // Explicit writable subpaths for common package managers/toolchains,
+        // while keeping broad home-directory writes denied.
         let packageCachePaths: [String] = [
+            // .NET / NuGet
             "\(home)/.local/share/NuGet",
             "\(home)/.nuget",
+            // Node.js ecosystem
             "\(home)/.npm",
+            "\(home)/.pnpm-store",
+            "\(home)/.yarn",
+            // Rust
             "\(home)/.cargo",
+            // Java / Kotlin (Maven + Gradle)
+            "\(home)/.m2",
+            "\(home)/.gradle",
+            // Go modules / installed binaries
+            "\(home)/go/pkg/mod",
+            "\(home)/go/bin",
+            // Swift package metadata/cache
+            "\(home)/.swiftpm",
+            // Python tooling caches
+            "\(home)/.cache/pip",
+            "\(home)/.cache/uv",
+            // General caches (kept for compatibility with existing behavior)
             "\(home)/.cache",
             "\(home)/Library/Caches",
         ]

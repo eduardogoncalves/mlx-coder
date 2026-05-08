@@ -164,6 +164,7 @@ struct RunCommand: AsyncParsableCommand {
             mode: .plan,
             thinkingLevel: .low,
             taskType: .general,
+            workspaceRoot: absWorkspace,
             skillsMetadata: skillMetadata
         )
 

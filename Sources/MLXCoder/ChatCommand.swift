@@ -156,6 +156,7 @@ struct ChatCommand: AsyncParsableCommand {
             mode: .plan,
             thinkingLevel: .low,
             taskType: .general,
+            workspaceRoot: absWorkspace,
             memorySection: memorySection,
             skillsMetadata: skillMetadata
         )

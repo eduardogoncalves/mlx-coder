@@ -22,4 +22,17 @@ final class SandboxEngineTests: XCTestCase {
 
         XCTAssertTrue(wrapped.contains("(subpath \"\(canonical)\")"))
     }
+
+    func testProfileIncludesBalancedDeveloperCachePaths() {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let engine = SandboxEngine()
+        let wrapped = engine.wrap(command: "true", workspaceRoot: "/tmp/workspace")
+
+        XCTAssertTrue(wrapped.contains("(subpath \"\(home)/.pnpm-store\")"))
+        XCTAssertTrue(wrapped.contains("(subpath \"\(home)/.gradle\")"))
+        XCTAssertTrue(wrapped.contains("(subpath \"\(home)/.m2\")"))
+        XCTAssertTrue(wrapped.contains("(subpath \"\(home)/go/pkg/mod\")"))
+        XCTAssertTrue(wrapped.contains("(subpath \"\(home)/.swiftpm\")"))
+        XCTAssertTrue(wrapped.contains("(subpath \"\(home)/.cache/uv\")"))
+    }
 }
