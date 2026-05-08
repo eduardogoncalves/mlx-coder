@@ -27,7 +27,9 @@ extension AgentLoop {
         // passes after file-read tools or web tools. Use bounded raw fallback directly
         // to avoid re-entrant MLX model invocations that corrupt the KV-cache state
         // and cause empty-tensor crashes on the next generation turn.
-        let nonLLMCondensationTools: Set<String> = ["read_file", "read_many", "web_fetch", "web_search"]
+        // bash/task are included for the same reason: large shell output (e.g. dotnet
+        // package restore) triggers LLM summarization mid-turn, corrupting KV state.
+        let nonLLMCondensationTools: Set<String> = ["read_file", "read_many", "web_fetch", "web_search", "bash", "task"]
         if nonLLMCondensationTools.contains(toolName) {
             let fallback = ToolResultCondensationPolicy.boundedFallbackRawMessage(
                 toolName: toolName,

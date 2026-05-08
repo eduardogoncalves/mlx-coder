@@ -56,6 +56,28 @@ extension AgentLoop {
         // Prompt preparation starts before inference/token streaming.
         frontend.emit(.tokenProcessingActivity(.started))
 
+        // Pre-generation safety guard: if the formatted context exceeds the practical
+        // safe limit for MLX tensor allocation, throw a *recoverable* error rather
+        // than letting the C++ reshape assertion fire (which calls fatalError and kills
+        // the process).  The caller's retry loop will trigger context compaction.
+        //
+        // Threshold: 400 000 chars ≈ 100 000 tokens at ~4 chars/token — well above any
+        // model's real context window.  A context this large means something slipped
+        // past the condensation and compaction layers.
+        let maxSafeContextChars = 400_000
+        guard chatML.count <= maxSafeContextChars else {
+            frontend.emit(.tokenProcessingActivity(.ended))
+            throw NSError(
+                domain: "AgentLoop",
+                code: 9,
+                userInfo: [
+                    NSLocalizedDescriptionKey:
+                        "Context too large (\(chatML.count) chars, limit \(maxSafeContextChars)). " +
+                        "Compaction will run before the next attempt."
+                ]
+            )
+        }
+
         let result = try await modelContainer.perform { [currentGenerationConfig, frontend, chatML, imageURLs, vlmMessageData, vlmLastUserIndex, shouldUseProcessorPath, isVLM] context in
             if Task.isCancelled { throw CancellationError() }
 

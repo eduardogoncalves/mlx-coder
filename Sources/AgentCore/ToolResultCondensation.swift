@@ -120,6 +120,26 @@ enum ToolResultCondensationPolicy {
 
     static func boundedFallbackRawMessage(toolName: String, raw: String, maxChars: Int) -> String {
         guard raw.count > maxChars else { return raw }
+
+        // For shell tools keep the TAIL: exit status, errors, and final results always
+        // appear at the end of command output.  Use a generous cap so build errors are
+        // never silently dropped.
+        let shellTools: Set<String> = ["bash", "task"]
+        if shellTools.contains(toolName) {
+            let bashMaxChars = max(maxChars, 8_000)
+            if raw.count <= bashMaxChars {
+                return raw
+            }
+            let kept = String(raw.suffix(bashMaxChars))
+            let omitted = raw.count - bashMaxChars
+            return """
+            [Tool output truncated — showing last \(bashMaxChars) chars]
+            Tool: \(toolName)
+            [... \(omitted) characters omitted ...]
+            \(kept)
+            """
+        }
+
         let kept = String(raw.prefix(maxChars))
         let omitted = raw.count - maxChars
         return """
