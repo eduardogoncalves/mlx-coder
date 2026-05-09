@@ -58,7 +58,9 @@ final class WebFetchCacheTests: XCTestCase {
     func testCacheDirectoryIsOwnerOnly() throws {
         let cacheDir = FileManager.default.temporaryDirectory.appendingPathComponent("mlx-coder-webcache", isDirectory: true)
         let cache = WebFetchCache.shared
-        _ = cache.rawURL(for: testURL)
+        let cachedRawURL = cache.rawURL(for: testURL)
+        XCTAssertTrue(cachedRawURL.path.hasSuffix(".raw"))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: cacheDir.path))
         let attrs = try FileManager.default.attributesOfItem(atPath: cacheDir.path)
         let perms = attrs[.posixPermissions] as? NSNumber
         XCTAssertEqual(perms?.intValue, 0o700)

@@ -143,17 +143,7 @@ public struct CodeSearchTool: Tool {
         process.executableURL = URL(filePath: "/usr/bin/find")
 
         var arguments = [resolvedPath]
-        let prunedDirectoryNames = [".git"] + Array(BuildOutputFilter.ignoredNames)
-        if !prunedDirectoryNames.isEmpty {
-            arguments.append("(")
-            for (index, name) in prunedDirectoryNames.enumerated() {
-                if index > 0 {
-                    arguments.append("-o")
-                }
-                arguments.append(contentsOf: ["-type", "d", "-name", name])
-            }
-            arguments.append(contentsOf: [")", "-prune", "-o"])
-        }
+        arguments.append(contentsOf: findPruneArguments())
         arguments.append(contentsOf: ["-type", "f"])
         if let language, let ext = languageExtension(language) {
             arguments.append(contentsOf: ["-name", "*.\(ext)"])
@@ -183,6 +173,21 @@ public struct CodeSearchTool: Tool {
                 let pathPart = String(line.split(separator: ":", maxSplits: 1).first ?? "")
                 return !permissions.isPathIgnored(pathPart) && !BuildOutputFilter.isBuildOutput(path: pathPart)
             }
+    }
+
+    private func findPruneArguments() -> [String] {
+        let prunedDirectoryNames = [".git"] + Array(BuildOutputFilter.ignoredNames)
+        guard !prunedDirectoryNames.isEmpty else { return [] }
+
+        var arguments = ["("]
+        for (index, name) in prunedDirectoryNames.enumerated() {
+            if index > 0 {
+                arguments.append("-o")
+            }
+            arguments.append(contentsOf: ["-type", "d", "-name", name])
+        }
+        arguments.append(contentsOf: [")", "-prune", "-o"])
+        return arguments
     }
 
     private func relativizeGrepLine(_ line: String) -> String {
