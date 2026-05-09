@@ -1,10 +1,10 @@
 // Sources/ToolSystem/Web/WebFetchCache.swift
-// Disk-based cache for web_fetch responses stored under /tmp.
+// Disk-based cache for web_fetch responses stored under the system temp directory.
 
 import CryptoKit
 import Foundation
 
-/// Caches raw and HTML-stripped responses under `/tmp/mlx-coder-webcache/`.
+/// Caches raw and HTML-stripped responses under `<system-temp>/mlx-coder-webcache/`.
 ///
 /// Two variants are stored per URL:
 /// - `<hash>.raw`  — original network response (UTF-8 text)
@@ -22,7 +22,7 @@ struct WebFetchCache {
 
     private static let cacheDir: URL = {
         let fileManager = FileManager.default
-        let dir = URL(fileURLWithPath: "/tmp/mlx-coder-webcache", isDirectory: true)
+        let dir = fileManager.temporaryDirectory.appendingPathComponent("mlx-coder-webcache", isDirectory: true)
         do {
             if fileManager.fileExists(atPath: dir.path) {
                 try fileManager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: dir.path)

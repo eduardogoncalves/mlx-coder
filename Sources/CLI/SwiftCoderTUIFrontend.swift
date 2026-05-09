@@ -82,19 +82,10 @@ public final class SwiftCoderTUIFrontend: AgentFrontend, @unchecked Sendable {
         case .approval(let req):
             let decision: ApprovalDecision = await withTaskCancellationHandler(operation: {
                 await withCheckedContinuation { cont in
-                    lock.lock()
-                    if pendingApproval != nil {
-                        lock.unlock()
+                    guard registerPendingApproval(cont) else {
                         cont.resume(returning: .deny(suggestion: nil))
                         return
                     }
-                    if Task.isCancelled {
-                        lock.unlock()
-                        cont.resume(returning: .deny(suggestion: nil))
-                        return
-                    }
-                    pendingApproval = cont
-                    lock.unlock()
                     Task {
                         await renderer.requestApproval(
                             tool: req.toolName,
@@ -112,19 +103,10 @@ public final class SwiftCoderTUIFrontend: AgentFrontend, @unchecked Sendable {
         case .optionSelect(let req):
             let index: Int? = await withTaskCancellationHandler(operation: {
                 await withCheckedContinuation { cont in
-                    lock.lock()
-                    if pendingOptionSelect != nil {
-                        lock.unlock()
+                    guard registerPendingOptionSelect(cont) else {
                         cont.resume(returning: nil)
                         return
                     }
-                    if Task.isCancelled {
-                        lock.unlock()
-                        cont.resume(returning: nil)
-                        return
-                    }
-                    pendingOptionSelect = cont
-                    lock.unlock()
                     Task {
                         await renderer.requestOptionSelect(
                             prompt: req.prompt,
@@ -172,6 +154,22 @@ public final class SwiftCoderTUIFrontend: AgentFrontend, @unchecked Sendable {
     public var hasPendingOptionSelect: Bool {
         lock.lock(); defer { lock.unlock() }
         return pendingOptionSelect != nil
+    }
+
+    private func registerPendingApproval(_ cont: CheckedContinuation<ApprovalDecision, Never>) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard pendingApproval == nil, !Task.isCancelled else { return false }
+        pendingApproval = cont
+        return true
+    }
+
+    private func registerPendingOptionSelect(_ cont: CheckedContinuation<Int?, Never>) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard pendingOptionSelect == nil, !Task.isCancelled else { return false }
+        pendingOptionSelect = cont
+        return true
     }
 
     private func cancelPendingApproval() {

@@ -45,6 +45,8 @@ enum AtFileReferenceExpander {
 
             var rawPath = String(token.dropFirst())
             // Strip trailing punctuation (e.g. period at end of sentence).
+            // Note: trailing "." is intentionally trimmed so "@file.swift." is
+            // resolved as "@file.swift" in prose.
             while let last = rawPath.last,
                   last.isPunctuation,
                   !["-", "_", "/"].contains(last) {
