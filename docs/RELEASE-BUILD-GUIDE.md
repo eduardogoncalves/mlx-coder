@@ -13,7 +13,7 @@ All artifacts are written to the `releases/` directory.
 
 ## Prerequisites
 
-- macOS 14+
+- macOS 15+
 - Xcode 16+ command line tooling (`xcodebuild`, `pkgbuild`, `pkgutil`)
 
 ## Local Build

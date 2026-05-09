@@ -16,9 +16,9 @@ mlx-coder is built to run local LLM workflows on macOS with a native MLX app arc
 
 ## Requirements
 
-- **macOS 14+** (Sonoma or later)
+- **macOS 15+** (Sequoia or later)
 - **Apple Silicon** (M1 or later)
-- **Swift 5.12+** / Xcode 16+
+- **Swift 6.3.1** / Xcode 16.4+
 - A local MLX model directory (default: `~/models/Qwen/Qwen3.5-9B-4bit`)
 
 ## Building
@@ -86,6 +86,14 @@ Start an interactive session:
 ```bash
 mlx-coder chat
 ```
+
+Experimental TUI mode is also available:
+
+```bash
+mlx-coder chat --ui tui
+```
+
+The TUI interface is still experimental and may change between releases.
 
 With custom options:
 
