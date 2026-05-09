@@ -80,13 +80,13 @@ extension AgentLoop {
 
         let result = try await modelContainer.perform { [currentGenerationConfig, frontend, chatML, imageURLs, vlmMessageData, vlmLastUserIndex, shouldUseProcessorPath, isVLM] context in
             if Task.isCancelled { throw CancellationError() }
-            var didEmitTokenProcessingEnded = false
-            var didEmitGenerationStarted = false
+            var tokenProcessingEnded = false
+            var generationStarted = false
             defer {
-                if didEmitGenerationStarted {
+                if generationStarted {
                     frontend.emit(.generationActivity(.ended))
                 }
-                if !didEmitTokenProcessingEnded {
+                if !tokenProcessingEnded {
                     frontend.emit(.tokenProcessingActivity(.ended))
                 }
             }
@@ -177,9 +177,9 @@ extension AgentLoop {
                 startsThinking: enableThinking
             )
             frontend.emit(.tokenProcessingActivity(.ended))
-            didEmitTokenProcessingEnded = true
+            tokenProcessingEnded = true
             frontend.emit(.generationActivity(.started))
-            didEmitGenerationStarted = true
+            generationStarted = true
             var hasOpenThinkingActivity = false
 
             func beginThinkingIfNeeded() {
