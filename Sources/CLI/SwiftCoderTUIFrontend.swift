@@ -10,6 +10,8 @@ import SwiftCoderTUI
 
 public final class SwiftCoderTUIFrontend: AgentFrontend, @unchecked Sendable {
     // Keep memory bounded if rendering lags behind generation bursts.
+    // 4096 provides a generous burst window for event-heavy responses while
+    // still preventing unbounded growth from long-running sessions.
     private static let renderQueueCapacity = 4096
 
     private enum RenderCommand: Sendable {

@@ -43,15 +43,7 @@ enum AtFileReferenceExpander {
         for token in tokens {
             guard token.hasPrefix("@") else { continue }
 
-            var rawPath = String(token.dropFirst())
-            // Strip trailing punctuation (e.g. period at end of sentence).
-            // Note: trailing "." is intentionally trimmed so "@file.swift." is
-            // resolved as "@file.swift" in prose.
-            while let last = rawPath.last,
-                  last.isPunctuation,
-                  !["-", "_", "/"].contains(last) {
-                rawPath = String(rawPath.dropLast())
-            }
+            let rawPath = trimTrailingTokenPunctuation(String(token.dropFirst()))
             guard !rawPath.isEmpty else { continue }
 
             let expandedPath = NSString(string: rawPath).expandingTildeInPath
@@ -100,5 +92,18 @@ enum AtFileReferenceExpander {
         }
 
         return result.trimmingCharacters(in: .newlines)
+    }
+
+    private static func trimTrailingTokenPunctuation(_ path: String) -> String {
+        var result = path
+        // Strip sentence punctuation from the token boundary.
+        // Note: trailing "." is intentionally trimmed so "@file.swift." is
+        // resolved as "@file.swift" in prose.
+        while let last = result.last,
+              last.isPunctuation,
+              !["-", "_", "/"].contains(last) {
+            result.removeLast()
+        }
+        return result
     }
 }

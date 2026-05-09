@@ -34,7 +34,7 @@ struct WebFetchCache {
                 )
             }
         } catch {
-            fputs("warning: unable to initialize secure web cache at \(dir.path): \(error.localizedDescription)\n", stderr)
+            fputs("warning: unable to initialize web cache directory at \(dir.path): \(error.localizedDescription)\n", stderr)
             let fallback = fileManager.temporaryDirectory
                 .appendingPathComponent("mlx-coder-webcache-fallback-\(UUID().uuidString)", isDirectory: true)
             try? fileManager.createDirectory(
