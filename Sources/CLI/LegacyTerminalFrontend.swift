@@ -127,7 +127,11 @@ public final class LegacyTerminalFrontend: AgentFrontend, @unchecked Sendable {
             case .progress(let m):        renderer.printStatus(m)
             case .passed:                 renderer.printStatus("✅ Build check passed - ready for commit!")
             case .failed(let count, let firsts):
-                renderer.printError("Build check failed with \(count) error(s)")
+                if let count {
+                    renderer.printError("Build check failed with \(count) error(s)")
+                } else {
+                    renderer.printError("Build check failed (error count unavailable)")
+                }
                 for line in firsts { renderer.printStatus(line) }
             case .warning(let m):         renderer.printStatus("⚠️  \(m)")
             }

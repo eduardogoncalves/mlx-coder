@@ -30,7 +30,7 @@ extension AgentLoop {
                 "Build has errors that need manual fixing",
                 "Use build_check tool for detailed error information, then fix and commit.",
             ]
-            frontend.emit(.buildCheck(.failed(errorCount: firstErrors.count, firstErrors: firstErrors)))
+            frontend.emit(.buildCheck(.failed(errorCount: nil, firstErrors: firstErrors)))
         }
     }
 

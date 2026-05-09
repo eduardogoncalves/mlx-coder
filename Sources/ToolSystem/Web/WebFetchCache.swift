@@ -23,14 +23,18 @@ struct WebFetchCache {
     private static let cacheDir: URL = {
         let fileManager = FileManager.default
         let dir = URL(fileURLWithPath: "/tmp/mlx-coder-webcache", isDirectory: true)
-        if fileManager.fileExists(atPath: dir.path) {
-            try? fileManager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: dir.path)
-        } else {
-            try? fileManager.createDirectory(
-                at: dir,
-                withIntermediateDirectories: true,
-                attributes: [.posixPermissions: 0o700]
-            )
+        do {
+            if fileManager.fileExists(atPath: dir.path) {
+                try fileManager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: dir.path)
+            } else {
+                try fileManager.createDirectory(
+                    at: dir,
+                    withIntermediateDirectories: true,
+                    attributes: [.posixPermissions: 0o700]
+                )
+            }
+        } catch {
+            fatalError("Unable to initialize web cache directory securely: \(error.localizedDescription)")
         }
         return dir
     }()

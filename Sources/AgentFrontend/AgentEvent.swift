@@ -164,7 +164,7 @@ public enum BuildCheckEvent: Sendable {
     case started(message: String)
     case progress(String)
     case passed
-    case failed(errorCount: Int, firstErrors: [String])
+    case failed(errorCount: Int?, firstErrors: [String])
     case warning(String)
 }
 

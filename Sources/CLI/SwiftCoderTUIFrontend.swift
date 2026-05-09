@@ -530,7 +530,11 @@ public final class SwiftCoderTUIFrontend: AgentFrontend, @unchecked Sendable {
         case .started(let m): return m
         case .progress(let m): return m
         case .passed: return "passed"
-        case .failed(let n, _): return "failed (\(n) error(s))"
+        case .failed(let n, _):
+            if let n {
+                return "failed (\(n) error(s))"
+            }
+            return "failed (error count unavailable)"
         case .warning(let m): return m
         }
     }
