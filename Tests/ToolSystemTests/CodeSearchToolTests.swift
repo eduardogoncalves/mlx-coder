@@ -53,6 +53,30 @@ final class CodeSearchToolTests: XCTestCase {
         XCTAssertFalse(result.content.contains("Contact.cs"))
     }
 
+    func testPathMatchesExcludeBuildOutputDirectories() async throws {
+        let workspace = try makeWorkspace()
+        defer { try? FileManager.default.removeItem(at: workspace) }
+
+        let buildFile = workspace
+            .appendingPathComponent(".build", isDirectory: true)
+            .appendingPathComponent("GhostContact.swift")
+        let sourceFile = workspace
+            .appendingPathComponent("Sources", isDirectory: true)
+            .appendingPathComponent("GhostContact.swift")
+
+        try FileManager.default.createDirectory(at: buildFile.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: sourceFile.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try "// build output\n".write(to: buildFile, atomically: true, encoding: .utf8)
+        try "// source file\n".write(to: sourceFile, atomically: true, encoding: .utf8)
+
+        let tool = CodeSearchTool(permissions: PermissionEngine(workspaceRoot: workspace.path))
+        let result = try await tool.execute(arguments: ["query": "GhostContact", "path": "."])
+
+        XCTAssertFalse(result.isError)
+        XCTAssertTrue(result.content.contains("Sources/GhostContact.swift"))
+        XCTAssertFalse(result.content.contains(".build/GhostContact.swift"))
+    }
+
     private func makeWorkspace() throws -> URL {
         let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
             .appendingPathComponent(".build", isDirectory: true)

@@ -11,7 +11,8 @@ public struct TodoTool: Tool {
         type: "object",
         properties: [
             "action": PropertySchema(type: "string", description: "Action to perform", enumValues: ["read", "add", "complete", "remove"]),
-            "item": PropertySchema(type: "string", description: "Todo item text (for 'add') or numeric index (for 'complete'/'remove')"),
+            "item": PropertySchema(type: "integer", description: "Todo index for 'complete'/'remove' (numeric value)"),
+            "item_text": PropertySchema(type: "string", description: "Todo item text for 'add'"),
         ],
         required: ["action"]
     )
@@ -31,8 +32,9 @@ public struct TodoTool: Tool {
         case "read":
             return readTodos()
         case "add":
-            guard let item = arguments["item"] as? String else {
-                return .error("Missing required argument: item (for 'add')")
+            let itemText = arguments["item_text"] as? String ?? arguments["item"] as? String
+            guard let item = itemText else {
+                return .error("Missing required argument: item_text (for 'add')")
             }
             return addTodo(item)
         case "complete":

@@ -142,11 +142,23 @@ public struct CodeSearchTool: Tool {
         let process = Process()
         process.executableURL = URL(filePath: "/usr/bin/find")
 
-        var arguments = [resolvedPath, "-type", "f"]
+        var arguments = [resolvedPath]
+        let prunedDirectoryNames = [".git"] + BuildOutputFilter.ignoredNames.sorted()
+        if !prunedDirectoryNames.isEmpty {
+            arguments.append("(")
+            for (index, name) in prunedDirectoryNames.enumerated() {
+                if index > 0 {
+                    arguments.append("-o")
+                }
+                arguments.append(contentsOf: ["-type", "d", "-name", name])
+            }
+            arguments.append(contentsOf: [")", "-prune", "-o"])
+        }
+        arguments.append(contentsOf: ["-type", "f"])
         if let language, let ext = languageExtension(language) {
             arguments.append(contentsOf: ["-name", "*.\(ext)"])
         }
-        arguments.append(contentsOf: ["-iname", "*\(query)*"])
+        arguments.append(contentsOf: ["-iname", "*\(query)*", "-print"])
         process.arguments = arguments
 
         let pipe = Pipe()
@@ -169,7 +181,7 @@ public struct CodeSearchTool: Tool {
             .map { relativizePath($0) + ":1:[path match]" }
             .filter { line in
                 let pathPart = String(line.split(separator: ":", maxSplits: 1).first ?? "")
-                return !permissions.isPathIgnored(pathPart)
+                return !permissions.isPathIgnored(pathPart) && !BuildOutputFilter.isBuildOutput(path: pathPart)
             }
     }
 

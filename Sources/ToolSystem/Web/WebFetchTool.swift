@@ -271,7 +271,7 @@ extension WebFetchTool: ProgressReportingTool {
             reportProgress("extracting relevant information")
             let extracted = try await extractWithLLM(text: text, query: query, container: container, config: config)
             reportProgress("finalizing result")
-            return .success("Extracted information for query '\(query)':\n\n\(extracted)")
+            return buildResult(text: "Extracted information for query '\(query)':\n\n\(extracted)")
         }
         reportProgress("finalizing result")
         return buildResult(text: text)
