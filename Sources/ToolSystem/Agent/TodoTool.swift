@@ -32,8 +32,7 @@ public struct TodoTool: Tool {
         case "read":
             return readTodos()
         case "add":
-            let itemText = arguments["item_text"] as? String ?? arguments["item"] as? String
-            guard let item = itemText else {
+            guard let item = arguments["item_text"] as? String else {
                 return .error("Missing required argument: item_text (for 'add')")
             }
             return addTodo(item)
