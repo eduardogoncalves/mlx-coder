@@ -80,6 +80,16 @@ extension AgentLoop {
 
         let result = try await modelContainer.perform { [currentGenerationConfig, frontend, chatML, imageURLs, vlmMessageData, vlmLastUserIndex, shouldUseProcessorPath, isVLM] context in
             if Task.isCancelled { throw CancellationError() }
+            var didEmitTokenProcessingEnded = false
+            var didEmitGenerationStarted = false
+            defer {
+                if didEmitGenerationStarted {
+                    frontend.emit(.generationActivity(.ended))
+                }
+                if !didEmitTokenProcessingEnded {
+                    frontend.emit(.tokenProcessingActivity(.ended))
+                }
+            }
 
             // Processor path: for image turns and model families that require processor-driven
             // prompt preparation, use UserInput +
@@ -167,7 +177,9 @@ extension AgentLoop {
                 startsThinking: enableThinking
             )
             frontend.emit(.tokenProcessingActivity(.ended))
+            didEmitTokenProcessingEnded = true
             frontend.emit(.generationActivity(.started))
+            didEmitGenerationStarted = true
             var hasOpenThinkingActivity = false
 
             func beginThinkingIfNeeded() {
@@ -324,9 +336,6 @@ extension AgentLoop {
             
             return (text: rawResponseText, writer: writer)
         }
-
-        // Inference stream has drained completely.
-        frontend.emit(.generationActivity(.ended))
 
         return result
     }
