@@ -9,6 +9,8 @@ import Foundation
 import SwiftCoderTUI
 
 public final class SwiftCoderTUIFrontend: AgentFrontend, @unchecked Sendable {
+    // Keep memory bounded if rendering lags behind generation bursts.
+    private static let renderQueueCapacity = 4096
 
     private enum RenderCommand: Sendable {
         case event(AgentEvent)
@@ -54,7 +56,7 @@ public final class SwiftCoderTUIFrontend: AgentFrontend, @unchecked Sendable {
         self.renderer = renderer
         self.appConfig = appConfig
         var cont: AsyncStream<RenderCommand>.Continuation!
-        self.stream = AsyncStream<RenderCommand>(bufferingPolicy: .bufferingOldest(4096)) { c in
+        self.stream = AsyncStream<RenderCommand>(bufferingPolicy: .bufferingOldest(Self.renderQueueCapacity)) { c in
             cont = c
         }
         self.continuation = cont
