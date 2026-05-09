@@ -34,7 +34,7 @@ struct WebFetchCache {
                 )
             }
         } catch {
-            fatalError("Unable to initialize web cache directory securely: \(error.localizedDescription)")
+            fatalError("Unable to initialize web cache directory securely at \(dir.path): \(error.localizedDescription)")
         }
         return dir
     }()
