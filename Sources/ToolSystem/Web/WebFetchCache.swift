@@ -21,13 +21,17 @@ struct WebFetchCache {
     // MARK: - Constants
 
     private static let cacheDir: URL = {
+        let fileManager = FileManager.default
         let dir = URL(fileURLWithPath: "/tmp/mlx-coder-webcache", isDirectory: true)
-        try? FileManager.default.createDirectory(
-            at: dir,
-            withIntermediateDirectories: true,
-            attributes: [.posixPermissions: 0o700]
-        )
-        try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: dir.path)
+        if fileManager.fileExists(atPath: dir.path) {
+            try? fileManager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: dir.path)
+        } else {
+            try? fileManager.createDirectory(
+                at: dir,
+                withIntermediateDirectories: true,
+                attributes: [.posixPermissions: 0o700]
+            )
+        }
         return dir
     }()
 

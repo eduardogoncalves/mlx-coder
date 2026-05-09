@@ -7,7 +7,11 @@ final class AtFileReferenceExpanderTests: XCTestCase {
     override func setUp() {
         super.setUp()
         tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("at-file-expander-\(UUID().uuidString)", isDirectory: true)
-        try? FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        do {
+            try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        } catch {
+            XCTFail("Failed to create temp directory: \(error)")
+        }
     }
 
     override func tearDown() {
