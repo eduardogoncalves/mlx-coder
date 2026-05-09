@@ -143,7 +143,7 @@ public struct CodeSearchTool: Tool {
         process.executableURL = URL(filePath: "/usr/bin/find")
 
         var arguments = [resolvedPath]
-        let prunedDirectoryNames = [".git"] + BuildOutputFilter.ignoredNames.sorted()
+        let prunedDirectoryNames = [".git"] + Array(BuildOutputFilter.ignoredNames)
         if !prunedDirectoryNames.isEmpty {
             arguments.append("(")
             for (index, name) in prunedDirectoryNames.enumerated() {
