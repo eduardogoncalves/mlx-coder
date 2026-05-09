@@ -26,10 +26,11 @@ extension AgentLoop {
         if success {
             frontend.emit(.buildCheck(.passed))
         } else {
-            frontend.emit(.buildCheck(.failed(errorCount: 0, firstErrors: [
+            let firstErrors = [
                 "Build has errors that need manual fixing",
                 "Use build_check tool for detailed error information, then fix and commit.",
-            ])))
+            ]
+            frontend.emit(.buildCheck(.failed(errorCount: max(1, firstErrors.count), firstErrors: firstErrors)))
         }
     }
 

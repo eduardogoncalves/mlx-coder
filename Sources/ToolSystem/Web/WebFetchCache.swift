@@ -22,7 +22,12 @@ struct WebFetchCache {
 
     private static let cacheDir: URL = {
         let dir = URL(fileURLWithPath: "/tmp/mlx-coder-webcache", isDirectory: true)
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try? FileManager.default.createDirectory(
+            at: dir,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: dir.path)
         return dir
     }()
 
@@ -47,6 +52,8 @@ struct WebFetchCache {
         write(raw, to: rawURL(for: urlString))
         if let text {
             write(text, to: textURL(for: urlString))
+        } else {
+            try? FileManager.default.removeItem(at: textURL(for: urlString))
         }
     }
 

@@ -178,14 +178,13 @@ extension WebFetchTool: ProgressReportingTool {
         // If text_only and a pre-stripped copy exists, use it immediately
         if textOnly, let cached = cache.textContent(for: urlString) {
             reportProgress("cache hit (text) — skipping network request")
-            return buildResult(text: cached)
+            return try await resolveResult(text: cached, query: query, reportProgress: reportProgress)
         }
 
         // If a raw copy exists, we can skip the network request entirely
         if let cachedRaw = cache.rawContent(for: urlString) {
             reportProgress("cache hit (raw) — skipping network request")
             if textOnly {
-                let contentType = ""  // no HTTP headers available from cache
                 let isHTML = cachedRaw.prefix(512).lowercased().contains("<!doctype html")
                     || cachedRaw.prefix(512).lowercased().contains("<html")
                 if isHTML {

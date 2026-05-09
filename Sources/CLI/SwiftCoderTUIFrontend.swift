@@ -54,7 +54,7 @@ public final class SwiftCoderTUIFrontend: AgentFrontend, @unchecked Sendable {
         self.renderer = renderer
         self.appConfig = appConfig
         var cont: AsyncStream<RenderCommand>.Continuation!
-        self.stream = AsyncStream<RenderCommand>(bufferingPolicy: .unbounded) { c in
+        self.stream = AsyncStream<RenderCommand>(bufferingPolicy: .bufferingOldest(4096)) { c in
             cont = c
         }
         self.continuation = cont
@@ -80,34 +80,62 @@ public final class SwiftCoderTUIFrontend: AgentFrontend, @unchecked Sendable {
     public func request(_ request: AgentRequest) async -> AgentResponse {
         switch request {
         case .approval(let req):
-            let decision: ApprovalDecision = await withCheckedContinuation { cont in
-                lock.lock()
-                pendingApproval = cont
-                lock.unlock()
-                Task {
-                await renderer.requestApproval(
-                        tool: req.toolName,
-                        args: req.display,
-                        isPlanMode: req.isPlanModeBlock
-                    )
+            let decision: ApprovalDecision = await withTaskCancellationHandler(operation: {
+                await withCheckedContinuation { cont in
+                    lock.lock()
+                    if pendingApproval != nil {
+                        lock.unlock()
+                        cont.resume(returning: .deny(suggestion: nil))
+                        return
+                    }
+                    if Task.isCancelled {
+                        lock.unlock()
+                        cont.resume(returning: .deny(suggestion: nil))
+                        return
+                    }
+                    pendingApproval = cont
+                    lock.unlock()
+                    Task {
+                        await renderer.requestApproval(
+                            tool: req.toolName,
+                            args: req.display,
+                            isPlanMode: req.isPlanModeBlock
+                        )
+                    }
                 }
-            }
+            }, onCancel: { [weak self] in
+                self?.cancelPendingApproval()
+            })
             await renderer.clearApproval()
             return .approval(decision)
 
         case .optionSelect(let req):
-            let index: Int? = await withCheckedContinuation { cont in
-                lock.lock()
-                pendingOptionSelect = cont
-                lock.unlock()
-                Task {
-                    await renderer.requestOptionSelect(
-                        prompt: req.prompt,
-                        options: req.options,
-                        escSelectsLastOption: req.escSelectsLastOption
-                    )
+            let index: Int? = await withTaskCancellationHandler(operation: {
+                await withCheckedContinuation { cont in
+                    lock.lock()
+                    if pendingOptionSelect != nil {
+                        lock.unlock()
+                        cont.resume(returning: nil)
+                        return
+                    }
+                    if Task.isCancelled {
+                        lock.unlock()
+                        cont.resume(returning: nil)
+                        return
+                    }
+                    pendingOptionSelect = cont
+                    lock.unlock()
+                    Task {
+                        await renderer.requestOptionSelect(
+                            prompt: req.prompt,
+                            options: req.options,
+                            escSelectsLastOption: req.escSelectsLastOption
+                        )
+                    }
                 }
-            }
+            }, onCancel: { [weak self] in
+                self?.cancelPendingOptionSelect()
+            })
             await renderer.clearOptionSelect()
             return .optionSelect(index)
 
@@ -144,6 +172,24 @@ public final class SwiftCoderTUIFrontend: AgentFrontend, @unchecked Sendable {
     public var hasPendingOptionSelect: Bool {
         lock.lock(); defer { lock.unlock() }
         return pendingOptionSelect != nil
+    }
+
+    private func cancelPendingApproval() {
+        lock.lock()
+        let cont = pendingApproval
+        pendingApproval = nil
+        lock.unlock()
+        cont?.resume(returning: .deny(suggestion: nil))
+        Task { await renderer.clearApproval() }
+    }
+
+    private func cancelPendingOptionSelect() {
+        lock.lock()
+        let cont = pendingOptionSelect
+        pendingOptionSelect = nil
+        lock.unlock()
+        cont?.resume(returning: nil)
+        Task { await renderer.clearOptionSelect() }
     }
 
     // MARK: Event rendering

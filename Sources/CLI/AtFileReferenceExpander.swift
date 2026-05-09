@@ -26,9 +26,9 @@ enum AtFileReferenceExpander {
     static func expand(_ prompt: String, workspaceRoot: String? = nil) -> String {
         let base = workspaceRoot ?? FileManager.default.currentDirectoryPath
 
-        // Split on whitespace while preserving empty parts so the prompt is
-        // re-joinable faithfully.
-        let tokens = prompt.split(separator: " ", omittingEmptySubsequences: false).map(String.init)
+        // Split on whitespace so @path tokens separated by spaces/tabs/newlines
+        // are all discovered.
+        let tokens = prompt.split(whereSeparator: \.isWhitespace).map(String.init)
 
         struct Attachment {
             let displayPath: String
@@ -47,7 +47,7 @@ enum AtFileReferenceExpander {
             // Strip trailing punctuation (e.g. period at end of sentence).
             while let last = rawPath.last,
                   last.isPunctuation,
-                  ![".", "-", "_", "/"].contains(last) {
+                  !["-", "_", "/"].contains(last) {
                 rawPath = String(rawPath.dropLast())
             }
             guard !rawPath.isEmpty else { continue }

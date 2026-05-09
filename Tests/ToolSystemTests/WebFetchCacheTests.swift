@@ -42,6 +42,26 @@ final class WebFetchCacheTests: XCTestCase {
         cleanup(url: url2)
     }
 
+    func testSaveWithoutTextRemovesPreviousStrippedEntry() {
+        let url = testURL
+        let cache = WebFetchCache.shared
+        cache.save(raw: "raw v1", text: "stripped v1", for: url)
+        XCTAssertEqual(cache.textContent(for: url), "stripped v1")
+
+        cache.save(raw: "raw v2", text: nil, for: url)
+
+        XCTAssertEqual(cache.rawContent(for: url), "raw v2")
+        XCTAssertNil(cache.textContent(for: url))
+        cleanup(url: url)
+    }
+
+    func testCacheDirectoryIsOwnerOnly() throws {
+        let cache = WebFetchCache.shared
+        let attrs = try FileManager.default.attributesOfItem(atPath: cache.rawURL(for: testURL).deletingLastPathComponent().path)
+        let perms = attrs[.posixPermissions] as? NSNumber
+        XCTAssertEqual(perms?.intValue, 0o700)
+    }
+
     // MARK: - Helpers
 
     private func cleanup(url: String) {
