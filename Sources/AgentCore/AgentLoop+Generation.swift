@@ -176,10 +176,10 @@ extension AgentLoop {
                 closeTag: ToolCallPattern.thinkClose,
                 startsThinking: enableThinking
             )
-            frontend.emit(.tokenProcessingActivity(.ended))
             hasTokenProcessingEnded = true
-            frontend.emit(.generationActivity(.started))
+            frontend.emit(.tokenProcessingActivity(.ended))
             hasGenerationStarted = true
+            frontend.emit(.generationActivity(.started))
             var hasOpenThinkingActivity = false
 
             func beginThinkingIfNeeded() {
