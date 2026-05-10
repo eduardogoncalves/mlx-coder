@@ -55,6 +55,7 @@ fail() {
 
 require_tools() {
     log "Validating build tools"
+    command -v swift >/dev/null 2>&1 || fail "swift not found"
     command -v xcodebuild >/dev/null 2>&1 || fail "xcodebuild not found"
     command -v pkgbuild >/dev/null 2>&1 || fail "pkgbuild not found"
     command -v shasum >/dev/null 2>&1 || fail "shasum not found"
@@ -108,15 +109,9 @@ build_arch() {
     [[ "$CLEAN" != "1" ]] && quiet_flag=(-quiet)
 
     log "Resolving Swift package dependencies"
-    if ! xcodebuild \
-        -scheme "$SCHEME_NAME" \
-        -configuration Release \
-        -destination "platform=macOS,arch=${target_arch}" \
-        -derivedDataPath "$derived_data" \
-        -clonedSourcePackagesDirPath "$PACKAGE_CHECKOUTS_DIR" \
-        -resolvePackageDependencies \
-        "${quiet_flag[@]}" >&2; then
-        fail "xcodebuild failed while resolving package dependencies for architecture ${target_arch}"
+    if ! swift package resolve \
+        --scratch-path "$PACKAGE_CHECKOUTS_DIR" >&2; then
+        fail "swift package resolve failed for architecture ${target_arch}"
     fi
 
     patch_mlx_swift_lm_for_swift6 "$PACKAGE_CHECKOUTS_DIR"
