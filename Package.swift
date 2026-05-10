@@ -1,15 +1,16 @@
-// swift-tools-version: 6.1
+// swift-tools-version: 6.3
 import PackageDescription
 
 let package = Package(
     name: "mlx-coder",
-    platforms: [.macOS("26.0")],
+    platforms: [.macOS("15.0")],
     dependencies: [
         .package(url: "https://github.com/ml-explore/mlx-swift", .upToNextMinor(from: "0.31.3")),
         .package(url: "https://github.com/ml-explore/mlx-swift-lm", exact: "3.31.3"),
         .package(url: "https://github.com/huggingface/swift-transformers", from: "1.3.0"),
         .package(url: "https://github.com/apple/swift-argument-parser", from: "1.7.1"),
         .package(url: "https://github.com/jpsim/Yams", from: "6.2.1"),
+        .package(url: "https://github.com/eduardogoncalves/swift-coder-tui", branch: "main"),
     ],
     targets: [
         .systemLibrary(
@@ -28,6 +29,7 @@ let package = Package(
                 .product(name: "Tokenizers",    package: "swift-transformers"),
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
                 .product(name: "Yams",          package: "Yams"),
+                .product(name: "SwiftCoderTUI", package: "swift-coder-tui"),
                 "CSQLite",
             ],
             path: "Sources",

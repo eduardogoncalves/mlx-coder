@@ -13,6 +13,7 @@ public struct ReadFileTool: Tool {
             "path": PropertySchema(type: "string", description: "Path to the file to read (relative to workspace root)"),
             "start_line": PropertySchema(type: "integer", description: "First line to read (1-indexed, optional)"),
             "end_line": PropertySchema(type: "integer", description: "Last line to read (1-indexed, inclusive, optional)"),
+            "include_build_dirs": PropertySchema(type: "boolean", description: "If true, allow reading files inside build-output or dependency-cache directories such as bin, obj, node_modules, __pycache__, .build, target, etc. (default: false)"),
         ],
         required: ["path"]
     )
@@ -28,6 +29,11 @@ public struct ReadFileTool: Tool {
     public func execute(arguments: [String: Any]) async throws -> ToolResult {
         guard let path = arguments["path"] as? String else {
             return .error("Missing required argument: path")
+        }
+
+        let includeBuildDirs = arguments["include_build_dirs"] as? Bool ?? false
+        if !includeBuildDirs, let matched = BuildOutputFilter.matchedComponent(in: path) {
+            return .error("'\(path)' is inside a build-output directory ('\(matched)'). Reading build artefacts is skipped by default. If you genuinely need this file, retry with include_build_dirs: true.")
         }
 
         let resolvedPath: String

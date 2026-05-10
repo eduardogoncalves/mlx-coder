@@ -5,7 +5,7 @@ This guide covers building mlx-coder from source and setting up the required ML 
 ## System Requirements
 
 ### Minimum Requirements
-- **macOS 14+** (Sonoma or later)
+- **macOS 15+** (Sequoia or later)
 - **Apple Silicon** (M1, M2, M3, M4 or later)
 - **10 GB free disk space** (for model + build artifacts)
 - **16 GB RAM** recommended (8 GB minimum for 9B models)

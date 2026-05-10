@@ -23,12 +23,55 @@ jobs:
   build-cli-tag:
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     name: Build CLI (arm64)
-    runs-on: macos-latest
+    runs-on: macos-15
 
     steps:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
+
+      - name: Select Xcode 16.4
+        run: sudo xcode-select -s /Applications/Xcode_16.4.app
+
+      - name: Set up Swift 6.3.1
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          swiftly_pkg="$RUNNER_TEMP/swiftly.pkg"
+          post_install_script="$RUNNER_TEMP/swiftly-post-install.sh"
+
+          curl --fail --location --silent --show-error \
+            https://download.swift.org/swiftly/darwin/swiftly.pkg \
+            --output "$swiftly_pkg"
+          installer -pkg "$swiftly_pkg" -target CurrentUserHomeDirectory
+
+          export PATH="$HOME/.swiftly/bin:$PATH"
+
+          swiftly init \
+            --skip-install \
+            --quiet-shell-followup \
+            --assume-yes \
+            --no-modify-profile
+
+          rm -f "$post_install_script"
+          swiftly install \
+            --use \
+            6.3.1 \
+            --assume-yes \
+            --post-install-file "$post_install_script"
+
+          if [ -f "$post_install_script" ]; then
+            bash "$post_install_script"
+          fi
+
+          echo "$HOME/.swiftly/bin" >> "$GITHUB_PATH"
+          swiftly use --print-location >> "$GITHUB_PATH"
+
+      - name: Show toolchain versions
+        run: |
+          xcodebuild -version
+          swift --version
 
       - name: Verify tag is on the main branch
         run: |
@@ -66,10 +109,53 @@ jobs:
       (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/')) ||
       github.event_name == 'pull_request'
     name: Build CLI (branch/PR)
-    runs-on: macos-latest
+    runs-on: macos-15
 
     steps:
       - uses: actions/checkout@v6
+
+      - name: Select Xcode 16.4
+        run: sudo xcode-select -s /Applications/Xcode_16.4.app
+
+      - name: Set up Swift 6.3.1
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          swiftly_pkg="$RUNNER_TEMP/swiftly.pkg"
+          post_install_script="$RUNNER_TEMP/swiftly-post-install.sh"
+
+          curl --fail --location --silent --show-error \
+            https://download.swift.org/swiftly/darwin/swiftly.pkg \
+            --output "$swiftly_pkg"
+          installer -pkg "$swiftly_pkg" -target CurrentUserHomeDirectory
+
+          export PATH="$HOME/.swiftly/bin:$PATH"
+
+          swiftly init \
+            --skip-install \
+            --quiet-shell-followup \
+            --assume-yes \
+            --no-modify-profile
+
+          rm -f "$post_install_script"
+          swiftly install \
+            --use \
+            6.3.1 \
+            --assume-yes \
+            --post-install-file "$post_install_script"
+
+          if [ -f "$post_install_script" ]; then
+            bash "$post_install_script"
+          fi
+
+          echo "$HOME/.swiftly/bin" >> "$GITHUB_PATH"
+          swiftly use --print-location >> "$GITHUB_PATH"
+
+      - name: Show toolchain versions
+        run: |
+          xcodebuild -version
+          swift --version
 
       - name: Determine branch build version
         id: vars
@@ -115,10 +201,53 @@ jobs:
   build-cli-manual:
     if: github.event_name == 'workflow_dispatch'
     name: Build CLI (manual)
-    runs-on: macos-latest
+    runs-on: macos-15
 
     steps:
       - uses: actions/checkout@v6
+
+      - name: Select Xcode 16.4
+        run: sudo xcode-select -s /Applications/Xcode_16.4.app
+
+      - name: Set up Swift 6.3.1
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          swiftly_pkg="$RUNNER_TEMP/swiftly.pkg"
+          post_install_script="$RUNNER_TEMP/swiftly-post-install.sh"
+
+          curl --fail --location --silent --show-error \
+            https://download.swift.org/swiftly/darwin/swiftly.pkg \
+            --output "$swiftly_pkg"
+          installer -pkg "$swiftly_pkg" -target CurrentUserHomeDirectory
+
+          export PATH="$HOME/.swiftly/bin:$PATH"
+
+          swiftly init \
+            --skip-install \
+            --quiet-shell-followup \
+            --assume-yes \
+            --no-modify-profile
+
+          rm -f "$post_install_script"
+          swiftly install \
+            --use \
+            6.3.1 \
+            --assume-yes \
+            --post-install-file "$post_install_script"
+
+          if [ -f "$post_install_script" ]; then
+            bash "$post_install_script"
+          fi
+
+          echo "$HOME/.swiftly/bin" >> "$GITHUB_PATH"
+          swiftly use --print-location >> "$GITHUB_PATH"
+
+      - name: Show toolchain versions
+        run: |
+          xcodebuild -version
+          swift --version
 
       - name: Determine manual version
         id: vars

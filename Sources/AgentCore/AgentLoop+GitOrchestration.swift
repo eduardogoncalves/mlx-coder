@@ -4,22 +4,38 @@
 import Foundation
 
 extension AgentLoop {
+    private enum GitTreeShortcutAction {
+        case switchWorktree
+        case deleteBranch
+    }
 
     public func runMergeApprovalShortcutFlow() async {
         do {
             let manager = try await ensureGitOrchestrationManager()
             try await presentMergeApprovalFlow(manager: manager)
         } catch {
-            renderer.printStatus("⚠️  Could not run merge approval flow: \(error.localizedDescription)")
+            frontend.emit(.gitOrchestration(.warning("Could not run merge approval flow: \(error.localizedDescription)")))
         }
     }
 
     public func runGitTreeShortcutFlow() async {
+        await runGitTreeShortcutFlow(preselectedAction: nil)
+    }
+
+    public func runGitTreeSwitchShortcutFlow() async {
+        await runGitTreeShortcutFlow(preselectedAction: .switchWorktree)
+    }
+
+    public func runGitTreeBranchDeleteShortcutFlow() async {
+        await runGitTreeShortcutFlow(preselectedAction: .deleteBranch)
+    }
+
+    private func runGitTreeShortcutFlow(preselectedAction: GitTreeShortcutAction?) async {
         do {
             let manager = try await ensureGitOrchestrationManager()
             let worktrees = try await manager.listAvailableWorktrees()
             guard !worktrees.isEmpty else {
-                renderer.printStatus("No git worktrees found.")
+                frontend.emit(.gitOrchestration(.info("No git worktrees found.")))
                 return
             }
 
@@ -32,24 +48,34 @@ extension AgentLoop {
             }
 
             guard let interactiveInput = self.interactiveInput else {
-                renderer.printStatus("Git worktrees:")
+                frontend.emit(.gitOrchestration(.info("Git worktrees:")))
                 for option in options {
-                    renderer.printStatus("  \(option)")
+                    frontend.emit(.gitOrchestration(.info("  \(option)")))
                 }
                 return
             }
 
-            let actionOptions = ["Switch workspace to a worktree", "Delete local branch"]
-            if let action = await interactiveInput.selectOption(
-                prompt: "Git tree actions",
-                options: actionOptions
-            ) {
-                if action == 1 {
-                    try await runBranchDeleteFlow(manager: manager, interactiveInput: interactiveInput)
-                    return
+            let action: GitTreeShortcutAction?
+            if let preselectedAction {
+                action = preselectedAction
+            } else {
+                let actionOptions = ["Switch workspace to a worktree", "Delete local branch"]
+                let selectedAction = await frontendSelectOption(
+                    prompt: "Git tree actions",
+                    options: actionOptions
+                )
+                switch selectedAction {
+                case .some(0): action = .switchWorktree
+                case .some(1): action = .deleteBranch
+                default: action = nil
                 }
+            }
 
-                if let selected = await interactiveInput.selectOption(
+            switch action {
+            case .deleteBranch:
+                try await runBranchDeleteFlow(manager: manager, interactiveInput: interactiveInput)
+            case .switchWorktree:
+                if let selected = await frontendSelectOption(
                     prompt: "Select git worktree",
                     options: options
                 ) {
@@ -57,19 +83,20 @@ extension AgentLoop {
                     let connected = try await manager.connectToExistingWorktree(path: target.path)
                     let normalizedPath = URL(filePath: connected.path).standardized.path()
                     await switchSessionWorkspace(to: normalizedPath, changeDirectory: true)
-                    renderer.printStatus("📁 Switched workspace to: \(normalizedPath)")
-                    renderer.printStatus("🌿 Active branch: \(connected.branch)")
+                    frontend.emit(.gitOrchestration(.worktreeSwitched(path: normalizedPath, branch: connected.branch)))
                 }
+            case .none:
+                return
             }
         } catch {
-            renderer.printStatus("⚠️  Could not open git worktree selector: \(error.localizedDescription)")
+            frontend.emit(.gitOrchestration(.warning("Could not open git worktree selector: \(error.localizedDescription)")))
         }
     }
 
     func runBranchDeleteFlow(manager: GitOrchestrationManager, interactiveInput: InteractiveInput) async throws {
         let localBranches = try await manager.listLocalBranches()
         guard !localBranches.isEmpty else {
-            renderer.printStatus("No local branches found.")
+            frontend.emit(.gitOrchestration(.info("No local branches found.")))
             return
         }
 
@@ -79,7 +106,7 @@ extension AgentLoop {
             branch == currentBranch ? "\(branch) (current)" : branch
         }
 
-        guard let selected = await interactiveInput.selectOption(
+        guard let selected = await frontendSelectOption(
             prompt: "Select local branch to delete",
             options: branchOptions,
             escSelectsLastOption: true
@@ -89,7 +116,7 @@ extension AgentLoop {
 
         let targetBranch = localBranches[selected]
         let deleteOptions = ["Delete safely (-d)", "Force delete (-D)", "Cancel"]
-        guard let deleteAction = await interactiveInput.selectOption(
+        guard let deleteAction = await frontendSelectOption(
             prompt: "Delete branch '\(targetBranch)'?",
             options: deleteOptions,
             escSelectsLastOption: true
@@ -100,12 +127,12 @@ extension AgentLoop {
         switch deleteAction {
         case 0:
             try await manager.deleteLocalBranch(targetBranch, force: false)
-            renderer.printStatus("🗑️ Deleted branch: \(targetBranch)")
+            frontend.emit(.gitOrchestration(.branchDeleted(name: targetBranch, force: false)))
         case 1:
             try await manager.deleteLocalBranch(targetBranch, force: true)
-            renderer.printStatus("🗑️ Force deleted branch: \(targetBranch)")
+            frontend.emit(.gitOrchestration(.branchDeleted(name: targetBranch, force: true)))
         default:
-            renderer.printStatus("Branch deletion cancelled.")
+            frontend.emit(.gitOrchestration(.info("Branch deletion cancelled.")))
         }
     }
 
@@ -137,7 +164,7 @@ extension AgentLoop {
             finalCommitMessage = finalChoice.message
             skipFinalCommit = finalChoice.skip
             if skipFinalCommit {
-                renderer.printStatus("⏭️  Skipping final commit for now. Pending changes were kept.")
+                frontend.emit(.gitOrchestration(.skipped(reason: "Skipping final commit for now. Pending changes were kept.")))
             }
         }
 
@@ -145,18 +172,17 @@ extension AgentLoop {
             finalCommitMessage: finalCommitMessage,
             autoFinalCommit: !skipFinalCommit
         )
-        renderer.printStatus(completionGuide.formattedMessage)
+        frontend.emit(.gitOrchestration(.info(completionGuide.formattedMessage)))
 
         guard let interactiveInput = self.interactiveInput else { return }
 
-        print("")
         let mergeOptions = [
             "Leave for later",
             "Merge now (squash)",
             "Merge now (merge commit)",
             "Merge now (rebase)"
         ]
-        if let selected = await interactiveInput.selectOption(
+        if let selected = await frontendSelectOption(
             prompt: "Merge decision",
             options: mergeOptions
         ) {
@@ -202,17 +228,14 @@ extension AgentLoop {
                     squashCommitMessage: nil
                 )
             }
-            renderer.printStatus("✅ \(outcome.message)")
-            for warning in outcome.cleanupWarnings {
-                renderer.printStatus("⚠️  Cleanup warning: \(warning)")
-            }
+            frontend.emit(.gitOrchestration(.merged(message: outcome.message, warnings: outcome.cleanupWarnings)))
 
             if outcome.merged && selected != 0 {
                 await restoreWorkspaceToProjectRoot()
                 do {
                     try await reloadModel()
                 } catch {
-                    renderer.printStatus("⚠️  Merge completed, but model reload failed: \(error.localizedDescription)")
+                    frontend.emit(.gitOrchestration(.warning("Merge completed, but model reload failed: \(error.localizedDescription)")))
                 }
             }
         }
@@ -224,11 +247,11 @@ extension AgentLoop {
         suggested: String,
         allowSkip: Bool = false
     ) async -> (message: String, skip: Bool) {
-        renderer.printStatus("📝 Proposed \(title.lowercased()): \(suggested)")
+        frontend.emit(.gitOrchestration(.proposal(title: title, value: suggested)))
         let options = allowSkip
             ? ["Use this message", "No, suggest changes (esc)", "Skip commit for now"]
             : ["Use this message", "No, suggest changes (esc)"]
-        if let selected = await interactiveInput.selectOption(
+        if let selected = await frontendSelectOption(
             prompt: "\(title) options",
             options: options,
             escSelectsLastOption: true
@@ -261,7 +284,7 @@ extension AgentLoop {
     func restoreWorkspaceToProjectRoot() async {
         let normalizedPath = URL(filePath: projectWorkspaceRoot).standardized.path()
         await switchSessionWorkspace(to: normalizedPath, changeDirectory: true)
-        renderer.printStatus("📁 Restored workspace to project root: \(normalizedPath)")
+        frontend.emit(.gitOrchestration(.info("Restored workspace to project root: \(normalizedPath)")))
     }
 
     func switchSessionWorkspace(to path: String, changeDirectory: Bool) async {
@@ -276,7 +299,7 @@ extension AgentLoop {
         )
         await registerToolsInternal()
         if changeDirectory, !FileManager.default.changeCurrentDirectoryPath(normalizedPath) {
-            renderer.printStatus("⚠️  Failed to switch current directory to: \(normalizedPath)")
+            frontend.emit(.gitOrchestration(.warning("Failed to switch current directory to: \(normalizedPath)")))
         }
     }
 

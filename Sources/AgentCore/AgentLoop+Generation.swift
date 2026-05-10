@@ -53,12 +53,43 @@ extension AgentLoop {
             transformedMessages.indices.last(where: { transformedMessages[$0].role == .user })
             : nil
 
-        // Start processing spinner before inference begins
-        let spinner = Spinner(message: "Processing...")
-        await spinner.start()
+        // Prompt preparation starts before inference/token streaming.
+        frontend.emit(.tokenProcessingActivity(.started))
 
-        let result = try await modelContainer.perform { [currentGenerationConfig, renderer, chatML, imageURLs, vlmMessageData, vlmLastUserIndex, shouldUseProcessorPath, isVLM] context in
+        // Pre-generation safety guard: if the formatted context exceeds the practical
+        // safe limit for MLX tensor allocation, throw a *recoverable* error rather
+        // than letting the C++ reshape assertion fire (which calls fatalError and kills
+        // the process).  The caller's retry loop will trigger context compaction.
+        //
+        // Threshold: 400 000 chars ≈ 100 000 tokens at ~4 chars/token — well above any
+        // model's real context window.  A context this large means something slipped
+        // past the condensation and compaction layers.
+        let maxSafeContextChars = 400_000
+        guard chatML.count <= maxSafeContextChars else {
+            frontend.emit(.tokenProcessingActivity(.ended))
+            throw NSError(
+                domain: "AgentLoop",
+                code: 9,
+                userInfo: [
+                    NSLocalizedDescriptionKey:
+                        "Context too large (\(chatML.count) chars, limit \(maxSafeContextChars)). " +
+                        "Compaction will run before the next attempt."
+                ]
+            )
+        }
+
+        let result = try await modelContainer.perform { [currentGenerationConfig, frontend, chatML, imageURLs, vlmMessageData, vlmLastUserIndex, shouldUseProcessorPath, isVLM] context in
             if Task.isCancelled { throw CancellationError() }
+            var hasTokenProcessingEnded = false
+            var hasGenerationStarted = false
+            defer {
+                if hasGenerationStarted {
+                    frontend.emit(.generationActivity(.ended))
+                }
+                if !hasTokenProcessingEnded {
+                    frontend.emit(.tokenProcessingActivity(.ended))
+                }
+            }
 
             // Processor path: for image turns and model families that require processor-driven
             // prompt preparation, use UserInput +
@@ -131,30 +162,40 @@ extension AgentLoop {
                 toolCallOpen: ToolCallPattern.toolCallOpen,
                 toolCallClose: ToolCallPattern.toolCallClose,
                 onStatusChange: { message in
-                    Task {
-                        await spinner.updateMessage(message)
-                        await spinner.start()
-                    }
+                    frontend.emit(.status(StatusMessage(message, severity: .debug)))
                 }
             )
             
             var rawResponseText = ""
-            var pendingChunk = ""
-            var isThinking = enableThinking
-            if isThinking {
-                renderer.startThinking()
-            }
-            var hasShownVisibleOutput = false
+            // StreamParser handles the think-block state machine and emits the
+            // correct AgentEvents. startsThinking mirrors enableThinking because
+            // the "<think>" open tag is pre-filled in the prompt when thinking is
+            // enabled — the model output begins *inside* the think block.
+            var parser = StreamParser(
+                openTag: ToolCallPattern.thinkOpen,
+                closeTag: ToolCallPattern.thinkClose,
+                startsThinking: enableThinking
+            )
+            hasTokenProcessingEnded = true
+            frontend.emit(.tokenProcessingActivity(.ended))
+            hasGenerationStarted = true
+            frontend.emit(.generationActivity(.started))
+            var hasOpenThinkingActivity = false
 
-            func stopSpinnerOnFirstVisibleOutput() {
-                guard !hasShownVisibleOutput else { return }
-                hasShownVisibleOutput = true
-                let semaphore = DispatchSemaphore(value: 0)
-                Task {
-                    await spinner.stop(clearLine: true)
-                    semaphore.signal()
+            func beginThinkingIfNeeded() {
+                guard !hasOpenThinkingActivity else { return }
+                frontend.emit(.thinkingActivity(.started))
+                hasOpenThinkingActivity = true
+            }
+
+            func endThinkingIfNeeded() {
+                if !hasOpenThinkingActivity {
+                    // Keep lifecycle ordering strict even if the stream closes
+                    // an implicit think block before any visible think chunk.
+                    beginThinkingIfNeeded()
                 }
-                semaphore.wait()
+                frontend.emit(.thinkingActivity(.ended))
+                hasOpenThinkingActivity = false
             }
 
             var generationParameters = currentGenerationConfig.generateParameters
@@ -190,7 +231,6 @@ extension AgentLoop {
             )
             for await item in tokenStream {
                 if Task.isCancelled {
-                    Task { await spinner.stop(clearLine: true) }
                     throw CancellationError()
                 }
                 
@@ -206,12 +246,7 @@ extension AgentLoop {
                     
                     let newText = String(newSegment.suffix(newSegment.count - segment.count))
                     rawResponseText += newText
-                    
-                    // Normalize streamed text (including tool-call content handling)
-                    // before adding to response/output buffers.
-                    let streamResult = writer.process(newText)
-                    let displayText = streamResult.displayText
-                    
+
                     if newText.hasSuffix("\n") {
                         if let lastToken = segmentTokens.last {
                             segmentTokens = [lastToken]
@@ -220,75 +255,78 @@ extension AgentLoop {
                     } else {
                         segment = newSegment
                     }
-                    
-                    pendingChunk += displayText
-                    
-                    while !pendingChunk.isEmpty {
-                        if !isThinking {
-                            if let range = pendingChunk.range(of: ToolCallPattern.thinkOpen) {
-                                let before = String(pendingChunk[..<range.lowerBound])
-                                if !before.isEmpty {
-                                    stopSpinnerOnFirstVisibleOutput()
-                                    renderer.printChunk(before)
-                                }
-                                renderer.startThinking()
-                                isThinking = true
-                                pendingChunk = String(pendingChunk[range.upperBound...])
-                                if pendingChunk.hasPrefix("\n") { pendingChunk.removeFirst() }
-                            } else {
-                                // Hold if it might be the start of `<think>`
-                                let prefixes = ["<", "<t", "<th", "<thi", "<thin", "<think"]
-                                if prefixes.contains(where: pendingChunk.hasSuffix) {
-                                    break
-                                } else {
-                                    stopSpinnerOnFirstVisibleOutput()
-                                    renderer.printChunk(pendingChunk)
-                                    pendingChunk = ""
-                                }
+
+                    // Route each token through the think-block parser. Thinking tokens
+                    // are emitted directly; response tokens flow through the tool-call
+                    // writer so it can detect <tool_call> blocks without being confused
+                    // by reasoning content.
+                    for event in parser.feed(newText) {
+                        switch event {
+                        case .thinkingActivity(let lifecycle):
+                            switch lifecycle {
+                            case .started:
+                                beginThinkingIfNeeded()
+                            case .ended:
+                                endThinkingIfNeeded()
                             }
-                        } else {
-                            if let range = pendingChunk.range(of: ToolCallPattern.thinkClose) {
-                                let before = String(pendingChunk[..<range.lowerBound])
-                                if !before.isEmpty {
-                                    stopSpinnerOnFirstVisibleOutput()
-                                    renderer.printThinkingChunk(before)
-                                }
-                                renderer.endThinking()
-                                isThinking = false
-                                pendingChunk = String(pendingChunk[range.upperBound...])
-                                if pendingChunk.hasPrefix("\n") { pendingChunk.removeFirst() }
-                            } else {
-                                // Hold if it might be the start of `</think>`
-                                let prefixes = ["<", "</", "</t", "</th", "</thi", "</thin", "</think"]
-                                if prefixes.contains(where: pendingChunk.hasSuffix) {
-                                    break
-                                } else {
-                                    stopSpinnerOnFirstVisibleOutput()
-                                    renderer.printThinkingChunk(pendingChunk)
-                                    pendingChunk = ""
-                                }
+                        case .thinkingChunk(let chunk):
+                            beginThinkingIfNeeded()
+                            // Don't stop the spinner during thinking: the spinner
+                            // should keep animating with "Thinking…" label while
+                            // reasoning tokens stream in. Stopping it here (before
+                            // the TUI consumer processes the chunk) would tear down
+                            // the footer rendering state before any think line is
+                            // visible, causing all chunks to appear batched at the end.
+                            frontend.emit(.thinkingChunk(chunk))
+                        case .assistantTextChunk(let chunk):
+                            if hasOpenThinkingActivity {
+                                endThinkingIfNeeded()
                             }
+                            let result = writer.process(chunk)
+                            if !result.displayText.isEmpty {
+                                frontend.emit(.assistantTextChunk(result.displayText))
+                            }
+                        default:
+                            break
                         }
                     }
+                    // Yield to the Swift cooperative scheduler so the consumer task
+                    // (SwiftCoderTUIFrontend) can render the events we just emitted
+                    // before we generate the next token. Without this yield, the
+                    // scheduler may not interleave the consumer between token iterations
+                    // and all events would appear batched at the end of generation.
+                    await Task.yield()
                 case .info(let info):
-                    stopSpinnerOnFirstVisibleOutput()
-                    print()
                     let statMessage = String(format: "Generated %d tokens (%.1f tok/s), prompt: %d tokens (%.1f tok/s)",
                                              info.generationTokenCount, info.tokensPerSecond,
                                              info.promptTokenCount, info.promptTokensPerSecond)
-                    renderer.printStatus(statMessage)
-                    print()
+                    frontend.emitStatus(statMessage)
                 }
             }
             
-            // Flush any remaining text in pendingChunk
-            if !pendingChunk.isEmpty {
-                if isThinking {
-                    stopSpinnerOnFirstVisibleOutput()
-                    renderer.printThinkingChunk(pendingChunk)
-                } else {
-                    stopSpinnerOnFirstVisibleOutput()
-                    renderer.printChunk(pendingChunk)
+            // Flush any remaining buffered state in the parser
+            for event in parser.flush(closeUnterminatedThinkingBlock: true) {
+                switch event {
+                case .thinkingActivity(let lifecycle):
+                    switch lifecycle {
+                    case .started:
+                        beginThinkingIfNeeded()
+                    case .ended:
+                        endThinkingIfNeeded()
+                    }
+                case .thinkingChunk(let chunk):
+                    beginThinkingIfNeeded()
+                    frontend.emit(.thinkingChunk(chunk))
+                case .assistantTextChunk(let chunk):
+                    if hasOpenThinkingActivity {
+                        endThinkingIfNeeded()
+                    }
+                    let result = writer.process(chunk)
+                    if !result.displayText.isEmpty {
+                        frontend.emit(.assistantTextChunk(result.displayText))
+                    }
+                default:
+                    break
                 }
             }
             
@@ -298,9 +336,6 @@ extension AgentLoop {
             
             return (text: rawResponseText, writer: writer)
         }
-
-        // Cleanup spinner if generation failed or returned nothing
-        Task { await spinner.stop(clearLine: true) }
 
         return result
     }

@@ -10,7 +10,7 @@ extension AgentLoop {
 
     /// Full model unload and reload to ensure fresh weights/cache.
     public func reloadModel() async throws {
-        renderer.printStatus("Reloading model to ensure fresh state...")
+        frontend.emit(.modelLifecycle(.loading("Reloading model to ensure fresh state...")))
 
         // Drop tool references first so old model-bound tools can be deallocated.
         await registry.clear()
@@ -33,6 +33,9 @@ extension AgentLoop {
         self.loadedMemoryLimit = memoryLimit
         self.loadedCacheLimit = cacheLimit
         self.loadedKVBits = currentGenerationConfig.kvBits
+        self.loadedKVGroupSize = currentGenerationConfig.kvGroupSize
+        self.loadedQuantizedKVStart = currentGenerationConfig.quantizedKVStart
+        self.loadedTurboQuantBits = currentGenerationConfig.turboQuantBits
         
         // Re-register tools that depend on modelContainer
         await registerToolsInternal()
@@ -40,7 +43,7 @@ extension AgentLoop {
         // Sweep again after rebinding to reclaim stale buffers from the old model.
         MLX.Memory.clearCache()
         
-        renderer.printStatus("Model reloaded successfully")
+        frontend.emit(.modelLifecycle(.reloaded("Model reloaded successfully")))
     }
 
     /// Switch to a different model path and immediately reload model and dependent tools.
@@ -55,14 +58,35 @@ extension AgentLoop {
         }
 
         if trimmed == modelPath {
-            renderer.printStatus("Model is already active: \(trimmed)")
+            frontend.emit(.modelLifecycle(.alreadyActive(trimmed)))
             return
         }
 
-        renderer.printStatus("Unloading current model...")
+        frontend.emit(.modelLifecycle(.unloading("Unloading current model...")))
         modelPath = trimmed
         pendingReload = false
         try await reloadModel()
+    }
+
+    /// Stage a model switch to be applied on the next user message turn.
+    /// This updates `modelPath` and marks `pendingReload` without reloading immediately.
+    public func stageModelSwitch(to newModelPath: String) async throws {
+        let trimmed = newModelPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            throw NSError(
+                domain: "AgentLoop",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "Model path cannot be empty."]
+            )
+        }
+
+        if trimmed == modelPath {
+            frontend.emit(.modelLifecycle(.alreadyActive(trimmed)))
+            return
+        }
+
+        modelPath = trimmed
+        pendingReload = true
     }
 
     func requireLoadedModelContainer() throws -> ModelContainer {

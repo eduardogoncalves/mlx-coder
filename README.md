@@ -16,9 +16,9 @@ mlx-coder is built to run local LLM workflows on macOS with a native MLX app arc
 
 ## Requirements
 
-- **macOS 14+** (Sonoma or later)
+- **macOS 15+** (Sequoia or later)
 - **Apple Silicon** (M1 or later)
-- **Swift 5.12+** / Xcode 16+
+- **Swift 6.3.1** / Xcode 16.4+
 - A local MLX model directory (default: `~/models/Qwen/Qwen3.5-9B-4bit`)
 
 ## Building
@@ -86,6 +86,14 @@ Start an interactive session:
 ```bash
 mlx-coder chat
 ```
+
+Experimental TUI mode is also available:
+
+```bash
+mlx-coder chat --ui tui
+```
+
+The TUI interface is still experimental and may change between releases.
 
 With custom options:
 
@@ -205,6 +213,17 @@ mlx-coder doctor --strict --json
 | `--voice` | `false` | (`run` only) Record voice prompt via Speech Recognition instead of `--prompt` |
 | `--voice-silence-timeout` | `2.0` | Seconds of silence before voice recording stops automatically |
 | `--voice-locale` | device locale | BCP 47 locale tag for speech recognition, e.g. `en-US`, `fr-FR` |
+
+### Sandbox default profile (balanced)
+
+When sandbox mode is enabled, shell commands run with:
+
+- default write deny (`deny file-write*`)
+- explicit write allows for workspace, temp dirs, and common package/tool caches
+- explicit device access for `/dev/null` and `/dev/tty` (required by git and many CLIs)
+- network allowed by default (can be disabled via `SandboxEngine(networkPolicy: .deny)`)
+
+Common cache/tool paths covered include NuGet, npm/pnpm/yarn, cargo, Maven/Gradle, Go module/bin dirs, SwiftPM, and Python pip/uv caches.
 
 ## Interactive Commands
 

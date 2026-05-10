@@ -9,27 +9,28 @@ extension AgentLoop {
     /// This checks for build errors and attempts fixes if needed.
     func performBuildCheckIfNeeded(modifiedPaths: Set<String>) async {
         guard shouldRunBuildCheck(for: modifiedPaths) else {
-            renderer.printStatus("⏭️  Skipping build check: only non-build files were modified")
+            frontend.emit(.buildCheck(.skipped(reason: "only non-build files were modified")))
             return
         }
 
-        renderer.printStatus("🔧 Checking builds in agent/coding mode...")
+        frontend.emit(.buildCheck(.started(message: "🔧 Checking builds in agent/coding mode...")))
         
+        let frontendSnapshot = self.frontend
         let success = await buildCheckManager.checkBeforeCommit(
             workspace: permissions.effectiveWorkspaceRoot,
             onProgress: { msg in
-                // Progress updates from Ralph loop
-                self.renderer.printStatus("  → \(msg)")
-            },
-            streamRenderer: renderer
+                frontendSnapshot.emit(.buildCheck(.progress(msg)))
+            }
         )
         
         if success {
-            renderer.printStatus("✅ Build check passed - ready for commit!")
+            frontend.emit(.buildCheck(.passed))
         } else {
-            // Build check failed even after fix attempts - inform user
-            renderer.printStatus("⚠️  Build has errors that need manual fixing")
-            renderer.printStatus("Use build_check tool for detailed error information, then fix and commit.")
+            let firstErrors = [
+                "Build has errors that need manual fixing",
+                "Use build_check tool for detailed error information, then fix and commit.",
+            ]
+            frontend.emit(.buildCheck(.failed(errorCount: nil, firstErrors: firstErrors)))
         }
     }
 

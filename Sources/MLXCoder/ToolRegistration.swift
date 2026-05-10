@@ -13,6 +13,7 @@ func registerAllTools(
     useSandbox: Bool,
     config: GenerationEngine.Config,
     renderer: StreamRenderer,
+    frontend: any AgentFrontend,
     mcpConfigs: [MCPClient.ServerConfig] = []
 ) async {
     // Filesystem tools
@@ -40,10 +41,10 @@ func registerAllTools(
         modelPath: modelPath,
         useSandbox: useSandbox,
         parentRegistry: registry,
-        renderer: renderer
+        frontend: frontend
     ))
     await registry.register(TodoTool(workspaceRoot: permissions.workspaceRoot))
-    await registry.register(ProjectExpertLoRATool(modelContainer: modelContainer, workspaceRoot: permissions.workspaceRoot, modelPath: modelPath))
+    await registry.register(ProjectExpertLoRATool(modelContainer: modelContainer, workspaceRoot: permissions.workspaceRoot, modelPath: modelPath, frontend: frontend))
 
     // Web tools
     await registry.register(WebFetchTool(

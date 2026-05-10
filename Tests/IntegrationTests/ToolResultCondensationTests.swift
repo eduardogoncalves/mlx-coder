@@ -21,16 +21,18 @@ final class ToolResultCondensationTests: XCTestCase {
         )
     }
 
-    func testCompactStructuredPayloadDoesNotCondense() {
+    func testCompactStructuredPayloadFromWebFetchAlwaysCondenses() {
         let config = ToolResultCondensationConfig(
             largeResultTokenThreshold: 20,
             charsPerTokenEstimate: 4
         )
 
+        // web_fetch is always condensed regardless of payload size or structure,
+        // because raw web content must never reach the main LLM context unfiltered.
         let compactJSON = "{\"status\":\"ok\",\"code\":200,\"message\":\"done\"}"
         let result = ToolResult(content: compactJSON)
 
-        XCTAssertFalse(
+        XCTAssertTrue(
             ToolResultCondensationPolicy.shouldCondense(
                 toolName: "web_fetch",
                 result: result,

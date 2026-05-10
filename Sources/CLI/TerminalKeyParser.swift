@@ -77,6 +77,20 @@ enum TerminalKeyParser {
         }
     }
 
+    static func isShiftTab(_ sequence: [UInt8]) -> Bool {
+        guard sequence.count >= 2, let first = sequence.first else { return false }
+        guard first == 91 || first == 79 else { return false }
+        return sequence.last == 90
+    }
+
+    static func isOptionEnter(_ sequence: [UInt8]) -> Bool {
+        if sequence == [13] || sequence == [10] {
+            return true
+        }
+
+        return sequence == [91, 49, 51, 59, 51, 117] // ESC [ 13 ; 3 u (Alt/Option+Enter)
+    }
+
     static func numericSelection(for byte: UInt8, optionCount: Int) -> Int? {
         guard optionCount > 0, byte >= 49, byte <= 57 else { return nil }
         let index = Int(byte - 49)

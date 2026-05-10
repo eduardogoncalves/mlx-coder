@@ -34,44 +34,99 @@ public struct SandboxEngine: Sendable {
         let escapedProfile = profile.replacingOccurrences(of: "'", with: "'\\''")
         let escapedCommand = command.replacingOccurrences(of: "'", with: "'\\''")
         
-        // Return the wrapped command
-        // sandbox-exec -p '<profile>' '<command>'
-        // Both profile and command must be quoted to prevent shell injection.
-        return "sandbox-exec -p '\(escapedProfile)' '\(escapedCommand)'"
+        // Return the wrapped command. Use an explicit shell entrypoint so commands with
+        // arguments/operators are executed correctly under sandbox-exec.
+        return "sandbox-exec -p '\(escapedProfile)' /bin/zsh -c '\(escapedCommand)'"
     }
     
     /// Generates a Seatbelt profile string.
     private func generateProfile(workspaceRoot: String) -> String {
+        let canonicalWorkspaceRoot = canonicalWorkspacePath(workspaceRoot)
+        let escapedWorkspaceRoot = escapeForProfileString(canonicalWorkspaceRoot)
+
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        // Balanced developer baseline:
+        // Explicit writable subpaths for common package managers/toolchains,
+        // while keeping broad home-directory writes denied.
+        let packageCachePaths: [String] = [
+            // .NET / NuGet
+            "\(home)/.local/share/NuGet",
+            "\(home)/.nuget",
+            // Node.js ecosystem
+            "\(home)/.npm",
+            "\(home)/.pnpm-store",
+            "\(home)/.yarn",
+            // Rust
+            "\(home)/.cargo",
+            // Java / Kotlin (Maven + Gradle)
+            "\(home)/.m2",
+            "\(home)/.gradle",
+            // Go modules / installed binaries
+            "\(home)/go/pkg/mod",
+            "\(home)/go/bin",
+            // Swift package metadata/cache
+            "\(home)/.swiftpm",
+            // Python tooling caches
+            "\(home)/.cache/pip",
+            "\(home)/.cache/uv",
+            // General caches (kept for compatibility with existing behavior)
+            "\(home)/.cache",
+            "\(home)/Library/Caches",
+        ]
+        let packageCacheRules = packageCachePaths
+            .map { "        (allow file-write* (subpath \"\(escapeForProfileString($0))\"))" }
+            .joined(separator: "\n")
+
         let networkRule: String
         switch networkPolicy {
         case .allow:
-            networkRule = "(allow network*)"
+            networkRule = "        (allow network*)"
         case .deny:
-            networkRule = ";; Network connections denied by policy\n        (deny network*)"
+            networkRule = "        ;; Network connections denied by policy\n        (deny network*)"
         }
 
-        return """
-        (version 1)
-        (allow default)
-        
-        ;; Block all writes by default
-        (deny file-write*)
-        
-        ;; Allow writes to system temp and common paths
-        (allow file-write* (subpath "/tmp"))
-        (allow file-write* (subpath "/private/tmp"))
-        (allow file-write* (subpath "/var/folders"))
-        (allow file-write* (subpath "/private/var/folders"))
-        
-        ;; Allow writes within the workspace
-        (allow file-write* (subpath "\(workspaceRoot)"))
-        
-        ;; Ensure we can read everything otherwise (allow default covers this but let's be explicit for write-related reads if any)
-        (allow file-read*)
-        
-        ;; Allow process execution and networking (permissive-open style)
-        (allow process*)
-        \(networkRule)
-        """
+        let lines: [String] = [
+            "        (version 1)",
+            "        (allow default)",
+            "        ",
+            "        ;; Block all writes by default",
+            "        (deny file-write*)",
+            "        ",
+            "        ;; Allow null/tty devices — git and many tools open /dev/null O_RDWR",
+            "        (allow file-write* (literal \"/dev/null\"))",
+            "        (allow file-read* (literal \"/dev/null\"))",
+            "        (allow file-write* (literal \"/dev/tty\"))",
+            "        (allow file-read* (literal \"/dev/tty\"))",
+            "        ",
+            "        ;; Allow writes to system temp and common paths",
+            "        (allow file-write* (subpath \"/tmp\"))",
+            "        (allow file-write* (subpath \"/private/tmp\"))",
+            "        (allow file-write* (subpath \"/var/folders\"))",
+            "        (allow file-write* (subpath \"/private/var/folders\"))",
+            "        ",
+            "        ;; Allow writes within the workspace",
+            "        (allow file-write* (subpath \"\(escapedWorkspaceRoot)\"))",
+            "        ",
+            "        ;; Package manager caches / data dirs (NuGet, npm, cargo, etc.)",
+            packageCacheRules,
+            "        ",
+            "        ;; Allow process execution and networking (permissive-open style)",
+            "        (allow process*)",
+            networkRule,
+        ]
+        return lines.joined(separator: "\n")
+    }
+
+    private func canonicalWorkspacePath(_ workspaceRoot: String) -> String {
+        URL(filePath: workspaceRoot)
+            .standardized
+            .resolvingSymlinksInPath()
+            .path()
+    }
+
+    private func escapeForProfileString(_ value: String) -> String {
+        value
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
     }
 }

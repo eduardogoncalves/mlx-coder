@@ -178,7 +178,7 @@ public final class InteractiveInput: @unchecked Sendable {
             print("\r\(lineDim)╰\(bottomBorder)\(reset)")
             
             // textRows + 2: Footer
-            let shortcuts = "Enter send | Shift+Tab mode | ? shortcuts"
+            let shortcuts = "Enter send | Ctrl+J/⌥+Enter/\\+Enter newline | ⌘V paste | Ctrl+V voice | Shift+Tab mode | ? shortcuts"
             let contextStr = contextPercent != nil ? String(format: "%.1f%% context used", contextPercent!) : ""
             var footerText = contextStr.isEmpty ? shortcuts : "\(shortcuts) | \(contextStr)"
             if !version.isEmpty {
@@ -245,8 +245,21 @@ public final class InteractiveInput: @unchecked Sendable {
                 }
                 print("\r\u{1B}[J", terminator: "")
                 return nil
-            } else if byte == 10 || byte == 13 { // Enter
+            } else if byte == 13 { // Enter
+                if cursorPosition > 0 {
+                    let previousIndex = input.index(input.startIndex, offsetBy: cursorPosition - 1)
+                    if input[previousIndex] == "\\" {
+                        input.remove(at: previousIndex)
+                        cursorPosition -= 1
+                        insertTextAtCursor("\n")
+                        redraw()
+                        continue
+                    }
+                }
                 break
+            } else if byte == 10 { // Ctrl+J
+                insertTextAtCursor("\n")
+                redraw()
             } else if byte == 127 { // Backspace
                 if cursorPosition > 0 {
                     let index = input.index(input.startIndex, offsetBy: cursorPosition - 1)
@@ -263,6 +276,9 @@ public final class InteractiveInput: @unchecked Sendable {
                         insertTextAtCursor(pasted)
                         redraw()
                     }
+                } else if TerminalKeyParser.isOptionEnter(seq) {
+                    insertTextAtCursor("\n")
+                    redraw()
                 } else if seq.count == 1 && seq[0] == 98 { // Option+Left (Esc b)
                     moveToPreviousWord(input: input, cursorPosition: &cursorPosition)
                     redraw()
@@ -298,13 +314,10 @@ public final class InteractiveInput: @unchecked Sendable {
                             redraw()
                         }
                     }
-                } else if seq.count >= 2 && (seq[0] == 91 || seq[0] == 79) {
-                    let type = seq.last!
-                    if type == 90 { // Shift+Tab (Z)
-                        if let toggle = onModeToggle {
-                            mode = await toggle()
-                            redraw()
-                        }
+                } else if TerminalKeyParser.isShiftTab(seq) {
+                    if let toggle = onModeToggle {
+                        mode = await toggle()
+                        redraw()
                     }
                 }
             } else if byte == 22 { // Ctrl+V — voice input
@@ -423,7 +436,9 @@ public final class InteractiveInput: @unchecked Sendable {
             }
             isInitialDraw = false
 
-            print("\n\(bold)\(title)\(reset)")
+            // Start the picker on a fresh line so the prompt never appends to the
+            // TUI separator row (which can appear as "──Coding mode git setup").
+            print("\r\n\(bold)\(title)\(reset)")
             print("\(dim)\(footer)\(reset)")
             print("")
 

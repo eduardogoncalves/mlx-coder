@@ -50,7 +50,12 @@ extension AgentLoop {
         return "\(toolName) \(command) \(String(describing: otherArguments))"
     }
 
-    /// Prompt the user to approve a tool call using raw terminal mode.
+    /// Prompt the user to approve a tool call.
+    ///
+    /// All interactive UI is delegated to `frontend.request(.approval(...))`.
+    /// For `LegacyTerminalFrontend`, the raw terminal menu runs via the
+    /// `approvalHandler` closure wired in `AgentLoop.init`.
+    /// For `SwiftCoderTUIFrontend`, the TUI renderer handles it natively.
     func askForToolApproval(name: String, arguments: [String: Any]? = nil, isPlanMode: Bool) async -> (approved: Bool, suggestion: String?) {
         let approvalCommand = Self.approvalCommandKey(toolName: name, arguments: arguments)
         let approvalCommandDisplay = Self.approvalCommandDisplay(toolName: name, arguments: arguments)
@@ -92,24 +97,86 @@ extension AgentLoop {
 
         await CancelController.shared.suspendListening()
 
-        func resumeCancelListeningAndReturn(_ result: (approved: Bool, suggestion: String?)) async -> (approved: Bool, suggestion: String?) {
-            await CancelController.shared.resumeListeningIfNeeded()
-            return result
+        var stringArgs: [String: String] = [:]
+        if let args = arguments {
+            for (k, v) in args { stringArgs[k] = "\(v)" }
         }
-        
+        let request = ApprovalRequest(
+            toolName: name,
+            display: approvalCommandDisplay,
+            cacheKey: approvalCommand,
+            isPlanModeBlock: isPlanMode,
+            arguments: stringArgs
+        )
+
+        let response = await frontend.request(.approval(request))
+
+        await CancelController.shared.resumeListeningIfNeeded()
+
+        guard case .approval(let decision) = response else {
+            await auditLogger?.logApprovalDecision(
+                toolName: name, mode: mode.rawValue,
+                isPlanModePrompt: isPlanMode, approved: false, suggestion: nil
+            )
+            return (false, nil)
+        }
+
+        switch decision {
+        case .allowOnce, .switchToAgentAndAllow:
+            await auditLogger?.logApprovalDecision(
+                toolName: name, mode: mode.rawValue,
+                isPlanModePrompt: isPlanMode, approved: true, suggestion: nil
+            )
+            return (true, nil)
+
+        case .allowAlwaysForCommand:
+            sessionApprovedToolCommands.insert(approvalCommand)
+            await auditLogger?.logApprovalDecision(
+                toolName: name, mode: mode.rawValue,
+                isPlanModePrompt: isPlanMode, approved: true,
+                suggestion: "session_command_auto_approve_enabled:\(LoopDetectionService.sanitizeAuditField(approvalCommand))"
+            )
+            return (true, nil)
+
+        case .allowAllAutopilot:
+            autoApproveAllTools = true
+            await auditLogger?.logApprovalDecision(
+                toolName: name, mode: mode.rawValue,
+                isPlanModePrompt: isPlanMode, approved: true,
+                suggestion: "session_autopilot_mode_enabled"
+            )
+            return (true, nil)
+
+        case .deny(let suggestion):
+            await auditLogger?.logApprovalDecision(
+                toolName: name, mode: mode.rawValue,
+                isPlanModePrompt: isPlanMode, approved: false, suggestion: suggestion
+            )
+            return (false, suggestion)
+        }
+    }
+
+    /// Raw terminal approval menu used by `LegacyTerminalFrontend`.
+    ///
+    /// This is set as `LegacyTerminalFrontend.approvalHandler` during
+    /// `AgentLoop.init`, so all interactive approval in the legacy terminal
+    /// path goes through here while the TUI path uses `renderer.requestApproval`.
+    func rawTerminalApprovalInteraction(request: ApprovalRequest) async -> ApprovalDecision {
+        let isPlanMode = request.isPlanModeBlock
+        let name = request.toolName
+        let approvalCommandDisplay = request.display
+
         var originalTermios = termios()
         tcgetattr(STDIN_FILENO, &originalTermios)
-        
+
         var rawTermios = originalTermios
         rawTermios.c_lflag &= ~tcflag_t(ICANON | ECHO | ISIG)
-        rawTermios.c_cc.16 = 1  // VMIN - wait for at least 1 byte
+        rawTermios.c_cc.16 = 1  // VMIN
         rawTermios.c_cc.17 = 0  // VTIME
         tcsetattr(STDIN_FILENO, TCSANOW, &rawTermios)
-        
-        // Flush any stale bytes from stdin that may have been buffered
-        // during async operations like Shift+Tab mode cycling.
+
         tcflush(STDIN_FILENO, TCIFLUSH)
-        
+
         let commandScopedOption: String
         if approvalCommandDisplay.contains("'") {
             commandScopedOption = "Yes, allow \"\(approvalCommandDisplay)\" always in this session"
@@ -133,14 +200,14 @@ extension AgentLoop {
             ? "Use arrows, Enter, or Esc."
             : "Use \(optionHint), arrows, Enter, or Esc."
         var footerHint = selectionHint
-        
+
         func drawMenu() {
             if menuDrawnOnce {
                 print("\u{1B}[\(options.count + 1)A", terminator: "")
             } else {
                 print() // empty line only once at the start
             }
-            
+
             let message = isPlanMode ? "Tool '\(name)' is blocked in PLAN mode. Switch to AGENT mode?" : "Do you want to proceed?"
             print("\r\u{1B}[K\(message)")
             for (i, option) in options.enumerated() {
@@ -152,28 +219,27 @@ extension AgentLoop {
             }
             print("\r\u{1B}[K\(footerHint) Waiting for user confirmation... [\(selectedIndex + 1)/\(options.count)]: ", terminator: "")
             fflush(stdout)
-            
+
             menuDrawnOnce = true
         }
-        
+
         // Hide cursor
         print("\u{1B}[?25l", terminator: "")
-        renderer.printStatus("[Key mode] Approval required. \(footerHint)")
+        frontend.emitStatus("[Key mode] Approval required. \(footerHint)")
         drawMenu()
-        
+
         var finalSelection = -1
         var shouldDrainInputTail = false
-        
+
         while true {
             var byte: UInt8 = 0
             let bytesRead = read(STDIN_FILENO, &byte, 1)
             if bytesRead <= 0 { continue }
-            
+
             if byte == 27 { // ESC or escape sequence
                 let seq = TerminalKeyParser.readEscapeSequence()
                 let escapeKind = TerminalKeyParser.classifyEscapeSequence(seq)
                 if escapeKind == .bare {
-                    // Bare ESC — treat as deny/cancel
                     shouldDrainInputTail = true
                     finalSelection = isPlanMode ? 1 : (options.count - 1)
                     break
@@ -197,7 +263,6 @@ extension AgentLoop {
                         drawMenu()
                     }
                 } else {
-                    // Alt-key combos or unsupported escape sequences are ignored.
                     shouldDrainInputTail = true
                     footerHint = "Unsupported key. \(selectionHint)"
                     drawMenu()
@@ -212,7 +277,6 @@ extension AgentLoop {
                 finalSelection = numericSelection
                 break
             } else if byte == 3 { // Ctrl+C
-                // Restore terminal and exit completely
                 tcsetattr(STDIN_FILENO, TCSANOW, &originalTermios)
                 print("\u{1B}[?25h\n")
                 exit(1)
@@ -221,47 +285,25 @@ extension AgentLoop {
                 drawMenu()
             }
         }
-        
-        // Drain buffered tails only when we consumed partial escape sequences.
+
         if shouldDrainInputTail {
             TerminalKeyParser.drainAvailableInput()
         }
-        
-        // Restore terminal and show cursor
+
         tcsetattr(STDIN_FILENO, TCSANOW, &originalTermios)
         print("\u{1B}[?25h\n")
 
         if finalSelection == 0 {
-            await auditLogger?.logApprovalDecision(
-                toolName: name,
-                mode: mode.rawValue,
-                isPlanModePrompt: isPlanMode,
-                approved: true,
-                suggestion: nil
-            )
-            return await resumeCancelListeningAndReturn((true, nil))
+            if isPlanMode {
+                return .switchToAgentAndAllow
+            }
+            return .allowOnce
         } else if finalSelection == 1 && !isPlanMode {
-            await auditLogger?.logApprovalDecision(
-                toolName: name,
-                mode: mode.rawValue,
-                isPlanModePrompt: isPlanMode,
-                approved: true,
-                suggestion: "session_command_auto_approve_enabled:\(LoopDetectionService.sanitizeAuditField(approvalCommand))"
-            )
-            sessionApprovedToolCommands.insert(approvalCommand)
-            return await resumeCancelListeningAndReturn((true, nil))
+            return .allowAlwaysForCommand
         } else if finalSelection == 2 && !isPlanMode {
-            autoApproveAllTools = true
-            await auditLogger?.logApprovalDecision(
-                toolName: name,
-                mode: mode.rawValue,
-                isPlanModePrompt: isPlanMode,
-                approved: true,
-                suggestion: "session_autopilot_mode_enabled"
-            )
-            return await resumeCancelListeningAndReturn((true, nil))
+            return .allowAllAutopilot
         } else {
-            // Last option or ESC: Suggest changes
+            // Last option or ESC — optionally read a suggestion
             TerminalKeyParser.drainAvailableInput()
             var suggestionTerm = termios()
             tcgetattr(STDIN_FILENO, &suggestionTerm)
@@ -270,26 +312,14 @@ extension AgentLoop {
             cookedTerm.c_cc.16 = 1
             cookedTerm.c_cc.17 = 0
             tcsetattr(STDIN_FILENO, TCSANOW, &cookedTerm)
-            print("[\(name)] Blocked. Suggest changes (or press Enter to deny with no comment): ", terminator: "")
+            print("\r\n\u{1B}[K[\(name)] Canceled. Suggest changes or press Enter to continue with no comment: ", terminator: "")
             fflush(stdout)
-            guard let suggestion = readLine(strippingNewline: true)?.trimmingCharacters(in: .whitespacesAndNewlines), !suggestion.isEmpty else {
-                await auditLogger?.logApprovalDecision(
-                    toolName: name,
-                    mode: mode.rawValue,
-                    isPlanModePrompt: isPlanMode,
-                    approved: false,
-                    suggestion: nil
-                )
-                return await resumeCancelListeningAndReturn((false, nil))
+            let suggestion = readLine(strippingNewline: true)?.trimmingCharacters(in: .whitespacesAndNewlines)
+            tcsetattr(STDIN_FILENO, TCSANOW, &suggestionTerm)
+            guard let text = suggestion, !text.isEmpty else {
+                return .deny(suggestion: nil)
             }
-            await auditLogger?.logApprovalDecision(
-                toolName: name,
-                mode: mode.rawValue,
-                isPlanModePrompt: isPlanMode,
-                approved: false,
-                suggestion: suggestion
-            )
-            return await resumeCancelListeningAndReturn((false, suggestion))
+            return .deny(suggestion: text)
         }
     }
 }

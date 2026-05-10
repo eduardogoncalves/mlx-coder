@@ -20,7 +20,8 @@ extension AgentLoop {
             maxTokens: currentGenerationConfig.maxTokens,
             mode: mode,
             thinkingLevel: thinkingLevel,
-            taskType: taskType,
+            taskType: self.taskType,
+            workspaceRoot: permissions.effectiveWorkspaceRoot,
             memorySection: memoryPromptSection,
             customizationSection: customizationPromptSection,
             skillsMetadata: skillsMetadata
@@ -29,15 +30,23 @@ extension AgentLoop {
         history.updateSystemPrompt(composition.prompt)
         
         let status = enabled ? "\u{001B}[32mEnabled\u{001B}[0m" : "\u{001B}[31mDisabled\u{001B}[0m"
-        renderer.printStatus("macOS Seatbelt Sandbox: \(status)")
+        frontend.emitStatus("macOS Seatbelt Sandbox: \(status)")
     }
 
     /// Sets the working mode (agent/plan) and refreshes the system prompt.
-    public func setMode(_ mode: WorkingMode, silent: Bool = false) async {
+    public func setMode(_ mode: WorkingMode, taskType: TaskType? = nil, silent: Bool = false) async {
         self.mode = mode
+        if let taskType {
+            self.taskType = taskType
+            if taskType != .coding {
+                skipGitOrchestrationInitialization = false
+            }
+        }
+        syncAutopilotApprovalState()
         syncCurrentModeFromSettings()
         
         updateGenerationConfig()
+        updatePendingReloadIfNeeded()
         
         // Update system prompt in history
         let composition = await AgentLoop.buildSystemPromptComposition(
@@ -45,7 +54,8 @@ extension AgentLoop {
             maxTokens: currentGenerationConfig.maxTokens,
             mode: mode,
             thinkingLevel: thinkingLevel,
-            taskType: taskType,
+            taskType: self.taskType,
+            workspaceRoot: permissions.effectiveWorkspaceRoot,
             memorySection: memoryPromptSection,
             customizationSection: customizationPromptSection,
             skillsMetadata: skillsMetadata
@@ -54,8 +64,11 @@ extension AgentLoop {
         history.updateSystemPrompt(composition.prompt)
         
         if !silent {
-            let modeStr = mode == .plan ? "\u{001B}[33mPLAN\u{001B}[0m" : "\u{001B}[32mAGENT\u{001B}[0m"
-            renderer.printStatus("Working Mode: \(modeStr)")
+            frontend.emit(.modeChanged(ModeSnapshot(
+                workingMode: mode.rawValue,
+                thinkingLevel: thinkingLevel.rawValue,
+                taskType: self.taskType.rawValue
+            )))
         }
     }
 
@@ -64,6 +77,7 @@ extension AgentLoop {
         self.thinkingLevel = level
         syncCurrentModeFromSettings()
         updateGenerationConfig()
+        updatePendingReloadIfNeeded()
         
         // Update system prompt in history
         let composition = await AgentLoop.buildSystemPromptComposition(
@@ -72,6 +86,7 @@ extension AgentLoop {
             mode: mode,
             thinkingLevel: level,
             taskType: taskType,
+            workspaceRoot: permissions.effectiveWorkspaceRoot,
             memorySection: memoryPromptSection,
             customizationSection: customizationPromptSection,
             skillsMetadata: skillsMetadata
@@ -79,7 +94,11 @@ extension AgentLoop {
         promptSectionTokenEstimates = composition.sectionTokenEstimates
         history.updateSystemPrompt(composition.prompt)
         
-        renderer.printStatus("Thinking Level: \u{001B}[32m\(level.displayName.uppercased())\u{001B}[0m")
+        frontend.emit(.modeChanged(ModeSnapshot(
+            workingMode: mode.rawValue,
+            thinkingLevel: level.rawValue,
+            taskType: taskType.rawValue
+        )))
     }
 
     /// Sets the task type (general/coding/reasoning) and updates generation parameters.
@@ -88,55 +107,41 @@ extension AgentLoop {
         if type != .coding {
             skipGitOrchestrationInitialization = false
         }
+        syncAutopilotApprovalState()
         syncCurrentModeFromSettings()
         updateGenerationConfig()
+        updatePendingReloadIfNeeded()
         
-        let typeStr = type.rawValue.uppercased()
-        renderer.printStatus("Task Type: \u{001B}[32m\(typeStr)\u{001B}[0m")
+        frontend.emit(.modeChanged(ModeSnapshot(
+            workingMode: mode.rawValue,
+            thinkingLevel: thinkingLevel.rawValue,
+            taskType: type.rawValue
+        )))
     }
 
-    /// Cycles to the next available mode (triggered by Shift+Tab).
+    /// Cycles Shift+Tab across high-level states only:
+    /// coding (empty) -> plan -> autopilot -> coding.
     public func cycleMode() async -> String {
-        let allModes = ModelMode.allCases
-        let currentIndex = allModes.firstIndex(of: currentMode) ?? 0
-        let nextIndex = (currentIndex + 1) % allModes.count
-        let nextMode = allModes[nextIndex]
-        
-        self.currentMode = nextMode
-        
-        // Map ModelMode to underlying settings
-        switch nextMode {
-        case .planLow:
+        // Keep thinking level unchanged; only rotate high-level mode semantics.
+        switch (self.mode, self.taskType) {
+        case (.agent, .coding):
+            // coding -> plan
             self.mode = .plan
-            self.thinkingLevel = .low
-            self.taskType = .general
-        case .planHigh:
-            self.mode = .plan
-            self.thinkingLevel = .high
-            self.taskType = .general
-        case .agentGeneralFast:
-            self.mode = .agent
-            self.thinkingLevel = .fast
-            self.taskType = .general
-        case .agentGeneralLow:
-            self.mode = .agent
-            self.thinkingLevel = .low
-            self.taskType = .general
-        case .agentCodingFast:
-            self.mode = .agent
-            self.thinkingLevel = .fast
             self.taskType = .coding
-        case .agentCodingLow:
+        case (.plan, _):
+            // plan -> autopilot (agent + allow-all-tools semantics in frontends)
             self.mode = .agent
-            self.thinkingLevel = .low
-            self.taskType = .coding
-        case .agentCodingHigh:
+            self.taskType = .general
+        case (.agent, _):
+            // autopilot/non-coding agent -> coding
             self.mode = .agent
-            self.thinkingLevel = .high
             self.taskType = .coding
         }
+        syncAutopilotApprovalState()
+        syncCurrentModeFromSettings()
         
         updateGenerationConfig()
+        updatePendingReloadIfNeeded()
         
         // Update system prompt in history
         let composition = await AgentLoop.buildSystemPromptComposition(
@@ -145,6 +150,7 @@ extension AgentLoop {
             mode: self.mode,
             thinkingLevel: self.thinkingLevel,
             taskType: self.taskType,
+            workspaceRoot: permissions.effectiveWorkspaceRoot,
             memorySection: memoryPromptSection,
             customizationSection: customizationPromptSection,
             skillsMetadata: skillsMetadata
@@ -152,17 +158,13 @@ extension AgentLoop {
         promptSectionTokenEstimates = composition.sectionTokenEstimates
         history.updateSystemPrompt(composition.prompt)
         
-        // Defer reload only if loading parameters changed
-        let needsReload = self.modelPath != self.loadedModelPath ||
-                          self.memoryLimit != self.loadedMemoryLimit ||
-                          self.cacheLimit != self.loadedCacheLimit ||
-                          self.currentGenerationConfig.kvBits != self.loadedKVBits
-                          
-        if needsReload {
-            self.pendingReload = true
-        }
+        frontend.emit(.modeChanged(ModeSnapshot(
+            workingMode: mode.rawValue,
+            thinkingLevel: thinkingLevel.rawValue,
+            taskType: taskType.rawValue
+        )))
         
-        return nextMode.rawValue
+        return currentMode.rawValue
     }
 
     // MARK: - Internal Config Helpers
@@ -174,6 +176,21 @@ extension AgentLoop {
             taskType: taskType,
             mode: mode
         )
+    }
+
+    func updatePendingReloadIfNeeded() {
+        // Reload only when model loading/runtime-cache parameters changed.
+        let needsReload = self.modelPath != self.loadedModelPath ||
+            self.memoryLimit != self.loadedMemoryLimit ||
+            self.cacheLimit != self.loadedCacheLimit ||
+            self.currentGenerationConfig.kvBits != self.loadedKVBits ||
+            self.currentGenerationConfig.kvGroupSize != self.loadedKVGroupSize ||
+            self.currentGenerationConfig.quantizedKVStart != self.loadedQuantizedKVStart ||
+            self.currentGenerationConfig.turboQuantBits != self.loadedTurboQuantBits
+
+        if needsReload {
+            self.pendingReload = true
+        }
     }
 
     func syncCurrentModeFromSettings() {
@@ -200,6 +217,11 @@ extension AgentLoop {
                 }
             }
         }
+    }
+
+    func syncAutopilotApprovalState() {
+        // In autopilot (agent + general), tool calls should proceed without prompts.
+        autoApproveAllTools = (mode == .agent && taskType == .general)
     }
 
     static func calculateGenerationConfig(

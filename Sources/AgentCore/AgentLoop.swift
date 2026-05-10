@@ -33,7 +33,9 @@ public actor AgentLoop {
     var modelContainer: ModelContainer?
     let registry: ToolRegistry
     var permissions: PermissionEngine
-    let renderer: StreamRenderer
+    var frontend: any AgentFrontend
+    /// When true, AgentCore emits debug-level status events.
+    let verbose: Bool
     let auditLogger: ToolAuditLogger?
     public internal(set) var history: ConversationHistory
     let maxToolIterations: Int
@@ -61,6 +63,9 @@ public actor AgentLoop {
     var loadedMemoryLimit: Int?
     var loadedCacheLimit: Int?
     var loadedKVBits: Int?
+    var loadedKVGroupSize: Int?
+    var loadedQuantizedKVStart: Int?
+    var loadedTurboQuantBits: Int?
     var pendingReload: Bool = false
     var pendingImages: [URL] = []
 
@@ -103,7 +108,8 @@ public actor AgentLoop {
         registry: ToolRegistry,
         permissions: PermissionEngine,
         generationConfig: GenerationEngine.Config,
-        renderer: StreamRenderer,
+        frontend: any AgentFrontend,
+        verbose: Bool = false,
         systemPrompt: String,
         modelPath: String,
         workspace: String = ".",
@@ -124,7 +130,8 @@ public actor AgentLoop {
         self.registry = registry
         self.permissions = permissions
         self.currentGenerationConfig = generationConfig
-        self.renderer = renderer
+        self.frontend = frontend
+        self.verbose = verbose
         self.history = ConversationHistory(systemPrompt: systemPrompt)
         self.auditLogger = auditLogger
         self.maxToolIterations = maxToolIterations
@@ -273,12 +280,20 @@ public actor AgentLoop {
             } catch {
                 if !hasRetriedFailedTurn {
                     hasRetriedFailedTurn = true
-                    renderer.printStatus("⚠️  Generation failed: \(error.localizedDescription). Retrying the current turn once.")
+                    frontend.emitStatus("⚠️  Generation failed: \(error.localizedDescription). Retrying the current turn once.")
+                    // If a context-overflow error was thrown, force aggressive compaction
+                    // before the retry attempt so the reshape crash cannot recur.
+                    let isContextOverflow = (error as NSError).domain == "AgentLoop"
+                        && (error as NSError).code == 9
+                    if isContextOverflow {
+                        frontend.emitStatus("⚠️  Context too large — forcing compaction before retry.")
+                        await applyDeterministicContextCompactionIfNeeded(reason: "context_overflow_recovery")
+                    }
                     pendingImages = images
                     continue
                 }
 
-                renderer.printError("Generation failed again: \(error.localizedDescription)")
+                frontend.emitError("Generation failed again: \(error.localizedDescription)")
                 history = turnHistorySnapshot
                 pendingImages = turnPendingImagesSnapshot
                 preservedEditTmpFiles = turnPreservedEditTmpFilesSnapshot
@@ -315,12 +330,11 @@ public actor AgentLoop {
                         do {
                             try await presentMergeApprovalFlow(manager: manager)
                         } catch {
-                            renderer.printStatus("⚠️  Git completion flow failed: \(error.localizedDescription)")
+                            frontend.emitStatus("⚠️  Git completion flow failed: \(error.localizedDescription)")
                         }
                     }
                 }
                 
-                print() // newline after response
                 return
             }
 
@@ -329,10 +343,9 @@ public actor AgentLoop {
 
             // Handle streamed tool calls first (content already written to .tmp files)
             for streamedCall in streamedCalls {
-                renderer.printToolCall(name: streamedCall.toolName, arguments: ["path": streamedCall.path, "content": "[streamed to tmp]"])
-                
+                frontend.emit(.toolCallStarted(ToolCallSnapshot(name: streamedCall.toolName, arguments: stringifyArgs(["path": streamedCall.path, "content": "[streamed to tmp]"]))))
                 let streamResult = await handleStreamedToolCall(streamedCall)
-                renderer.printToolResult(streamResult)
+                frontend.emit(.toolCallResult(makeDisplaySnapshot(toolName: streamedCall.toolName, result: streamResult)))
                 
                 // Track file modifications
                 if !streamResult.isError {
@@ -379,14 +392,14 @@ public actor AgentLoop {
                 let pending = steeringQueue
                 steeringQueue.removeAll()
                 for msg in pending {
-                    renderer.printStatus("↩️  Steering: \(msg)")
+                    frontend.emitStatus("↩️  Steering: \(msg)")
                     history.addUser(msg)
                     await hooks.emit(.steeringInjected(message: msg))
                 }
             }
         }
 
-        renderer.printError("Exceeded maximum tool iterations (\(maxToolIterations))")
+        frontend.emitError("Exceeded maximum tool iterations (\(maxToolIterations))")
     }
 
     // MARK: - Private Helpers (used only by processUserMessage)
@@ -406,7 +419,6 @@ public actor AgentLoop {
                 return
             }
 
-            print("")
             let setupOptions = [
                 "Continue from existing worktree branch",
                 "Create a new branch (auto name)",
@@ -414,12 +426,12 @@ public actor AgentLoop {
                 "Continue without creating a branch"
             ]
 
-            guard let selected = await interactiveInput.selectOption(
+            guard let selected = await frontendSelectOption(
                 prompt: "Coding mode git setup",
                 options: setupOptions,
                 escSelectsLastOption: true
             ) else {
-                renderer.printStatus("⚠️  Git setup skipped (no option selected).")
+                frontend.emitStatus("⚠️  Git setup skipped (no option selected).")
                 return
             }
 
@@ -427,7 +439,7 @@ public actor AgentLoop {
             case 0:
                 let worktrees = try await manager.listAvailableWorktrees()
                 guard !worktrees.isEmpty else {
-                    renderer.printStatus("⚠️  No git worktrees found. Falling back to auto-named branch creation.")
+                    frontend.emitStatus("⚠️  No git worktrees found. Falling back to auto-named branch creation.")
                     let setup = try await manager.prepareTask(userMessage: userMessage)
                     try await finalizePreparedGitSetup(
                         manager: manager,
@@ -445,12 +457,12 @@ public actor AgentLoop {
                     return "\(branch) — \(normalizedPath)\(marker)"
                 }
 
-                guard let worktreeIndex = await interactiveInput.selectOption(
+                guard let worktreeIndex = await frontendSelectOption(
                     prompt: "Select existing worktree branch",
                     options: options,
                     escSelectsLastOption: true
                 ) else {
-                    renderer.printStatus("⚠️  Worktree selection cancelled.")
+                    frontend.emitStatus("⚠️  Worktree selection cancelled.")
                     return
                 }
 
@@ -460,8 +472,8 @@ public actor AgentLoop {
                 gitOrchestrationManager = manager
                 let normalizedPath = URL(filePath: connected.path).standardized.path()
                 await switchSessionWorkspace(to: normalizedPath, changeDirectory: false)
-                renderer.printStatus("📁 Using existing worktree: \(normalizedPath)")
-                renderer.printStatus("🌿 Active branch: \(connected.branch)")
+                frontend.emitStatus("📁 Using existing worktree: \(normalizedPath)")
+                frontend.emitStatus("🌿 Active branch: \(connected.branch)")
 
             case 1:
                 let setup = try await manager.prepareTask(userMessage: userMessage)
@@ -473,7 +485,7 @@ public actor AgentLoop {
 
             case 2:
                 let setup = try await manager.prepareTask(userMessage: userMessage)
-                renderer.printStatus("📋 Proposed branch: \(setup.branchName) (base: \(setup.baseBranch))")
+                frontend.emitStatus("📋 Proposed branch: \(setup.branchName) (base: \(setup.baseBranch))")
 
                 let customBranch = await interactiveInput.promptForText(
                     prompt: "Branch name (or Enter to keep proposed):",
@@ -504,10 +516,10 @@ public actor AgentLoop {
             default:
                 skipGitOrchestrationInitialization = true
                 gitOrchestrationManager = nil
-                renderer.printStatus("⏭️  Continuing without git orchestration. No branch/worktree was created.")
+                frontend.emitStatus("⏭️  Continuing without git orchestration. No branch/worktree was created.")
             }
         } catch {
-            renderer.printStatus("⚠️  Git initialization failed: \(error.localizedDescription)")
+            frontend.emitStatus("⚠️  Git initialization failed: \(error.localizedDescription)")
         }
     }
 
@@ -522,16 +534,29 @@ public actor AgentLoop {
 
         let currentBranch = await manager.getCurrentBranchName() ?? preferredBranchName
         let worktreePath = await manager.getWorktreePath() ?? "current directory"
-        renderer.printStatus("🌿 Worktree created at: \(worktreePath) (branch: \(currentBranch))")
+        frontend.emitStatus("🌿 Worktree created at: \(worktreePath) (branch: \(currentBranch))")
 
         if let resolvedWorktree = await manager.getWorktreePath() {
             await switchSessionWorkspace(to: resolvedWorktree, changeDirectory: false)
-            renderer.printStatus("📁 Files will be edited in worktree")
+            frontend.emitStatus("📁 Files will be edited in worktree")
         }
 
         if let warning, !warning.isEmpty {
-            renderer.printStatus("⚠️  Git setup warning: \(warning)")
+            frontend.emitStatus("⚠️  Git setup warning: \(warning)")
         }
+    }
+
+    /// Bridges an option-select prompt through `frontend` so TUI mode shows the
+    /// picker in the renderer footer instead of using raw-terminal print calls.
+    func frontendSelectOption(
+        prompt: String,
+        options: [String],
+        escSelectsLastOption: Bool = false
+    ) async -> Int? {
+        let req = OptionSelectRequest(prompt: prompt, options: options, escSelectsLastOption: escSelectsLastOption)
+        let resp = await frontend.request(.optionSelect(req))
+        if case .optionSelect(let idx) = resp { return idx }
+        return nil
     }
 
     /// Checks for long context and triggers KV quantization if needed.
@@ -541,8 +566,8 @@ public actor AgentLoop {
             && (currentGenerationConfig.kvBits == nil || currentGenerationConfig.kvBits! > 4)
             && !modelPath.lowercased().contains("gemma-4")
         {
-            renderer.printStatus("\u{001B}[33m[Warning]\u{001B}[0m Long context detected (\(currentTokens) tokens).")
-            renderer.printStatus("Switching to 4-bit KV cache to save VRAM...")
+            frontend.emitStatus("\u{001B}[33m[Warning]\u{001B}[0m Long context detected (\(currentTokens) tokens).")
+            frontend.emitStatus("Switching to 4-bit KV cache to save VRAM...")
             
             // Update config to 4-bit
             self.currentGenerationConfig = GenerationEngine.Config(
@@ -614,8 +639,7 @@ public actor AgentLoop {
         fileModificationToolsExecuted: inout Bool,
         modifiedFilePaths: inout Set<String>
     ) async -> ToolResult {
-        renderer.printToolCall(name: call.name, arguments: call.arguments)
-
+        frontend.emit(.toolCallStarted(ToolCallSnapshot(name: call.name, arguments: stringifyArgs(call.arguments))))
         let readLoopState = LoopDetectionService.evaluateReadFileLoop(
             callName: call.name,
             arguments: call.arguments,
@@ -646,7 +670,7 @@ public actor AgentLoop {
         let policyDecision = permissions.evaluateToolPolicy(toolName: call.name, targetPath: targetPath)
         if case .denied(let denyReason) = policyDecision {
             let deniedResult = ToolResult.error(denyReason)
-            renderer.printToolResult(deniedResult)
+            frontend.emit(.toolCallResult(makeDisplaySnapshot(toolName: call.name, result: deniedResult, arguments: call.arguments)))
 
             await auditLogger?.logExecutionResult(
                 toolName: call.name,
@@ -668,14 +692,15 @@ public actor AgentLoop {
         
         // Check if tool is allowed in current mode
         let isDestructive = isDestructiveToolCall(call)
+        let allowReadOnlyBashInPlanMode = mode == .plan && isReadOnlyBashCall(call)
         
         let approval: (approved: Bool, suggestion: String?)
         if isDestructive {
-            await hooks.emit(.permissionRequest(toolName: call.name, isPlanMode: mode == .plan))
-            if mode == .plan {
+            await hooks.emit(.permissionRequest(toolName: call.name, isPlanMode: mode == .plan && !allowReadOnlyBashInPlanMode))
+            if mode == .plan && !allowReadOnlyBashInPlanMode {
                 approval = await askForToolApproval(name: call.name, arguments: call.arguments, isPlanMode: true)
                 if approval.approved {
-                    await setMode(.agent)
+                    await setMode(.agent, taskType: .coding)
                 }
             } else {
                 approval = await askForToolApproval(name: call.name, arguments: call.arguments, isPlanMode: false)
@@ -711,7 +736,7 @@ public actor AgentLoop {
                 // Log corrections if any were made
                 if correctionResult.wasCorrected {
                     for correction in correctionResult.corrections {
-                        renderer.printStatus("[auto-correct] \(call.name): \(correction)")
+                        frontend.emitStatus("[auto-correct] \(call.name): \(correction)")
                     }
                     await auditLogger?.logParameterCorrection(
                         toolName: call.name,
@@ -754,7 +779,7 @@ public actor AgentLoop {
                         executionArguments["new_text"] = savedNewText
                         preservedEditTmpFiles.removeValue(forKey: path)
                         try? FileManager.default.removeItem(at: tmpURL)
-                        renderer.printStatus("[auto-correct] edit_file: reusing preserved new_text for \(path)")
+                        frontend.emitStatus("[auto-correct] edit_file: reusing preserved new_text for \(path)")
                     }
 
                     // [String: Any] is not Sendable; take an explicit unsafe snapshot
@@ -784,7 +809,7 @@ public actor AgentLoop {
                             arguments: currentArgs,
                             errorResult: currentResult
                         ) {
-                            renderer.printStatus("[auto-correct] Retrying with corrected arguments...")
+                            frontend.emitStatus("[auto-correct] Retrying with corrected arguments...")
                             do {
                                 result = try await tool.execute(arguments: ["path": correction.path, "old_text": correction.oldText, "new_text": correction.newText])
                             } catch {
@@ -810,7 +835,7 @@ public actor AgentLoop {
             resultPreview: String(result.content.prefix(220))
         ))
 
-        renderer.printToolResult(result)
+        frontend.emit(.toolCallResult(makeDisplaySnapshot(toolName: call.name, result: result, arguments: call.arguments)))
         
         // Track if file modification tools executed successfully
         if isFileModificationTool && !result.isError && approval.approved {
@@ -842,5 +867,57 @@ public actor AgentLoop {
         }
 
         return result
+    }
+}
+
+extension AgentLoop {
+    /// Swap the active front-end. Used by ChatCommand when the user picks
+    /// `--ui tui` after the agent has been constructed with the legacy
+    /// terminal adapter.
+    public func swapFrontend(_ newFrontend: any AgentFrontend) {
+        self.frontend = newFrontend
+    }
+}
+
+extension AgentLoop {
+    /// Tools whose raw output should never be displayed in the console —
+    /// the content is large/HTML and is processed in a background context
+    /// before any condensed summary reaches the main history.
+    private static let backgroundContextTools: Set<String> = ["web_fetch", "web_search"]
+
+    /// Returns a `ToolResultSnapshot` suitable for display.
+    ///
+    /// For background-context tools (`web_fetch`, `web_search`) the raw
+    /// content is replaced with a single status line so it doesn't flood
+    /// the console or the main conversation history.  Error results are
+    /// always passed through unchanged so the user can see failure details.
+    func makeDisplaySnapshot(toolName: String, result: ToolResult, arguments: [String: Any] = [:]) -> ToolResultSnapshot {
+        guard Self.backgroundContextTools.contains(toolName), !result.isError else {
+            return ToolResultSnapshot(
+                toolName: toolName,
+                isError: result.isError,
+                content: result.content,
+                truncationMarker: result.truncationMarker
+            )
+        }
+        let byteCount = result.content.count + (result.truncationMarker.map { $0.count + 1 } ?? 0)
+        let urlHint: String
+        if let url = arguments["url"] as? String, !url.isEmpty {
+            urlHint = " from \(url)"
+        } else {
+            urlHint = ""
+        }
+        // Indicate if HTML parsing was applied
+        let parseHint: String
+        if toolName == "web_fetch" {
+            let textOnly = arguments["text_only"] as? Bool ?? false
+            // Heuristic: if the content doesn't contain HTML tags it was stripped
+            let contentLooksStripped = !result.content.contains("<") || textOnly
+            parseHint = contentLooksStripped ? " [HTML→text]" : ""
+        } else {
+            parseHint = ""
+        }
+        let preview = "[\(toolName): \(byteCount) chars\(urlHint)\(parseHint) — content processed in background context]"
+        return ToolResultSnapshot(toolName: toolName, isError: false, content: preview, truncationMarker: nil)
     }
 }

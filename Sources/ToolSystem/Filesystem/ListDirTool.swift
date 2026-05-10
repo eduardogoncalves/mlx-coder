@@ -13,6 +13,8 @@ public struct ListDirTool: Tool {
             "path": PropertySchema(type: "string", description: "Path to the directory to list (relative to workspace root)"),
             "recursive": PropertySchema(type: "boolean", description: "If true, list contents recursively (default: false)"),
             "max_depth": PropertySchema(type: "integer", description: "Maximum recursion depth (default: 3)"),
+            "include_hidden": PropertySchema(type: "boolean", description: "If true, include hidden files/directories (default: true)"),
+            "include_build_dirs": PropertySchema(type: "boolean", description: "If true, include build-output and dependency-cache directories such as bin, obj, node_modules, __pycache__, .build, target, etc. (default: false)"),
         ],
         required: ["path"]
     )
@@ -32,6 +34,8 @@ public struct ListDirTool: Tool {
 
         let recursive = arguments["recursive"] as? Bool ?? false
         let maxDepth = max(0, arguments["max_depth"] as? Int ?? 3)
+        let includeHidden = arguments["include_hidden"] as? Bool ?? true
+        let includeBuildDirs = arguments["include_build_dirs"] as? Bool ?? false
 
         let resolvedPath: String
         do {
@@ -47,6 +51,7 @@ public struct ListDirTool: Tool {
         }
 
         var entries: [String] = []
+        var skippedBuildDirs: [String] = []
         let basePath = resolvedPath
 
         func listContents(at dirPath: String, depth: Int) {
@@ -59,8 +64,7 @@ public struct ListDirTool: Tool {
             for item in contents.sorted() {
                 guard entries.count < maxEntries else { break }
 
-                // Skip hidden files
-                if item.hasPrefix(".") { continue }
+                if !includeHidden && item.hasPrefix(".") { continue }
 
                 let fullPath = (dirPath as NSString).appendingPathComponent(item)
                 
@@ -86,6 +90,11 @@ public struct ListDirTool: Tool {
                     FileManager.default.fileExists(atPath: validatedPath, isDirectory: &isDir)
 
                     if isDir.boolValue {
+                        // Optionally skip build-output / dependency-cache directories
+                        if !includeBuildDirs && BuildOutputFilter.ignoredNames.contains(item) {
+                            skippedBuildDirs.append(relativePath)
+                            continue
+                        }
                         entries.append("📁 \(relativePath)/")
                         if recursive {
                             listContents(at: validatedPath, depth: depth + 1)
@@ -104,13 +113,19 @@ public struct ListDirTool: Tool {
 
         listContents(at: resolvedPath, depth: 0)
 
-        if entries.isEmpty {
+        if entries.isEmpty && skippedBuildDirs.isEmpty {
             return .success("(empty directory)")
+        }
+
+        var lines = entries
+        if !skippedBuildDirs.isEmpty {
+            let names = skippedBuildDirs.joined(separator: ", ")
+            lines.append("[Build output dirs skipped: \(names) — use include_build_dirs: true to inspect]")
         }
 
         let omitted = entries.count >= maxEntries ? "\n[... entries omitted, limit \(maxEntries) ...]" : ""
         return ToolResult(
-            content: entries.joined(separator: "\n"),
+            content: lines.joined(separator: "\n"),
             truncationMarker: omitted.isEmpty ? nil : omitted
         )
     }

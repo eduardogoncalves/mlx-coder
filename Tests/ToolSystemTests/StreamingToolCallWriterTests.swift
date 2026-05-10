@@ -107,21 +107,19 @@ final class StreamingToolCallWriterTests: XCTestCase {
         writer.cleanupAllTmpFiles()
     }
 
-    func testIgnoresToolCallsInsideThinkUntilThinkIsClosed() {
+    func testProcessesToolCallsInPostThinkContent() {
+        // Think-block filtering is the responsibility of StreamParser
+        // (AgentLoop+Generation.swift). The writer is only called with
+        // post-think assistant text, so it never needs to skip think tokens.
+        // This test verifies the writer correctly handles a tool call that
+        // arrives as post-think content (the common runtime path).
         let writer = StreamingToolCallWriter(
             toolCallOpen: "<tool_call>",
             toolCallClose: "</tool_call>"
         )
 
-        let chunk1 = "<think>still reasoning <tool_call>{\"name\":\"list_dir\",\"arguments\":{\"path\":\".\"}}</tool_call>"
-        let result1 = writer.process(chunk1)
-        XCTAssertTrue(result1.displayText.contains("<tool_call>"))
-        XCTAssertTrue(writer.drainCompletedCalls().isEmpty)
-
-        // After </think>, a content-streaming tool call IS captured by the writer.
-        // (read_file has no content field so it is handled by ToolCallParser, not here.)
-        let chunk2 = "</think><tool_call>{\"name\":\"write_file\",\"arguments\":{\"path\":\"out.txt\",\"content\":\"hello\"}}</tool_call>"
-        _ = writer.process(chunk2)
+        let chunk = "<tool_call>{\"name\":\"write_file\",\"arguments\":{\"path\":\"out.txt\",\"content\":\"hello\"}}</tool_call>"
+        _ = writer.process(chunk)
         let calls = writer.drainCompletedCalls()
         XCTAssertEqual(calls.count, 1)
         XCTAssertEqual(calls[0].toolName, "write_file")

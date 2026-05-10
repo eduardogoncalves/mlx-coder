@@ -26,11 +26,13 @@ public struct ProjectExpertLoRATool: Tool {
     private let modelContainer: ModelContainer
     private let workspaceRoot: String
     private let modelPath: String
+    private let frontend: any AgentFrontend
 
-    public init(modelContainer: ModelContainer, workspaceRoot: String, modelPath: String) {
+    public init(modelContainer: ModelContainer, workspaceRoot: String, modelPath: String, frontend: any AgentFrontend) {
         self.modelContainer = modelContainer
         self.workspaceRoot = workspaceRoot
         self.modelPath = modelPath
+        self.frontend = frontend
     }
 
     public func execute(arguments: [String: Any]) async throws -> ToolResult {
@@ -87,7 +89,7 @@ public struct ProjectExpertLoRATool: Tool {
         var msg = "Saved dataset to \(datasetDir.path())\n"
         
         // Unload the current loaded model from memory before training
-        print("[LoRA] Unloading existing LLM from memory to make room for training...")
+        frontend.emitStatus("[LoRA] Unloading existing LLM from memory to make room for training...")
         // Clearing instances effectively drops references
         MLX.Memory.clearCache()
 
@@ -99,7 +101,7 @@ public struct ProjectExpertLoRATool: Tool {
             configuration: configuration
         )
         
-        let progressMessage = try await trainContainer.perform { [dataset, validSet, p, learningRate, adapterURL, loraLayers] context -> String in
+        let progressMessage = try await trainContainer.perform { [dataset, validSet, p, learningRate, adapterURL, loraLayers, frontend = self.frontend] context -> String in
             var msg = ""
             let modelAdapter: ModelAdapter
             if FileManager.default.fileExists(atPath: adapterURL.path()) {
@@ -125,7 +127,7 @@ public struct ProjectExpertLoRATool: Tool {
                 parameters: p
             ) { progress in
                 // Keep standard out reporting but doesn't capture to ToolResult to avoid clutter
-                print("[LoRA] \(progress)")
+                frontend.emitStatus("[LoRA] \(progress)")
                 return .more
             }
             
@@ -136,12 +138,12 @@ public struct ProjectExpertLoRATool: Tool {
         msg += progressMessage
         
         // The trainContainer will deinit exiting this scope, freeing memory.
-        print("[LoRA] Training complete. Freeing memory...")
+        frontend.emitStatus("[LoRA] Training complete. Freeing memory...")
         MLX.Memory.clearCache()
         
         // Attempt to reload adapter eagerly into the main container
         if FileManager.default.fileExists(atPath: adapterURL.path()) {
-            print("[LoRA] Loading fresh weights back into active Agent LLM...")
+            frontend.emitStatus("[LoRA] Loading fresh weights back into active Agent LLM...")
             try await modelContainer.perform { context in
                 let newAdapter = try LoRAContainer.from(directory: adapterURL)
                 try context.model.load(adapter: newAdapter)

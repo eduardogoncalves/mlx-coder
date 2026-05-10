@@ -45,6 +45,39 @@ final class ListDirToolTests: XCTestCase {
         XCTAssertFalse(result.content.contains("Sources/main.swift"))
     }
 
+    func testIncludesHiddenEntriesByDefault() async throws {
+        let workspace = try makeTempWorkspace()
+        defer { try? FileManager.default.removeItem(at: workspace) }
+
+        let hiddenFile = workspace.appendingPathComponent(".gitignore")
+        let hiddenDir = workspace.appendingPathComponent(".git", isDirectory: true)
+        try "*\n".write(to: hiddenFile, atomically: true, encoding: .utf8)
+        try FileManager.default.createDirectory(at: hiddenDir, withIntermediateDirectories: true)
+
+        let permissions = PermissionEngine(workspaceRoot: workspace.path)
+        let tool = ListDirTool(permissions: permissions)
+        let result = try await tool.execute(arguments: ["path": "."])
+
+        XCTAssertFalse(result.isError)
+        XCTAssertTrue(result.content.contains(".gitignore"))
+        XCTAssertTrue(result.content.contains(".git/"))
+    }
+
+    func testCanExcludeHiddenEntries() async throws {
+        let workspace = try makeTempWorkspace()
+        defer { try? FileManager.default.removeItem(at: workspace) }
+
+        let hiddenFile = workspace.appendingPathComponent(".env")
+        try "TOKEN=1\n".write(to: hiddenFile, atomically: true, encoding: .utf8)
+
+        let permissions = PermissionEngine(workspaceRoot: workspace.path)
+        let tool = ListDirTool(permissions: permissions)
+        let result = try await tool.execute(arguments: ["path": ".", "include_hidden": false])
+
+        XCTAssertFalse(result.isError)
+        XCTAssertFalse(result.content.contains(".env"))
+    }
+
     private func makeTempWorkspace() throws -> URL {
         let root = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
             .appendingPathComponent("mlx-coder-list-dir-tests-\(UUID().uuidString)", isDirectory: true)

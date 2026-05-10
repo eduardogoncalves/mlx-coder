@@ -33,10 +33,10 @@ extension AgentLoop {
             modelPath: modelPath,
             useSandbox: useSandbox,
             parentRegistry: registry,
-            renderer: renderer
+            frontend: frontend
         ))
         await registry.register(TodoTool(workspaceRoot: permissions.workspaceRoot))
-        await registry.register(ProjectExpertLoRATool(modelContainer: modelContainer, workspaceRoot: permissions.workspaceRoot, modelPath: modelPath))
+        await registry.register(ProjectExpertLoRATool(modelContainer: modelContainer, workspaceRoot: permissions.workspaceRoot, modelPath: modelPath, frontend: frontend))
 
         // Web tools
         await registry.register(WebFetchTool(
@@ -87,6 +87,47 @@ extension AgentLoop {
         }
 
         return false
+    }
+
+    func isReadOnlyBashCall(_ call: ToolCallParser.ParsedToolCall) -> Bool {
+        guard call.name == "bash" else { return false }
+        guard let command = call.arguments["command"] as? String else { return false }
+        return Self.isReadOnlyBashCommand(command)
+    }
+
+    static func isReadOnlyBashCommand(_ command: String) -> Bool {
+        let trimmed = command.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+
+        let lowered = trimmed.lowercased()
+
+        // Conservative safety gate: reject shell chaining, substitution and redirection.
+        let blockedPunctuation = ["&&", "||", ";", "|", ">", "<", "$(", "`"]
+        if blockedPunctuation.contains(where: { lowered.contains($0) }) {
+            return false
+        }
+
+        let mutatingPrefixes = [
+            "rm ", "mv ", "cp ", "touch ", "mkdir ", "rmdir ", "chmod ", "chown ",
+            "ln ", "sed -i", "perl -i", "tee ", "dd ", "truncate ",
+            "git add", "git commit", "git push", "git pull", "git merge", "git rebase",
+            "git checkout", "git switch", "git restore", "git reset", "git clean",
+            "git stash", "git apply", "git cherry-pick", "git revert", "git fetch",
+            "npm install", "npm ci", "pnpm install", "yarn install", "pip install",
+            "go mod tidy", "cargo add", "swift package update"
+        ]
+        if mutatingPrefixes.contains(where: { lowered.hasPrefix($0) }) {
+            return false
+        }
+
+        let readOnlyPrefixes = [
+            "pwd", "ls", "find ", "cat ", "head ", "tail ", "wc ", "du ", "df",
+            "grep ", "rg ", "which ", "whereis ", "type ", "echo ", "printf ",
+            "env", "printenv", "uname", "sw_vers", "ps ",
+            "git status", "git log", "git show", "git diff", "git branch",
+            "git remote", "git rev-parse", "git describe", "git reflog"
+        ]
+        return readOnlyPrefixes.contains(where: { lowered.hasPrefix($0) })
     }
 
     func serializedArgumentsPreview(_ arguments: [String: Any]) -> String {
@@ -152,7 +193,7 @@ extension AgentLoop {
         }
 
         let diff = DiffGenerator.generate(original: originalContent, new: previewContent, path: call.path)
-        renderer.printStatus("\n\(diff)")
+        frontend.emitStatus("\n\(diff)")
 
         // Ask for approval
         let approval: (approved: Bool, suggestion: String?)
@@ -215,7 +256,7 @@ extension AgentLoop {
                 )
                 if correctionResult.wasCorrected {
                     for correction in correctionResult.corrections {
-                        renderer.printStatus("[auto-correct] edit_file (streamed): \(correction)")
+                        frontend.emitStatus("[auto-correct] edit_file (streamed): \(correction)")
                     }
                 }
 
@@ -231,7 +272,7 @@ extension AgentLoop {
                         let fakeArgs: [String: Any] = ["path": call.path, "old_text": oldText, "new_text": tmpContent]
                         let fakeError = ToolResult.error("old_text not found in \(call.path). Make sure the text matches exactly.")
                         if let correction = await attemptSemanticCorrection(toolName: "edit_file", arguments: fakeArgs, errorResult: fakeError) {
-                            renderer.printStatus("[auto-correct] Retrying streamed edit_file with corrected old_text...")
+                            frontend.emitStatus("[auto-correct] Retrying streamed edit_file with corrected old_text...")
                             let corrected = fileContent.replacingOccurrences(of: correction.oldText, with: tmpContent)
                             do {
                                 try corrected.write(toFile: resolvedPath, atomically: true, encoding: .utf8)

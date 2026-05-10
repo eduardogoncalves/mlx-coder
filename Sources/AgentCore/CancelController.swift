@@ -11,7 +11,17 @@ public actor CancelController {
     private var cancelCurrentTask: (@Sendable () -> Void)?
     private var listeningTask: Task<Void, Never>?
     private var forceExitOnEscape = false
-    
+
+    /// Handles interrupt messages (e.g. "Interrupted by Esc"). Defaults to
+    /// printing to stdout. Set to `{ _ in }` when a TUI renderer owns the
+    /// terminal so the raw print cannot corrupt its output.
+    public var printHandler: @Sendable (String) -> Void = { print($0) }
+
+    /// Replace the print handler; safe to call from any async context.
+    public func setPrintHandler(_ handler: @escaping @Sendable (String) -> Void) {
+        printHandler = handler
+    }
+
     private init() {}
     
     /// Set the current operation task and start listening for ESC/Ctrl+C.
@@ -110,14 +120,16 @@ public actor CancelController {
                         let shouldForceExit = await self.forceExitOnEscape
                         await self.cancel()
                         if shouldForceExit {
-                            print("\nInterrupted by Esc. Exiting...")
+                            let handler = await self.printHandler
+                            handler("\nInterrupted by Esc. Exiting...")
                             fflush(stdout)
                             exit(130)
                         }
                         break
                     } else if byte == 3 { // Ctrl+C
                         // User wants 'Esc' for cancellation, so Ctrl+C should exit the app
-                        print("\nInterrupted by Ctrl+C. Exiting...")
+                        let handler = await self.printHandler
+                        handler("\nInterrupted by Ctrl+C. Exiting...")
                         fflush(stdout)
                         exit(0)
                     }

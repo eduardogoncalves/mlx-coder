@@ -107,22 +107,34 @@ enum URLFetchValidator {
 /// Fetches content from a URL and returns it as text, optionally extracting relevant context via LLM.
 public struct WebFetchTool: Tool {
     public let name = "web_fetch"
-    public let description = "Fetch content from a URL. Can optionally extract specific information using a query to avoid flooding the context."
+    public let description = """
+        Fetch content from a URL.
+        • text_only: true  — strips HTML tags, CSS, and scripts; returns clean readable text \
+        (recommended for most pages; greatly reduces context size).
+        • query             — additionally extract a specific answer from the page using the LLM \
+        (combine with text_only for best results).
+        • If neither is set, returns raw content truncated at \(WebFetchTool.defaultMaxOutputLength) chars.
+        """
     public let parameters = JSONSchema(
         type: "object",
         properties: [
             "url": PropertySchema(type: "string", description: "URL to fetch"),
-            "query": PropertySchema(type: "string", description: "Specific question or context to extract from the page. If empty, returns the full text (truncated if too long)."),
+            "text_only": PropertySchema(type: "boolean",
+                description: "When true, strip all HTML markup (tags, CSS, scripts) and return plain readable text. Recommended for web pages when you need the content rather than the markup structure."),
+            "query": PropertySchema(type: "string",
+                description: "Specific question or information to extract from the page via LLM. If empty, returns the full text (after optional HTML stripping)."),
             "timeout": PropertySchema(type: "integer", description: "Timeout in seconds (default: 15)"),
         ],
         required: ["url"]
     )
 
+    public static let defaultMaxOutputLength = 50_000
+
     private let maxOutputLength: Int
     private let modelContainer: ModelContainer?
     private let generationConfig: GenerationEngine.Config?
 
-    public init(maxOutputLength: Int = 50_000, modelContainer: ModelContainer? = nil, generationConfig: GenerationEngine.Config? = nil) {
+    public init(maxOutputLength: Int = WebFetchTool.defaultMaxOutputLength, modelContainer: ModelContainer? = nil, generationConfig: GenerationEngine.Config? = nil) {
         self.maxOutputLength = maxOutputLength
         self.modelContainer = modelContainer
         self.generationConfig = generationConfig
@@ -156,9 +168,39 @@ extension WebFetchTool: ProgressReportingTool {
         }
 
         let query = arguments["query"] as? String
+        let textOnly = arguments["text_only"] as? Bool ?? false
 
         let timeout = arguments["timeout"] as? Int ?? 15
 
+        // --- Cache lookup ---
+        let cache = WebFetchCache.shared
+
+        // If text_only and a pre-stripped copy exists, use it immediately
+        if textOnly, let cached = cache.textContent(for: urlString) {
+            reportProgress("cache hit (text) — skipping network request")
+            return try await resolveResult(text: cached, query: query, reportProgress: reportProgress)
+        }
+
+        // If a raw copy exists, we can skip the network request entirely
+        if let cachedRaw = cache.rawContent(for: urlString) {
+            reportProgress("cache hit (raw) — skipping network request")
+            if textOnly {
+                let isHTML = cachedRaw.prefix(512).lowercased().contains("<!doctype html")
+                    || cachedRaw.prefix(512).lowercased().contains("<html")
+                if isHTML {
+                    reportProgress("parsing HTML → extracting text")
+                    let stripped = HTMLTextExtractor.extract(from: cachedRaw)
+                    // Persist the stripped copy so next call is even faster
+                    cache.save(raw: cachedRaw, text: stripped, for: urlString)
+                    return try await resolveResult(
+                        text: stripped, query: query, reportProgress: reportProgress)
+                }
+            }
+            return try await resolveResult(
+                text: cachedRaw, query: query, reportProgress: reportProgress)
+        }
+
+        // --- Network fetch ---
         var request = URLRequest(url: url)
         request.timeoutInterval = TimeInterval(timeout)
         request.setValue("mlx-coder/0.1", forHTTPHeaderField: "User-Agent")
@@ -178,36 +220,61 @@ extension WebFetchTool: ProgressReportingTool {
             }
 
             reportProgress("reading response body")
-            guard let text = String(data: data, encoding: .utf8) else {
+            guard let rawText = String(data: data, encoding: .utf8) else {
                 return .error("Response body is not valid UTF-8 text")
             }
 
-            // If a query is provided and we have the LLM container, run extraction
-            if let query = query, !query.isEmpty, let container = modelContainer, let config = generationConfig {
-                reportProgress("processing page content")
-                reportProgress("extracting relevant information")
-                let extracted = try await extractWithLLM(text: text, query: query, container: container, config: config)
-                reportProgress("finalizing result")
-                return .success("Extracted information for query '\(query)':\n\n\(extracted)")
+            // Determine whether to strip HTML markup.
+            // Strip when text_only is explicitly true AND the response is HTML.
+            let contentType = httpResponse.value(forHTTPHeaderField: "Content-Type") ?? ""
+            let isHTML = contentType.lowercased().contains("text/html")
+                || rawText.prefix(512).lowercased().contains("<!doctype html")
+                || rawText.prefix(512).lowercased().contains("<html")
+
+            let strippedText: String?
+            if textOnly && isHTML {
+                reportProgress("parsing HTML → extracting text")
+                strippedText = HTMLTextExtractor.extract(from: rawText)
+            } else {
+                strippedText = nil
             }
 
-            // Fallback to raw text
-            if text.count > maxOutputLength {
-                reportProgress("truncating long response")
-                let truncated = String(text.prefix(maxOutputLength))
-                let omitted = text.count - maxOutputLength
-                reportProgress("finalizing result")
-                return ToolResult(
-                    content: truncated,
-                    truncationMarker: "[... \(omitted) characters omitted ...]"
-                )
-            }
+            // Persist to disk cache
+            reportProgress("saving to cache")
+            cache.save(raw: rawText, text: strippedText, for: urlString)
 
-            reportProgress("finalizing result")
-            return .success(text)
+            let text = strippedText ?? rawText
+            return try await resolveResult(text: text, query: query, reportProgress: reportProgress)
         } catch {
             return .error("Fetch failed: \(error.localizedDescription)")
         }
+    }
+
+    // Applies truncation limits to build the final ToolResult.
+    private func buildResult(text: String) -> ToolResult {
+        if text.count > maxOutputLength {
+            let truncated = String(text.prefix(maxOutputLength))
+            let omitted = text.count - maxOutputLength
+            return ToolResult(content: truncated, truncationMarker: "[... \(omitted) characters omitted ...]")
+        }
+        return .success(text)
+    }
+
+    // Runs optional LLM query extraction, then applies size limits.
+    private func resolveResult(
+        text: String,
+        query: String?,
+        reportProgress: @escaping ToolProgressHandler
+    ) async throws -> ToolResult {
+        if let query = query, !query.isEmpty, let container = modelContainer, let config = generationConfig {
+            reportProgress("processing page content")
+            reportProgress("extracting relevant information")
+            let extracted = try await extractWithLLM(text: text, query: query, container: container, config: config)
+            reportProgress("finalizing result")
+            return buildResult(text: "Extracted information for query '\(query)':\n\n\(extracted)")
+        }
+        reportProgress("finalizing result")
+        return buildResult(text: text)
     }
 
     private func extractWithLLM(text: String, query: String, container: ModelContainer, config: GenerationEngine.Config) async throws -> String {

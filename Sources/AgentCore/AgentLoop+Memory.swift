@@ -54,7 +54,7 @@ extension AgentLoop {
         do {
             try await store.initialize()
         } catch {
-            renderer.printError("Failed to initialize memory store: \(error)")
+            frontend.emitError("Failed to initialize memory store: \(error)")
             return
         }
         
@@ -75,9 +75,9 @@ extension AgentLoop {
         
         do {
             try await store.insert(entry)
-            renderer.printStatus("Checkpoint saved to memory")
+            frontend.emitStatus("Checkpoint saved to memory")
         } catch {
-            renderer.printError("Failed to save checkpoint: \(error)")
+            frontend.emitError("Failed to save checkpoint: \(error)")
         }
     }
     
