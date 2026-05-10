@@ -92,6 +92,7 @@ jobs:
         run: ./build-and-release.sh arm64
         env:
           MLX_CODER_VERSION: ${{ steps.vars.outputs.version }}
+          TOOLCHAINS: swift
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v7
@@ -186,6 +187,7 @@ jobs:
         run: ./build-and-release.sh arm64
         env:
           MLX_CODER_VERSION: ${{ steps.vars.outputs.version }}
+          TOOLCHAINS: swift
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v7
@@ -267,6 +269,7 @@ jobs:
         run: ./build-and-release.sh arm64
         env:
           MLX_CODER_VERSION: ${{ steps.vars.outputs.version }}
+          TOOLCHAINS: swift
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v7
