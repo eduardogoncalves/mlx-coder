@@ -23,7 +23,7 @@ CLI_NAME="mlx-coder"
 RELEASE_DIR="releases"
 WORK_DIR=".build/release"
 BUILD_DIR_ARM64=".build/xcode-arm64"
-PACKAGE_CHECKOUTS_DIR=".build/package-checkouts"
+PACKAGE_SCRATCH_DIR=".build/swiftpm"
 
 ARTIFACT_BASE="${APP_NAME}-${VERSION}-${ARCH}"
 CLI_STAGING_DIR="${WORK_DIR}/cli"
@@ -72,8 +72,8 @@ require_tools() {
 }
 
 patch_mlx_swift_lm_for_swift6() {
-    local cloned_packages_dir="$1"
-    local target_file="${cloned_packages_dir}/checkouts/mlx-swift-lm/Libraries/MLXVLM/MediaProcessing.swift"
+    local scratch_dir="$1"
+    local target_file="${scratch_dir}/checkouts/mlx-swift-lm/Libraries/MLXVLM/MediaProcessing.swift"
 
     [[ -f "$target_file" ]] || fail "mlx-swift-lm source not found for patching: ${target_file}"
 
@@ -99,10 +99,10 @@ build_arch() {
     log "Building ${APP_NAME} for ${target_arch}"
 
     if [[ "$CLEAN" == "1" ]]; then
-        log "Clean build: removing derived data and package checkouts"
-        rm -rf "$derived_data" "$PACKAGE_CHECKOUTS_DIR"
+        log "Clean build: removing derived data and SwiftPM scratch data"
+        rm -rf "$derived_data" "$PACKAGE_SCRATCH_DIR"
     fi
-    mkdir -p "$derived_data" "$PACKAGE_CHECKOUTS_DIR"
+    mkdir -p "$derived_data" "$PACKAGE_SCRATCH_DIR"
 
     # Use -quiet for incremental builds, verbose for clean builds
     local quiet_flag=()
@@ -110,19 +110,19 @@ build_arch() {
 
     log "Resolving Swift package dependencies"
     if ! swift package \
-        --scratch-path "$PACKAGE_CHECKOUTS_DIR" \
+        --scratch-path "$PACKAGE_SCRATCH_DIR" \
         resolve >&2; then
         fail "swift package resolve failed for architecture ${target_arch}"
     fi
 
-    patch_mlx_swift_lm_for_swift6 "$PACKAGE_CHECKOUTS_DIR"
+    patch_mlx_swift_lm_for_swift6 "$PACKAGE_SCRATCH_DIR"
 
     if ! xcodebuild \
         -scheme "$SCHEME_NAME" \
         -configuration Release \
         -destination "platform=macOS,arch=${target_arch}" \
         -derivedDataPath "$derived_data" \
-        -clonedSourcePackagesDirPath "$PACKAGE_CHECKOUTS_DIR" \
+        -clonedSourcePackagesDirPath "$PACKAGE_SCRATCH_DIR" \
         -disableAutomaticPackageResolution \
         -onlyUsePackageVersionsFromResolvedFile \
         "${quiet_flag[@]}" \
