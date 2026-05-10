@@ -109,8 +109,9 @@ build_arch() {
     [[ "$CLEAN" != "1" ]] && quiet_flag=(-quiet)
 
     log "Resolving Swift package dependencies"
-    if ! swift package resolve \
-        --scratch-path "$PACKAGE_CHECKOUTS_DIR" >&2; then
+    if ! swift package \
+        --scratch-path "$PACKAGE_CHECKOUTS_DIR" \
+        resolve >&2; then
         fail "swift package resolve failed for architecture ${target_arch}"
     fi
 
