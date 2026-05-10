@@ -65,9 +65,15 @@ jobs:
             bash "$post_install_script"
           fi
 
+          # Expose the real bundle ID so xcodebuild picks up this toolchain
+          toolchain_path="$(swiftly use --print-location)"
+          toolchain_id="$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" \
+            "${toolchain_path}/Info.plist")"
+          echo "TOOLCHAINS=${toolchain_id}" >> "$GITHUB_ENV"
+
           echo "$HOME/.swiftly/bin" >> "$GITHUB_PATH"
           swiftly use --print-location >> "$GITHUB_PATH"
-
+          
       - name: Show toolchain versions
         run: |
           xcodebuild -version
@@ -92,7 +98,6 @@ jobs:
         run: ./build-and-release.sh arm64
         env:
           MLX_CODER_VERSION: ${{ steps.vars.outputs.version }}
-          TOOLCHAINS: swift
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v7
@@ -150,6 +155,12 @@ jobs:
             bash "$post_install_script"
           fi
 
+          # Expose the real bundle ID so xcodebuild picks up this toolchain
+          toolchain_path="$(swiftly use --print-location)"
+          toolchain_id="$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" \
+            "${toolchain_path}/Info.plist")"
+          echo "TOOLCHAINS=${toolchain_id}" >> "$GITHUB_ENV"
+
           echo "$HOME/.swiftly/bin" >> "$GITHUB_PATH"
           swiftly use --print-location >> "$GITHUB_PATH"
 
@@ -187,7 +198,6 @@ jobs:
         run: ./build-and-release.sh arm64
         env:
           MLX_CODER_VERSION: ${{ steps.vars.outputs.version }}
-          TOOLCHAINS: swift
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v7
@@ -243,17 +253,19 @@ jobs:
             bash "$post_install_script"
           fi
 
+          # Expose the real bundle ID so xcodebuild picks up this toolchain
+          toolchain_path="$(swiftly use --print-location)"
+          toolchain_id="$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" \
+            "${toolchain_path}/Info.plist")"
+          echo "TOOLCHAINS=${toolchain_id}" >> "$GITHUB_ENV"
+
           echo "$HOME/.swiftly/bin" >> "$GITHUB_PATH"
           swiftly use --print-location >> "$GITHUB_PATH"
-
-      - name: Show toolchain versions
-        run: |
-          xcodebuild -version
-          swift --version
 
       - name: Determine manual version
         id: vars
         env:
+          
           INPUT_VERSION: ${{ inputs.version }}
         run: |
           version="$INPUT_VERSION"
@@ -269,7 +281,6 @@ jobs:
         run: ./build-and-release.sh arm64
         env:
           MLX_CODER_VERSION: ${{ steps.vars.outputs.version }}
-          TOOLCHAINS: swift
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v7
