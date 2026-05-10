@@ -65,10 +65,13 @@ jobs:
             bash "$post_install_script"
           fi
 
-          # Expose the real bundle ID so xcodebuild picks up this toolchain
+          # Make xcodebuild aware of the swiftly toolchain
           toolchain_path="$(swiftly use --print-location)"
           toolchain_id="$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" \
             "${toolchain_path}/Info.plist")"
+          mkdir -p "$HOME/Library/Developer/Toolchains"
+          ln -sf "$toolchain_path" \
+            "$HOME/Library/Developer/Toolchains/$(basename "$toolchain_path")"
           echo "TOOLCHAINS=${toolchain_id}" >> "$GITHUB_ENV"
 
           echo "$HOME/.swiftly/bin" >> "$GITHUB_PATH"
@@ -155,10 +158,13 @@ jobs:
             bash "$post_install_script"
           fi
 
-          # Expose the real bundle ID so xcodebuild picks up this toolchain
+          # Make xcodebuild aware of the swiftly toolchain
           toolchain_path="$(swiftly use --print-location)"
           toolchain_id="$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" \
             "${toolchain_path}/Info.plist")"
+          mkdir -p "$HOME/Library/Developer/Toolchains"
+          ln -sf "$toolchain_path" \
+            "$HOME/Library/Developer/Toolchains/$(basename "$toolchain_path")"
           echo "TOOLCHAINS=${toolchain_id}" >> "$GITHUB_ENV"
 
           echo "$HOME/.swiftly/bin" >> "$GITHUB_PATH"
@@ -253,10 +259,13 @@ jobs:
             bash "$post_install_script"
           fi
 
-          # Expose the real bundle ID so xcodebuild picks up this toolchain
+          # Make xcodebuild aware of the swiftly toolchain
           toolchain_path="$(swiftly use --print-location)"
           toolchain_id="$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" \
             "${toolchain_path}/Info.plist")"
+          mkdir -p "$HOME/Library/Developer/Toolchains"
+          ln -sf "$toolchain_path" \
+            "$HOME/Library/Developer/Toolchains/$(basename "$toolchain_path")"
           echo "TOOLCHAINS=${toolchain_id}" >> "$GITHUB_ENV"
 
           echo "$HOME/.swiftly/bin" >> "$GITHUB_PATH"
