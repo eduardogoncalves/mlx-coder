@@ -69,9 +69,9 @@ jobs:
           toolchain_path="$(swiftly use --print-location)"
           toolchain_id="$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" \
             "${toolchain_path}/Info.plist")"
+          toolchain_link="$HOME/Library/Developer/Toolchains/${toolchain_id}.xctoolchain"
           mkdir -p "$HOME/Library/Developer/Toolchains"
-          ln -sf "$toolchain_path" \
-            "$HOME/Library/Developer/Toolchains/$(basename "$toolchain_path")"
+          ln -sfn "$toolchain_path" "$toolchain_link"
           echo "TOOLCHAINS=${toolchain_id}" >> "$GITHUB_ENV"
 
           echo "$HOME/.swiftly/bin" >> "$GITHUB_PATH"
@@ -162,9 +162,9 @@ jobs:
           toolchain_path="$(swiftly use --print-location)"
           toolchain_id="$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" \
             "${toolchain_path}/Info.plist")"
+          toolchain_link="$HOME/Library/Developer/Toolchains/${toolchain_id}.xctoolchain"
           mkdir -p "$HOME/Library/Developer/Toolchains"
-          ln -sf "$toolchain_path" \
-            "$HOME/Library/Developer/Toolchains/$(basename "$toolchain_path")"
+          ln -sfn "$toolchain_path" "$toolchain_link"
           echo "TOOLCHAINS=${toolchain_id}" >> "$GITHUB_ENV"
 
           echo "$HOME/.swiftly/bin" >> "$GITHUB_PATH"
@@ -263,9 +263,9 @@ jobs:
           toolchain_path="$(swiftly use --print-location)"
           toolchain_id="$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" \
             "${toolchain_path}/Info.plist")"
+          toolchain_link="$HOME/Library/Developer/Toolchains/${toolchain_id}.xctoolchain"
           mkdir -p "$HOME/Library/Developer/Toolchains"
-          ln -sf "$toolchain_path" \
-            "$HOME/Library/Developer/Toolchains/$(basename "$toolchain_path")"
+          ln -sfn "$toolchain_path" "$toolchain_link"
           echo "TOOLCHAINS=${toolchain_id}" >> "$GITHUB_ENV"
 
           echo "$HOME/.swiftly/bin" >> "$GITHUB_PATH"

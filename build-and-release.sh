@@ -107,8 +107,16 @@ build_arch() {
     local quiet_flag=()
     [[ "$CLEAN" != "1" ]] && quiet_flag=(-quiet)
 
+    # If a specific Swift toolchain is configured, pass it explicitly.
+    local toolchain_args=()
+    if [[ -n "${TOOLCHAINS:-}" ]]; then
+        toolchain_args=(-toolchain "$TOOLCHAINS")
+        log "Using Xcode toolchain: ${TOOLCHAINS}"
+    fi
+
     log "Resolving Swift package dependencies"
     if ! xcodebuild \
+        "${toolchain_args[@]}" \
         -scheme "$SCHEME_NAME" \
         -configuration Release \
         -destination "platform=macOS,arch=${target_arch}" \
@@ -122,6 +130,7 @@ build_arch() {
     patch_mlx_swift_lm_for_swift6 "$PACKAGE_CHECKOUTS_DIR"
 
     if ! xcodebuild \
+        "${toolchain_args[@]}" \
         -scheme "$SCHEME_NAME" \
         -configuration Release \
         -destination "platform=macOS,arch=${target_arch}" \
