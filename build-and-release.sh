@@ -241,10 +241,18 @@ build_binary() {
 
 copy_shader_bundle() {
     # The MLX metallib must live next to the executable.
+    local binary_dir
+    binary_dir="$(dirname "$BUILT_BINARY_PATH")"
+
     local bundle_candidates=(
+        "${binary_dir}/mlx-swift_Cmlx.bundle"
+        "${binary_dir}/cli/mlx-swift_Cmlx.bundle"
+        "${binary_dir}/../cli/mlx-swift_Cmlx.bundle"
         "${BUILD_DIR_ARM64}/Build/Products/Release/mlx-swift_Cmlx.bundle"
         ".build/arm64-apple-macosx/release/mlx-swift_Cmlx.bundle"
+        ".build/arm64-apple-macosx/release/cli/mlx-swift_Cmlx.bundle"
         ".build/release/mlx-swift_Cmlx.bundle"
+        ".build/release/cli/mlx-swift_Cmlx.bundle"
     )
 
     local bundle_source=""
@@ -256,7 +264,7 @@ copy_shader_bundle() {
     done
 
     if [[ -z "$bundle_source" ]]; then
-        bundle_source="$(find .build -type d -name 'mlx-swift_Cmlx.bundle' -not -path '*/release/cli/*' 2>/dev/null | head -n 1 || true)"
+        bundle_source="$(find .build -type d -name 'mlx-swift_Cmlx.bundle' 2>/dev/null | head -n 1 || true)"
     fi
 
     [[ -n "$bundle_source" ]] || fail "mlx-swift_Cmlx.bundle was not found in build output"
