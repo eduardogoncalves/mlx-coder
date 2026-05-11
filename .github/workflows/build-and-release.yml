@@ -30,53 +30,44 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Select Xcode 16.4
-        run: sudo xcode-select -s /Applications/Xcode_16.4.app
-
-      - name: Set up Swift 6.3.1
+      - name: Select Xcode with Swift 6.3+
         shell: bash
         run: |
           set -euo pipefail
 
-          swiftly_pkg="$RUNNER_TEMP/swiftly.pkg"
-          post_install_script="$RUNNER_TEMP/swiftly-post-install.sh"
+          required_major=6
+          required_minor=3
 
-          curl --fail --location --silent --show-error \
-            https://download.swift.org/swiftly/darwin/swiftly.pkg \
-            --output "$swiftly_pkg"
-          installer -pkg "$swiftly_pkg" -target CurrentUserHomeDirectory
+          best_xcode=""
+          best_swift=""
+          best_key=0
 
-          export PATH="$HOME/.swiftly/bin:$PATH"
+          shopt -s nullglob
+          for xcode in /Applications/Xcode_*.app /Applications/Xcode.app; do
+            swift_bin="${xcode}/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swift"
+            [[ -x "$swift_bin" ]] || continue
+            ver_line="$("$swift_bin" --version 2>/dev/null | head -n1 || true)"
+            ver="$(echo "$ver_line" | grep -oE 'Swift version [0-9]+\.[0-9]+(\.[0-9]+)?' | awk '{print $3}')"
+            [[ -n "$ver" ]] || continue
+            IFS='.' read -r major minor patch <<<"${ver}.0.0"
+            key=$((10#$major * 1000000 + 10#$minor * 1000 + 10#$patch))
+            min_key=$((required_major * 1000000 + required_minor * 1000))
+            if (( key >= min_key )) && (( key > best_key )); then
+              best_key=$key
+              best_xcode="$xcode"
+              best_swift="$ver"
+            fi
+          done
 
-          swiftly init \
-            --skip-install \
-            --quiet-shell-followup \
-            --assume-yes \
-            --no-modify-profile
-
-          rm -f "$post_install_script"
-          swiftly install \
-            --use \
-            6.3.1 \
-            --assume-yes \
-            --post-install-file "$post_install_script"
-
-          if [ -f "$post_install_script" ]; then
-            bash "$post_install_script"
+          if [[ -z "$best_xcode" ]]; then
+            echo "::error::No Xcode with Swift >= ${required_major}.${required_minor} found on runner. Available Xcodes:"
+            ls -d /Applications/Xcode*.app 2>/dev/null || true
+            exit 1
           fi
 
-          # Make xcodebuild aware of the swiftly toolchain
-          toolchain_path="$(swiftly use --print-location)"
-          toolchain_id="$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" \
-            "${toolchain_path}/Info.plist")"
-          toolchain_link="$HOME/Library/Developer/Toolchains/${toolchain_id}.xctoolchain"
-          mkdir -p "$HOME/Library/Developer/Toolchains"
-          ln -sfn "$toolchain_path" "$toolchain_link"
-          echo "TOOLCHAINS=${toolchain_id}" >> "$GITHUB_ENV"
+          echo "Selected ${best_xcode} (Swift ${best_swift})"
+          sudo xcode-select -s "${best_xcode}"
 
-          echo "$HOME/.swiftly/bin" >> "$GITHUB_PATH"
-          swiftly use --print-location >> "$GITHUB_PATH"
-          
       - name: Show toolchain versions
         run: |
           xcodebuild -version
@@ -123,52 +114,43 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Select Xcode 16.4
-        run: sudo xcode-select -s /Applications/Xcode_16.4.app
-
-      - name: Set up Swift 6.3.1
+      - name: Select Xcode with Swift 6.3+
         shell: bash
         run: |
           set -euo pipefail
 
-          swiftly_pkg="$RUNNER_TEMP/swiftly.pkg"
-          post_install_script="$RUNNER_TEMP/swiftly-post-install.sh"
+          required_major=6
+          required_minor=3
 
-          curl --fail --location --silent --show-error \
-            https://download.swift.org/swiftly/darwin/swiftly.pkg \
-            --output "$swiftly_pkg"
-          installer -pkg "$swiftly_pkg" -target CurrentUserHomeDirectory
+          best_xcode=""
+          best_swift=""
+          best_key=0
 
-          export PATH="$HOME/.swiftly/bin:$PATH"
+          shopt -s nullglob
+          for xcode in /Applications/Xcode_*.app /Applications/Xcode.app; do
+            swift_bin="${xcode}/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swift"
+            [[ -x "$swift_bin" ]] || continue
+            ver_line="$("$swift_bin" --version 2>/dev/null | head -n1 || true)"
+            ver="$(echo "$ver_line" | grep -oE 'Swift version [0-9]+\.[0-9]+(\.[0-9]+)?' | awk '{print $3}')"
+            [[ -n "$ver" ]] || continue
+            IFS='.' read -r major minor patch <<<"${ver}.0.0"
+            key=$((10#$major * 1000000 + 10#$minor * 1000 + 10#$patch))
+            min_key=$((required_major * 1000000 + required_minor * 1000))
+            if (( key >= min_key )) && (( key > best_key )); then
+              best_key=$key
+              best_xcode="$xcode"
+              best_swift="$ver"
+            fi
+          done
 
-          swiftly init \
-            --skip-install \
-            --quiet-shell-followup \
-            --assume-yes \
-            --no-modify-profile
-
-          rm -f "$post_install_script"
-          swiftly install \
-            --use \
-            6.3.1 \
-            --assume-yes \
-            --post-install-file "$post_install_script"
-
-          if [ -f "$post_install_script" ]; then
-            bash "$post_install_script"
+          if [[ -z "$best_xcode" ]]; then
+            echo "::error::No Xcode with Swift >= ${required_major}.${required_minor} found on runner. Available Xcodes:"
+            ls -d /Applications/Xcode*.app 2>/dev/null || true
+            exit 1
           fi
 
-          # Make xcodebuild aware of the swiftly toolchain
-          toolchain_path="$(swiftly use --print-location)"
-          toolchain_id="$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" \
-            "${toolchain_path}/Info.plist")"
-          toolchain_link="$HOME/Library/Developer/Toolchains/${toolchain_id}.xctoolchain"
-          mkdir -p "$HOME/Library/Developer/Toolchains"
-          ln -sfn "$toolchain_path" "$toolchain_link"
-          echo "TOOLCHAINS=${toolchain_id}" >> "$GITHUB_ENV"
-
-          echo "$HOME/.swiftly/bin" >> "$GITHUB_PATH"
-          swiftly use --print-location >> "$GITHUB_PATH"
+          echo "Selected ${best_xcode} (Swift ${best_swift})"
+          sudo xcode-select -s "${best_xcode}"
 
       - name: Show toolchain versions
         run: |
@@ -224,52 +206,48 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Select Xcode 16.4
-        run: sudo xcode-select -s /Applications/Xcode_16.4.app
-
-      - name: Set up Swift 6.3.1
+      - name: Select Xcode with Swift 6.3+
         shell: bash
         run: |
           set -euo pipefail
 
-          swiftly_pkg="$RUNNER_TEMP/swiftly.pkg"
-          post_install_script="$RUNNER_TEMP/swiftly-post-install.sh"
+          required_major=6
+          required_minor=3
 
-          curl --fail --location --silent --show-error \
-            https://download.swift.org/swiftly/darwin/swiftly.pkg \
-            --output "$swiftly_pkg"
-          installer -pkg "$swiftly_pkg" -target CurrentUserHomeDirectory
+          best_xcode=""
+          best_swift=""
+          best_key=0
 
-          export PATH="$HOME/.swiftly/bin:$PATH"
+          shopt -s nullglob
+          for xcode in /Applications/Xcode_*.app /Applications/Xcode.app; do
+            swift_bin="${xcode}/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swift"
+            [[ -x "$swift_bin" ]] || continue
+            ver_line="$("$swift_bin" --version 2>/dev/null | head -n1 || true)"
+            ver="$(echo "$ver_line" | grep -oE 'Swift version [0-9]+\.[0-9]+(\.[0-9]+)?' | awk '{print $3}')"
+            [[ -n "$ver" ]] || continue
+            IFS='.' read -r major minor patch <<<"${ver}.0.0"
+            key=$((10#$major * 1000000 + 10#$minor * 1000 + 10#$patch))
+            min_key=$((required_major * 1000000 + required_minor * 1000))
+            if (( key >= min_key )) && (( key > best_key )); then
+              best_key=$key
+              best_xcode="$xcode"
+              best_swift="$ver"
+            fi
+          done
 
-          swiftly init \
-            --skip-install \
-            --quiet-shell-followup \
-            --assume-yes \
-            --no-modify-profile
-
-          rm -f "$post_install_script"
-          swiftly install \
-            --use \
-            6.3.1 \
-            --assume-yes \
-            --post-install-file "$post_install_script"
-
-          if [ -f "$post_install_script" ]; then
-            bash "$post_install_script"
+          if [[ -z "$best_xcode" ]]; then
+            echo "::error::No Xcode with Swift >= ${required_major}.${required_minor} found on runner. Available Xcodes:"
+            ls -d /Applications/Xcode*.app 2>/dev/null || true
+            exit 1
           fi
 
-          # Make xcodebuild aware of the swiftly toolchain
-          toolchain_path="$(swiftly use --print-location)"
-          toolchain_id="$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" \
-            "${toolchain_path}/Info.plist")"
-          toolchain_link="$HOME/Library/Developer/Toolchains/${toolchain_id}.xctoolchain"
-          mkdir -p "$HOME/Library/Developer/Toolchains"
-          ln -sfn "$toolchain_path" "$toolchain_link"
-          echo "TOOLCHAINS=${toolchain_id}" >> "$GITHUB_ENV"
+          echo "Selected ${best_xcode} (Swift ${best_swift})"
+          sudo xcode-select -s "${best_xcode}"
 
-          echo "$HOME/.swiftly/bin" >> "$GITHUB_PATH"
-          swiftly use --print-location >> "$GITHUB_PATH"
+      - name: Show toolchain versions
+        run: |
+          xcodebuild -version
+          swift --version
 
       - name: Determine manual version
         id: vars
