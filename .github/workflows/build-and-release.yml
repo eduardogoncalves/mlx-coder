@@ -30,13 +30,13 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Select Xcode with Swift 6.3+
+      - name: Select Xcode with Swift 6.2+
         shell: bash
         run: |
           set -euo pipefail
 
           required_major=6
-          required_minor=3
+          required_minor=2
 
           best_xcode=""
           best_swift=""
@@ -116,13 +116,13 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Select Xcode with Swift 6.3+
+      - name: Select Xcode with Swift 6.2+
         shell: bash
         run: |
           set -euo pipefail
 
           required_major=6
-          required_minor=3
+          required_minor=2
 
           best_xcode=""
           best_swift=""
@@ -210,13 +210,13 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Select Xcode with Swift 6.3+
+      - name: Select Xcode with Swift 6.2+
         shell: bash
         run: |
           set -euo pipefail
 
           required_major=6
-          required_minor=3
+          required_minor=2
 
           best_xcode=""
           best_swift=""
