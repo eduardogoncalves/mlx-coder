@@ -55,6 +55,7 @@ fail() {
 
 require_tools() {
     log "Validating build tools"
+    command -v swift >/dev/null 2>&1 || fail "swift not found"
     command -v xcodebuild >/dev/null 2>&1 || fail "xcodebuild not found"
     command -v pkgbuild >/dev/null 2>&1 || fail "pkgbuild not found"
     command -v shasum >/dev/null 2>&1 || fail "shasum not found"
@@ -72,9 +73,20 @@ require_tools() {
 
 patch_mlx_swift_lm_for_swift6() {
     local cloned_packages_dir="$1"
-    local target_file="${cloned_packages_dir}/checkouts/mlx-swift-lm/Libraries/MLXVLM/MediaProcessing.swift"
+    local target_file=""
+    local candidates=(
+        "${cloned_packages_dir}/checkouts/mlx-swift-lm/Libraries/MLXVLM/MediaProcessing.swift"
+        "${cloned_packages_dir}/mlx-swift-lm/Libraries/MLXVLM/MediaProcessing.swift"
+    )
 
-    [[ -f "$target_file" ]] || fail "mlx-swift-lm source not found for patching: ${target_file}"
+    for candidate in "${candidates[@]}"; do
+        if [[ -f "$candidate" ]]; then
+            target_file="$candidate"
+            break
+        fi
+    done
+
+    [[ -n "$target_file" ]] || fail "mlx-swift-lm source not found for patching under: ${cloned_packages_dir}"
 
     if grep -q '^private let context = CIContext()$' "$target_file"; then
         log "Patching mlx-swift-lm MediaProcessing.swift for Swift 6 concurrency checks"
@@ -89,6 +101,53 @@ patch_mlx_swift_lm_for_swift6() {
     fi
 
     fail "Could not find expected CIContext declaration to patch in ${target_file}"
+}
+
+build_arch_with_swiftpm() {
+    local target_arch="$1"
+
+    log "Building ${APP_NAME} for ${target_arch} via SwiftPM fallback"
+
+    if [[ "$CLEAN" == "1" ]]; then
+        log "Clean build: removing SwiftPM release output"
+        rm -rf ".build/${target_arch}-apple-macosx/release" ".build/release"
+    fi
+
+    # Use --quiet for incremental builds, verbose for clean builds
+    local quiet_flag=()
+    [[ "$CLEAN" != "1" ]] && quiet_flag=(--quiet)
+
+    log "Resolving Swift package dependencies via swift package"
+    if ! swift package resolve "${quiet_flag[@]}" >&2; then
+        fail "swift package resolve failed for architecture ${target_arch}"
+    fi
+
+    patch_mlx_swift_lm_for_swift6 ".build/checkouts"
+
+    log "Building via swift build"
+    if ! swift build \
+        --configuration release \
+        --arch "$target_arch" \
+        --product "$SCHEME_NAME" \
+        "${quiet_flag[@]}" >&2; then
+        fail "swift build failed for architecture ${target_arch}"
+    fi
+
+    local binary_candidates=(
+        ".build/${target_arch}-apple-macosx/release/${SCHEME_NAME}"
+        ".build/release/${SCHEME_NAME}"
+    )
+
+    local built_binary=""
+    for candidate in "${binary_candidates[@]}"; do
+        if [[ -f "$candidate" ]]; then
+            built_binary="$candidate"
+            break
+        fi
+    done
+
+    [[ -n "$built_binary" ]] || fail "Expected SwiftPM binary not found for ${SCHEME_NAME}"
+    BUILT_BINARY_PATH="$built_binary"
 }
 
 build_arch() {
@@ -114,6 +173,9 @@ build_arch() {
         log "Using Xcode toolchain: ${TOOLCHAINS}"
     fi
 
+    local resolve_log="${WORK_DIR}/xcodebuild-resolve.log"
+    local build_log="${WORK_DIR}/xcodebuild-build.log"
+
     log "Resolving Swift package dependencies"
     if ! xcodebuild \
         "${toolchain_args[@]}" \
@@ -123,7 +185,12 @@ build_arch() {
         -derivedDataPath "$derived_data" \
         -clonedSourcePackagesDirPath "$PACKAGE_CHECKOUTS_DIR" \
         -resolvePackageDependencies \
-        "${quiet_flag[@]}" >&2; then
+        "${quiet_flag[@]}" > >(tee "$resolve_log") 2>&1; then
+        if grep -Eq 'using Swift tools version .* installed version is' "$resolve_log"; then
+            log "xcodebuild could not parse swift-tools-version with the selected Xcode toolchain; using SwiftPM fallback"
+            build_arch_with_swiftpm "$target_arch"
+            return
+        fi
         fail "xcodebuild failed while resolving package dependencies for architecture ${target_arch}"
     fi
 
@@ -139,7 +206,12 @@ build_arch() {
         -disableAutomaticPackageResolution \
         -onlyUsePackageVersionsFromResolvedFile \
         "${quiet_flag[@]}" \
-        build >&2; then
+        build > >(tee "$build_log") 2>&1; then
+        if grep -Eq 'using Swift tools version .* installed version is' "$build_log"; then
+            log "xcodebuild build step failed due Swift tools mismatch; using SwiftPM fallback"
+            build_arch_with_swiftpm "$target_arch"
+            return
+        fi
         fail "xcodebuild failed for architecture ${target_arch}"
     fi
 
@@ -169,7 +241,11 @@ build_binary() {
 
 copy_shader_bundle() {
     # The MLX metallib must live next to the executable.
-    local bundle_candidates=("${BUILD_DIR_ARM64}/Build/Products/Release/mlx-swift_Cmlx.bundle")
+    local bundle_candidates=(
+        "${BUILD_DIR_ARM64}/Build/Products/Release/mlx-swift_Cmlx.bundle"
+        ".build/arm64-apple-macosx/release/mlx-swift_Cmlx.bundle"
+        ".build/release/mlx-swift_Cmlx.bundle"
+    )
 
     local bundle_source=""
     for candidate in "${bundle_candidates[@]}"; do
@@ -178,6 +254,10 @@ copy_shader_bundle() {
             break
         fi
     done
+
+    if [[ -z "$bundle_source" ]]; then
+        bundle_source="$(find .build -type d -name 'mlx-swift_Cmlx.bundle' -not -path '*/release/cli/*' 2>/dev/null | head -n 1 || true)"
+    fi
 
     [[ -n "$bundle_source" ]] || fail "mlx-swift_Cmlx.bundle was not found in build output"
     echo "$bundle_source"
