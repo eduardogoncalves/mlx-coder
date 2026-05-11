@@ -116,21 +116,21 @@ build_arch() {
 
     log "Resolving Swift package dependencies"
     if ! xcodebuild \
-        "${toolchain_args[@]}" \
+        ${toolchain_args[@]+"${toolchain_args[@]}"} \
         -scheme "$SCHEME_NAME" \
         -configuration Release \
         -destination "platform=macOS,arch=${target_arch}" \
         -derivedDataPath "$derived_data" \
         -clonedSourcePackagesDirPath "$PACKAGE_CHECKOUTS_DIR" \
         -resolvePackageDependencies \
-        "${quiet_flag[@]}" >&2; then
+        ${quiet_flag[@]+"${quiet_flag[@]}"} >&2; then
         fail "xcodebuild failed while resolving package dependencies for architecture ${target_arch}"
     fi
 
     patch_mlx_swift_lm_for_swift6 "$PACKAGE_CHECKOUTS_DIR"
 
     if ! xcodebuild \
-        "${toolchain_args[@]}" \
+        ${toolchain_args[@]+"${toolchain_args[@]}"} \
         -scheme "$SCHEME_NAME" \
         -configuration Release \
         -destination "platform=macOS,arch=${target_arch}" \
@@ -138,7 +138,7 @@ build_arch() {
         -clonedSourcePackagesDirPath "$PACKAGE_CHECKOUTS_DIR" \
         -disableAutomaticPackageResolution \
         -onlyUsePackageVersionsFromResolvedFile \
-        "${quiet_flag[@]}" \
+        ${quiet_flag[@]+"${quiet_flag[@]}"} \
         build >&2; then
         fail "xcodebuild failed for architecture ${target_arch}"
     fi
