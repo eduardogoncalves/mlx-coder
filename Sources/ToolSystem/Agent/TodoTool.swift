@@ -18,9 +18,11 @@ public struct TodoTool: Tool {
     )
 
     private let todoFilePath: String
+    private let legacyTodoFilePath: String
 
     public init(workspaceRoot: String) {
-        self.todoFilePath = (workspaceRoot as NSString).appendingPathComponent(".native-agent-todo.md")
+        self.todoFilePath = (workspaceRoot as NSString).appendingPathComponent(".mlx-coder-todo")
+        self.legacyTodoFilePath = (workspaceRoot as NSString).appendingPathComponent(".native-agent-todo.md")
     }
 
     public func execute(arguments: [String: Any]) async throws -> ToolResult {
@@ -54,7 +56,10 @@ public struct TodoTool: Tool {
     // MARK: - Private
 
     private func loadTodos() -> [String] {
-        guard let content = try? String(contentsOfFile: todoFilePath, encoding: .utf8) else {
+        let content =
+            (try? String(contentsOfFile: todoFilePath, encoding: .utf8))
+            ?? (try? String(contentsOfFile: legacyTodoFilePath, encoding: .utf8))
+        guard let content else {
             return []
         }
         return content

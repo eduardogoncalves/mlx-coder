@@ -54,7 +54,7 @@ final class TodoToolTests: XCTestCase {
         let tool = TodoTool(workspaceRoot: workspace.path)
         _ = try await tool.execute(arguments: ["action": "add", "item_text": "first"])
 
-        let todoFile = workspace.appendingPathComponent(".native-agent-todo.md")
+        let todoFile = workspace.appendingPathComponent(".mlx-coder-todo")
         let content = try String(contentsOf: todoFile, encoding: .utf8)
         XCTAssertEqual(content, "[ ] first")
     }
@@ -75,7 +75,7 @@ final class TodoToolTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: workspace) }
 
         try "[] first".write(
-            to: workspace.appendingPathComponent(".native-agent-todo.md"),
+            to: workspace.appendingPathComponent(".mlx-coder-todo"),
             atomically: true,
             encoding: .utf8
         )
@@ -91,7 +91,7 @@ final class TodoToolTests: XCTestCase {
         let workspace = try makeWorkspace()
         defer { try? FileManager.default.removeItem(at: workspace) }
 
-        let todoFile = workspace.appendingPathComponent(".native-agent-todo.md")
+        let todoFile = workspace.appendingPathComponent(".mlx-coder-todo")
         try "[] first".write(to: todoFile, atomically: true, encoding: .utf8)
 
         let tool = TodoTool(workspaceRoot: workspace.path)
@@ -105,7 +105,7 @@ final class TodoToolTests: XCTestCase {
         let workspace = try makeWorkspace()
         defer { try? FileManager.default.removeItem(at: workspace) }
 
-        let todoFile = workspace.appendingPathComponent(".native-agent-todo.md")
+        let todoFile = workspace.appendingPathComponent(".mlx-coder-todo")
         try "[ ]first".write(to: todoFile, atomically: true, encoding: .utf8)
 
         let tool = TodoTool(workspaceRoot: workspace.path)
@@ -113,6 +113,23 @@ final class TodoToolTests: XCTestCase {
 
         XCTAssertFalse(result.isError)
         XCTAssertEqual(try String(contentsOf: todoFile, encoding: .utf8), "[x] first")
+    }
+
+    func testReadFallsBackToLegacyTodoFileName() async throws {
+        let workspace = try makeWorkspace()
+        defer { try? FileManager.default.removeItem(at: workspace) }
+
+        try "[ ] first".write(
+            to: workspace.appendingPathComponent(".native-agent-todo.md"),
+            atomically: true,
+            encoding: .utf8
+        )
+
+        let tool = TodoTool(workspaceRoot: workspace.path)
+        let result = try await tool.execute(arguments: ["action": "read"])
+
+        XCTAssertFalse(result.isError)
+        XCTAssertEqual(result.content, "1. [ ] first")
     }
 
     private func makeWorkspace() throws -> URL {
