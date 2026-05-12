@@ -57,11 +57,14 @@ public struct TodoTool: Tool {
         guard let content = try? String(contentsOfFile: todoFilePath, encoding: .utf8) else {
             return []
         }
-        return content.components(separatedBy: "\n").filter { !$0.isEmpty }
+        return content
+            .components(separatedBy: "\n")
+            .filter { !$0.isEmpty }
+            .map(normalizeTodoFormat)
     }
 
     private func saveTodos(_ todos: [String]) {
-        let content = todos.joined(separator: "\n")
+        let content = todos.map(normalizeTodoFormat).joined(separator: "\n")
         try? content.write(toFile: todoFilePath, atomically: true, encoding: .utf8)
     }
 
@@ -87,7 +90,7 @@ public struct TodoTool: Tool {
         guard i >= 0, i < todos.count else {
             return .error("Invalid todo number: \(index) (have \(todos.count) items)")
         }
-        todos[i] = todos[i].replacingOccurrences(of: "[ ]", with: "[x]")
+        todos[i] = markTodoCompleted(todos[i])
         saveTodos(todos)
         return .success("Completed: \(todos[i])")
     }
@@ -112,5 +115,33 @@ public struct TodoTool: Tool {
         default:
             return nil
         }
+    }
+
+    private func normalizeTodoFormat(_ todo: String) -> String {
+        if todo == "[]" {
+            return "[ ]"
+        }
+
+        guard todo.hasPrefix("[]") else {
+            return todo
+        }
+
+        let remainder = String(todo.dropFirst(2))
+        guard remainder.isEmpty || remainder.hasPrefix(" ") else {
+            return todo
+        }
+
+        return "[ ]" + remainder
+    }
+
+    private func markTodoCompleted(_ todo: String) -> String {
+        let normalizedTodo = normalizeTodoFormat(todo)
+        if normalizedTodo == "[ ]" {
+            return "[x]"
+        }
+        if normalizedTodo.hasPrefix("[ ] ") {
+            return "[x] " + String(normalizedTodo.dropFirst(4))
+        }
+        return normalizedTodo
     }
 }

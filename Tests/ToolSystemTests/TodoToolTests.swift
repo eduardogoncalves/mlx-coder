@@ -47,6 +47,18 @@ final class TodoToolTests: XCTestCase {
         XCTAssertTrue(readResult.content.contains("first"))
     }
 
+    func testAddPersistsMarkdownUncheckedCheckboxFormat() async throws {
+        let workspace = try makeWorkspace()
+        defer { try? FileManager.default.removeItem(at: workspace) }
+
+        let tool = TodoTool(workspaceRoot: workspace.path)
+        _ = try await tool.execute(arguments: ["action": "add", "item_text": "first"])
+
+        let todoFile = workspace.appendingPathComponent(".native-agent-todo.md")
+        let content = try String(contentsOf: todoFile, encoding: .utf8)
+        XCTAssertEqual(content, "[ ] first")
+    }
+
     func testAddRejectsLegacyStringItemField() async throws {
         let workspace = try makeWorkspace()
         defer { try? FileManager.default.removeItem(at: workspace) }
@@ -56,6 +68,37 @@ final class TodoToolTests: XCTestCase {
 
         XCTAssertTrue(result.isError)
         XCTAssertTrue(result.content.contains("item_text"))
+    }
+
+    func testReadNormalizesLegacyUncheckedCheckboxFormat() async throws {
+        let workspace = try makeWorkspace()
+        defer { try? FileManager.default.removeItem(at: workspace) }
+
+        try "[] first".write(
+            to: workspace.appendingPathComponent(".native-agent-todo.md"),
+            atomically: true,
+            encoding: .utf8
+        )
+
+        let tool = TodoTool(workspaceRoot: workspace.path)
+        let result = try await tool.execute(arguments: ["action": "read"])
+
+        XCTAssertFalse(result.isError)
+        XCTAssertEqual(result.content, "1. [ ] first")
+    }
+
+    func testCompleteNormalizesLegacyUncheckedCheckboxFormatBeforeCompleting() async throws {
+        let workspace = try makeWorkspace()
+        defer { try? FileManager.default.removeItem(at: workspace) }
+
+        let todoFile = workspace.appendingPathComponent(".native-agent-todo.md")
+        try "[] first".write(to: todoFile, atomically: true, encoding: .utf8)
+
+        let tool = TodoTool(workspaceRoot: workspace.path)
+        let result = try await tool.execute(arguments: ["action": "complete", "item": 1])
+
+        XCTAssertFalse(result.isError)
+        XCTAssertEqual(try String(contentsOf: todoFile, encoding: .utf8), "[x] first")
     }
 
     private func makeWorkspace() throws -> URL {
