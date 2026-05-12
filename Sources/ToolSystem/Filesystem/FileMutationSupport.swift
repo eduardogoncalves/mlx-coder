@@ -1,5 +1,7 @@
 import Foundation
 
+/// Shared file mutation helpers used by the generic write/edit tools and the
+/// dedicated PLAN.MD tool so they apply the same validation, write, and diff behavior.
 enum FileMutationSupport {
     static func writeContent(
         _ content: String,
