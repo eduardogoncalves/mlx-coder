@@ -118,18 +118,37 @@ public struct TodoTool: Tool {
     }
 
     private func normalizeTodoFormat(_ todo: String) -> String {
+        if todo.hasPrefix("[ ]") {
+            return canonicalizeTodoPrefix(todo, from: "[ ]", to: "[ ]")
+        }
+
+        if todo.hasPrefix("[x]") {
+            return canonicalizeTodoPrefix(todo, from: "[x]", to: "[x]")
+        }
+
         guard todo.hasPrefix("[]") else {
             return todo
         }
 
-        return "[ ]" + String(todo.dropFirst(2))
+        return canonicalizeTodoPrefix(todo, from: "[]", to: "[ ]")
     }
 
     private func markTodoCompleted(_ todo: String) -> String {
         let normalizedTodo = normalizeTodoFormat(todo)
         if normalizedTodo.hasPrefix("[ ]") {
-            return "[x]" + String(normalizedTodo.dropFirst(3))
+            return canonicalizeTodoPrefix(normalizedTodo, from: "[ ]", to: "[x]")
         }
         return normalizedTodo
+    }
+
+    private func canonicalizeTodoPrefix(_ todo: String, from prefix: String, to canonicalPrefix: String) -> String {
+        let remainder = String(todo.dropFirst(prefix.count))
+        if remainder.isEmpty {
+            return canonicalPrefix
+        }
+        if remainder.hasPrefix(" ") {
+            return canonicalPrefix + remainder
+        }
+        return canonicalPrefix + " " + remainder
     }
 }

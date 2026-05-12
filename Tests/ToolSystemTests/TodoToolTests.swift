@@ -112,7 +112,7 @@ final class TodoToolTests: XCTestCase {
         let result = try await tool.execute(arguments: ["action": "complete", "item": 1])
 
         XCTAssertFalse(result.isError)
-        XCTAssertEqual(try String(contentsOf: todoFile, encoding: .utf8), "[x]first")
+        XCTAssertEqual(try String(contentsOf: todoFile, encoding: .utf8), "[x] first")
     }
 
     private func makeWorkspace() throws -> URL {
