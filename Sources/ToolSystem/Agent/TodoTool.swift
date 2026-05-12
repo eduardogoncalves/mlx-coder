@@ -118,29 +118,17 @@ public struct TodoTool: Tool {
     }
 
     private func normalizeTodoFormat(_ todo: String) -> String {
-        if todo == "[]" {
-            return "[ ]"
-        }
-
         guard todo.hasPrefix("[]") else {
             return todo
         }
 
-        let remainder = String(todo.dropFirst(2))
-        guard remainder.isEmpty || remainder.hasPrefix(" ") else {
-            return todo
-        }
-
-        return "[ ]" + remainder
+        return "[ ]" + String(todo.dropFirst(2))
     }
 
     private func markTodoCompleted(_ todo: String) -> String {
         let normalizedTodo = normalizeTodoFormat(todo)
-        if normalizedTodo == "[ ]" {
-            return "[x]"
-        }
-        if normalizedTodo.hasPrefix("[ ] ") {
-            return "[x] " + String(normalizedTodo.dropFirst(4))
+        if normalizedTodo.hasPrefix("[ ]") {
+            return "[x]" + String(normalizedTodo.dropFirst(3))
         }
         return normalizedTodo
     }
