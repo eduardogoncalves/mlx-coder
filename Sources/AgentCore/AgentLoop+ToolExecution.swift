@@ -90,6 +90,10 @@ extension AgentLoop {
         return false
     }
 
+    func isFileModificationToolName(_ name: String) -> Bool {
+        ["plan_file", "write_file", "edit_file", "append_file", "patch"].contains(name)
+    }
+
     func isReadOnlyBashCall(_ call: ToolCallParser.ParsedToolCall) -> Bool {
         guard call.name == "bash" else { return false }
         guard let command = call.arguments["command"] as? String else { return false }

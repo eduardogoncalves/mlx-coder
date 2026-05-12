@@ -662,7 +662,7 @@ public actor AgentLoop {
         let blockedRepeatedReadOnlySignature = readOnlyLoopState.shouldBlock ? readOnlyLoopState.signature : nil
         
         // Track file modifications for build checking
-        let isFileModificationTool = (call.name == "plan_file" || call.name == "write_file" || call.name == "edit_file" || call.name == "append_file" || call.name == "patch")
+        let isFileModificationTool = isFileModificationToolName(call.name)
         
         var result: ToolResult
 
