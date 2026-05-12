@@ -564,6 +564,33 @@ public func runSwiftCoderTUISession(
                 }
                 continue
             }
+            if commandInput.hasPrefix("/ask ") || commandInput == "/ask" {
+                let question = String(commandInput.dropFirst("/ask".count)).trimmingCharacters(in: .whitespacesAndNewlines)
+                if question.isEmpty {
+                    await renderer.printScrollLine("\(DesignSystem.brightRed)✗ Usage: /ask <question>\(DesignSystem.reset)")
+                    continue
+                }
+                if await renderer.getIsGenerating() {
+                    await renderer.printScrollLine("\(DesignSystem.brightRed)✗ /ask unavailable while generation is active. Press Esc first.\(DesignSystem.reset)")
+                    continue
+                }
+                await renderer.printScrollLine("\(DesignSystem.dim)[ask] Side question (main context will be restored after).\(DesignSystem.reset)")
+                activeStreamTask = Task { @MainActor in
+                    defer { activeStreamTask = nil }
+                    do {
+                        try await agentLoop.processEphemeralMessage(question)
+                        await renderer.printScrollLine("\(DesignSystem.dim)[ask] Side question answered. Main context restored.\(DesignSystem.reset)")
+                    } catch is CancellationError {
+                        await renderer.printScrollLine("\(DesignSystem.brightRed)[ask] Generation cancelled.\(DesignSystem.reset)")
+                    } catch {
+                        await renderer.printScrollLine("\(DesignSystem.brightRed)✗ \(error.localizedDescription)\(DesignSystem.reset)")
+                    }
+                    await renderer.flushStreamLine()
+                    await renderer.setPendingCount(0)
+                    await renderer.renderFooter()
+                }
+                continue
+            }
             if commandInput.hasPrefix("/model") {
                 await handleModelCommand(input: commandInput, appConfig: frontend.appConfig, agentLoop: agentLoop, renderer: renderer)
                 continue
@@ -831,6 +858,7 @@ private func helpLines() -> [String] {
         "  /agent   switch to agent mode",
         "  /steer [msg] queue/list steering messages",
         "  /followup [msg] queue/list follow-ups",
+        "  /ask [question] ask a quick side question without changing main context",
         "  /merge-approval run merge approval flow",
         "  /gittree run git tree flow",
         "  /quit    exit the TUI",
