@@ -580,7 +580,12 @@ struct ChatCommand: AsyncParsableCommand {
             }
 
             if trimmed.hasPrefix("/ask ") || trimmed == "/ask" {
-                let question = String(trimmed.dropFirst("/ask".count)).trimmingCharacters(in: .whitespacesAndNewlines)
+                let question: String
+                if trimmed == "/ask" {
+                    question = ""
+                } else {
+                    question = String(trimmed.dropFirst("/ask ".count)).trimmingCharacters(in: .whitespacesAndNewlines)
+                }
                 if question.isEmpty {
                     renderer.printError("Usage: /ask <question>")
                 } else {

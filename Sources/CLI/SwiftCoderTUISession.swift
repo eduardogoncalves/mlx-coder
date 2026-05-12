@@ -565,7 +565,12 @@ public func runSwiftCoderTUISession(
                 continue
             }
             if commandInput.hasPrefix("/ask ") || commandInput == "/ask" {
-                let question = String(commandInput.dropFirst("/ask".count)).trimmingCharacters(in: .whitespacesAndNewlines)
+                let question: String
+                if commandInput == "/ask" {
+                    question = ""
+                } else {
+                    question = String(commandInput.dropFirst("/ask ".count)).trimmingCharacters(in: .whitespacesAndNewlines)
+                }
                 if question.isEmpty {
                     await renderer.printScrollLine("\(DesignSystem.brightRed)✗ Usage: /ask <question>\(DesignSystem.reset)")
                     continue
