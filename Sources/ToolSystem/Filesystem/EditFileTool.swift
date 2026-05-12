@@ -35,13 +35,4 @@ public struct EditFileTool: Tool {
         }
         return FileMutationSupport.editContent(in: path, oldText: oldText, newText: newText, permissions: permissions)
     }
-
-    // MARK: - Diff generation
-
-    /// Produces a unified diff between `original` and `updated` content.
-    /// Because `edit_file` always replaces exactly one occurrence, the changed
-    /// region is always a single contiguous block, which keeps the implementation simple.
-    func generateUnifiedDiff(original: String, updated: String, path: String) -> String {
-        FileMutationSupport.generateUnifiedDiff(original: original, updated: updated, path: path)
-    }
 }
