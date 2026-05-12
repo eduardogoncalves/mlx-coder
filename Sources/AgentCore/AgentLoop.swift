@@ -666,7 +666,7 @@ public actor AgentLoop {
         
         var result: ToolResult
 
-        let targetPath = call.name == "plan_file" ? PlanFileTool.planPath : extractPolicyTargetPath(from: call.arguments)
+        let targetPath = call.name == "plan_file" ? PlanFileTool.planFileName : extractPolicyTargetPath(from: call.arguments)
         let policyDecision = permissions.evaluateToolPolicy(toolName: call.name, targetPath: targetPath)
         if case .denied(let denyReason) = policyDecision {
             let deniedResult = ToolResult.error(denyReason)

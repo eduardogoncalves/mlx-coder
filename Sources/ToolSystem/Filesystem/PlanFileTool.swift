@@ -1,7 +1,7 @@
 import Foundation
 
 public struct PlanFileTool: Tool {
-    static let planPath = "PLAN.MD"
+    static let planFileName = "PLAN.MD"
 
     public let name = "plan_file"
     public let description = "Create or update the workspace-root PLAN.MD without leaving plan mode. Use action 'write' to create or replace the full document, or 'edit' for an exact search/replace update."
@@ -32,7 +32,7 @@ public struct PlanFileTool: Tool {
             guard let content = arguments["content"] as? String else {
                 return .error("Missing required argument: content")
             }
-            return FileMutationSupport.writeContent(content, to: Self.planPath, permissions: permissions)
+            return FileMutationSupport.writeContent(content, to: Self.planFileName, permissions: permissions)
 
         case "edit":
             guard let oldText = arguments["old_text"] as? String else {
@@ -41,7 +41,7 @@ public struct PlanFileTool: Tool {
             guard let newText = arguments["new_text"] as? String else {
                 return .error("Missing required argument: new_text")
             }
-            return FileMutationSupport.editContent(in: Self.planPath, oldText: oldText, newText: newText, permissions: permissions)
+            return FileMutationSupport.editContent(in: Self.planFileName, oldText: oldText, newText: newText, permissions: permissions)
 
         default:
             return .error("Unknown action: \(action). Use 'write' or 'edit'.")

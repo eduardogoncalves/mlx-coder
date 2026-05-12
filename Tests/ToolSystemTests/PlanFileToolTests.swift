@@ -36,6 +36,9 @@ final class PlanFileToolTests: XCTestCase {
 
         XCTAssertFalse(result.isError)
         XCTAssertTrue(result.content.contains("Applied edit to PLAN.MD"))
+        XCTAssertTrue(result.content.contains("--- a/PLAN.MD"))
+        XCTAssertTrue(result.content.contains("+++ b/PLAN.MD"))
+        XCTAssertTrue(result.content.contains("@@"))
         XCTAssertTrue(result.content.contains("- [ ] First step"))
         XCTAssertTrue(result.content.contains("+- [x] First step"))
         XCTAssertEqual(try String(contentsOf: planFile, encoding: .utf8), "# Plan\n\n- [x] First step\n")
