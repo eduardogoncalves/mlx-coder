@@ -4,6 +4,25 @@
 import Foundation
 import Darwin
 
+struct ApprovalDecisionModeTransition: Equatable {
+    let workingMode: AgentLoop.WorkingMode
+    let taskType: AgentLoop.TaskType
+}
+
+func approvalDecisionModeTransition(
+    for decision: ApprovalDecision,
+    currentTaskType: AgentLoop.TaskType
+) -> ApprovalDecisionModeTransition? {
+    switch decision {
+    case .switchToAgentAndAllow:
+        return ApprovalDecisionModeTransition(workingMode: .agent, taskType: currentTaskType)
+    case .allowAllAutopilot:
+        return ApprovalDecisionModeTransition(workingMode: .agent, taskType: .general)
+    default:
+        return nil
+    }
+}
+
 extension AgentLoop {
 
     static func menuOptionHint(_ count: Int) -> String {
@@ -121,6 +140,10 @@ extension AgentLoop {
             return (false, nil)
         }
 
+        if let transition = approvalDecisionModeTransition(for: decision, currentTaskType: taskType) {
+            await setMode(transition.workingMode, taskType: transition.taskType)
+        }
+
         switch decision {
         case .allowOnce, .switchToAgentAndAllow:
             await auditLogger?.logApprovalDecision(
@@ -139,7 +162,6 @@ extension AgentLoop {
             return (true, nil)
 
         case .allowAllAutopilot:
-            autoApproveAllTools = true
             await auditLogger?.logApprovalDecision(
                 toolName: name, mode: mode.rawValue,
                 isPlanModePrompt: isPlanMode, approved: true,
