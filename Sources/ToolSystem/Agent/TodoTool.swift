@@ -119,36 +119,46 @@ public struct TodoTool: Tool {
 
     private func normalizeTodoFormat(_ todo: String) -> String {
         if todo.hasPrefix("[ ]") {
-            return canonicalizeTodoPrefix(todo, from: "[ ]", to: "[ ]")
+            return normalizeCheckboxSpacing(todo, prefix: "[ ]")
         }
 
         if todo.hasPrefix("[x]") {
-            return canonicalizeTodoPrefix(todo, from: "[x]", to: "[x]")
+            return normalizeCheckboxSpacing(todo, prefix: "[x]")
         }
 
         guard todo.hasPrefix("[]") else {
             return todo
         }
 
-        return canonicalizeTodoPrefix(todo, from: "[]", to: "[ ]")
+        return normalizeLegacyUncheckedCheckbox(todo)
     }
 
     private func markTodoCompleted(_ todo: String) -> String {
         let normalizedTodo = normalizeTodoFormat(todo)
         if normalizedTodo.hasPrefix("[ ]") {
-            return canonicalizeTodoPrefix(normalizedTodo, from: "[ ]", to: "[x]")
+            return completeUncheckedTodo(normalizedTodo)
         }
         return normalizedTodo
     }
 
-    private func canonicalizeTodoPrefix(_ todo: String, from prefix: String, to canonicalPrefix: String) -> String {
+    private func normalizeLegacyUncheckedCheckbox(_ todo: String) -> String {
+        let remainder = String(todo.dropFirst(2))
+        return normalizeCheckboxSpacing("[ ]" + remainder, prefix: "[ ]")
+    }
+
+    private func completeUncheckedTodo(_ todo: String) -> String {
+        let remainder = String(todo.dropFirst(3))
+        return normalizeCheckboxSpacing("[x]" + remainder, prefix: "[x]")
+    }
+
+    private func normalizeCheckboxSpacing(_ todo: String, prefix: String) -> String {
         let remainder = String(todo.dropFirst(prefix.count))
         if remainder.isEmpty {
-            return canonicalPrefix
+            return prefix
         }
         if remainder.hasPrefix(" ") {
-            return canonicalPrefix + remainder
+            return prefix + remainder
         }
-        return canonicalPrefix + " " + remainder
+        return prefix + " " + remainder
     }
 }
