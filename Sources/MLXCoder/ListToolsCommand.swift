@@ -201,6 +201,7 @@ func buildListToolsPayload(
 private func builtinToolCatalog(includeDotnetTools: Bool) -> [ToolCatalogEntry] {
     var tools: [ToolCatalogEntry] = [
         ToolCatalogEntry(name: "read_file", category: "filesystem", description: "Read files with optional line ranges."),
+        ToolCatalogEntry(name: "plan_file", category: "filesystem", description: "Create or update the workspace-root PLAN.MD."),
         ToolCatalogEntry(name: "write_file", category: "filesystem", description: "Create or replace file contents."),
         ToolCatalogEntry(name: "append_file", category: "filesystem", description: "Append text to an existing file."),
         ToolCatalogEntry(name: "edit_file", category: "filesystem", description: "Apply exact search/replace edits in a file."),

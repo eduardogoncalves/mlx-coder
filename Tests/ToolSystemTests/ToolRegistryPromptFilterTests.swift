@@ -65,7 +65,7 @@ final class ToolRegistryPromptFilterTests: XCTestCase {
 
         let names = [
             "read_file", "list_dir", "glob", "grep", "code_search", "read_many",
-            "write_file", "edit_file", "append_file", "patch", "bash", "todo", "task",
+            "plan_file", "write_file", "edit_file", "append_file", "patch", "bash", "todo", "task",
             "lsp_diagnostics", "lsp_definition", "lsp_references", "lsp_hover", "lsp_completion",
             "web_fetch", "web_search", "build_check", "mcp_docs_search", "mcp_docs_fetch"
         ]
@@ -84,6 +84,21 @@ final class ToolRegistryPromptFilterTests: XCTestCase {
 
         XCTAssertLessThan(filteredTokens, fullTokens)
         XCTAssertGreaterThan(fullTokens - filteredTokens, 50)
+    }
+
+    func testGenerateToolsBlockPlanFilterKeepsPlanFile() async throws {
+        let registry = ToolRegistry()
+        await registry.register(MockTool(name: "read_file", description: "Read file"))
+        await registry.register(MockTool(name: "plan_file", description: "Persist PLAN.MD"))
+        await registry.register(MockTool(name: "write_file", description: "Write file"))
+        await registry.register(MockTool(name: "bash", description: "Run shell"))
+
+        let block = try await registry.generateToolsBlock(
+            filter: ToolPromptFilter(modeHint: "plan", taskTypeHint: "general", maxTools: 2, maxMCPTools: 0)
+        )
+        let names = try extractToolNames(fromToolsBlock: block)
+
+        XCTAssertTrue(names.contains("plan_file"))
     }
 
     private func extractToolNames(fromToolsBlock block: String) throws -> [String] {
