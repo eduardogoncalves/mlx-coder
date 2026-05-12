@@ -85,7 +85,6 @@ public final class InteractiveInput: @unchecked Sendable {
         }
 
         func textMetrics(_ text: String, cursor: Int, width: Int) -> (textRows: Int, cursorRow: Int, cursorCol: Int) {
-            let width = max(1, width)
             func advance(char: Character, row: inout Int, col: inout Int) {
                 if char == "\n" {
                     row += 1
