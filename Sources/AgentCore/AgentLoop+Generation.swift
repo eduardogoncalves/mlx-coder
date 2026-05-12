@@ -162,7 +162,7 @@ extension AgentLoop {
                 toolCallOpen: ToolCallPattern.toolCallOpen,
                 toolCallClose: ToolCallPattern.toolCallClose,
                 onStatusChange: { message in
-                    let severity: StatusMessage.Severity = message.hasPrefix("Writing to tmp file ")
+                    let severity: StatusMessage.Severity = message.hasPrefix(StreamingToolCallWriter.tmpFileStatusPrefix)
                         ? .info
                         : .debug
                     frontend.emit(.status(StatusMessage(message, severity: severity)))
