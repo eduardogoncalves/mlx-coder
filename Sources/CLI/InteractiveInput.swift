@@ -9,6 +9,7 @@ import Glibc
 #endif
 
 public final class InteractiveInput: @unchecked Sendable {
+    private static let minTerminalWidth = 1
     private var history: [String] = []
     private var historyIndex: Int = 0
     private var currentInputBeforeHistory: String = ""
@@ -72,7 +73,7 @@ public final class InteractiveInput: @unchecked Sendable {
         
         var input = initialText
         var cursorPosition = initialText.count // character index
-        var width = max(1, getTerminalWidth())
+        var width = max(Self.minTerminalWidth, getTerminalWidth())
         var isInitialDraw = true
         
         // Track the row the cursor is at relative to the top border (0).
@@ -85,6 +86,7 @@ public final class InteractiveInput: @unchecked Sendable {
         }
 
         func textMetrics(_ text: String, cursor: Int, width: Int) -> (textRows: Int, cursorRow: Int, cursorCol: Int) {
+            // `width` is the current terminal width used for wrap and cursor-row calculations.
             func advance(char: Character, row: inout Int, col: inout Int) {
                 if char == "\n" {
                     row += 1
@@ -147,7 +149,7 @@ public final class InteractiveInput: @unchecked Sendable {
         }
         
         func redraw() {
-            width = max(1, getTerminalWidth())
+            width = max(Self.minTerminalWidth, getTerminalWidth())
             if !isInitialDraw {
                 // Move up to the top border position
                 if currentCursorRowRelToTop > 0 {
