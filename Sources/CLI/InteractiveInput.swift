@@ -72,7 +72,7 @@ public final class InteractiveInput: @unchecked Sendable {
         
         var input = initialText
         var cursorPosition = initialText.count // character index
-        let width = getTerminalWidth()
+        var width = max(1, getTerminalWidth())
         var isInitialDraw = true
         
         // Track the row the cursor is at relative to the top border (0).
@@ -84,7 +84,8 @@ public final class InteractiveInput: @unchecked Sendable {
             cursorPosition += text.count
         }
 
-        func textMetrics(_ text: String, cursor: Int) -> (textRows: Int, cursorRow: Int, cursorCol: Int) {
+        func textMetrics(_ text: String, cursor: Int, width: Int) -> (textRows: Int, cursorRow: Int, cursorCol: Int) {
+            let width = max(1, width)
             func advance(char: Character, row: inout Int, col: inout Int) {
                 if char == "\n" {
                     row += 1
@@ -147,6 +148,7 @@ public final class InteractiveInput: @unchecked Sendable {
         }
         
         func redraw() {
+            width = max(1, getTerminalWidth())
             if !isInitialDraw {
                 // Move up to the top border position
                 if currentCursorRowRelToTop > 0 {
@@ -166,7 +168,7 @@ public final class InteractiveInput: @unchecked Sendable {
             // But to be consistent with VT100 cursor movement, we explicitly print chunks or just let it wrap.
             print("\r\(magenta)│ ❯ \(reset)\(input)", terminator: "")
             
-            let metrics = textMetrics(input, cursor: cursorPosition)
+            let metrics = textMetrics(input, cursor: cursorPosition, width: width)
             let textRows = metrics.textRows
             
             // If the text ended exactly at the right edge, the cursor might be "hanging" and 
