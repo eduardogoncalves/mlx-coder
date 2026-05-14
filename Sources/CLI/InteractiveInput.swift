@@ -92,11 +92,19 @@ public final class InteractiveInput: @unchecked Sendable {
                     return
                 }
 
-                col += 1
+                // macOS terminals use "pending-wrap": after the last column is filled the
+                // cursor stays on that column (with a wrap-pending flag) and only moves to
+                // the next row when the *following* character is printed.  Apply the deferred
+                // row increment here, at the start of processing the next character, so that
+                // textRows and cursorRow match what the terminal actually renders.
                 if col >= width {
-                    row += col / width
-                    col = col % width
+                    row += 1
+                    col = 0
                 }
+
+                col += 1
+                // When col == width the current character filled the last column.  The row
+                // increment is deferred until the next advance() call (pending-wrap state).
             }
 
             var totalRow = 0
