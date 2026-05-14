@@ -702,8 +702,10 @@ public actor AgentLoop {
         let allowReadOnlyBashInPlanMode = mode == .plan && isReadOnlyBashCall(call)
         
         let approval: (approved: Bool, suggestion: String?)
-        if call.name == "plan_file" {
+        if call.name == "plan_file" && mode == .plan {
             approval = (true, nil)
+        } else if call.name == "plan_file" {
+            approval = await askForToolApproval(name: call.name, arguments: call.arguments, isPlanMode: false)
         } else if isDestructive {
             await hooks.emit(.permissionRequest(toolName: call.name, isPlanMode: mode == .plan && !allowReadOnlyBashInPlanMode))
             if mode == .plan && !allowReadOnlyBashInPlanMode {
