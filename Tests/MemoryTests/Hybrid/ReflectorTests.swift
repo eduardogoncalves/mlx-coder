@@ -1,0 +1,96 @@
+// Tests/MemoryTests/Hybrid/ReflectorTests.swift
+// Self-improvement loop: trigger gating, candidate write-through, supersede.
+
+import XCTest
+@testable import MLXCoder
+
+final class ReflectorTests: XCTestCase {
+
+    private var tempDir: String!
+    private var store: HybridKnowledgeStore!
+
+    override func setUp() async throws {
+        try await super.setUp()
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        tempDir = url.path
+        let dbPath = (tempDir as NSString).appendingPathComponent("reflector.db")
+        store = HybridKnowledgeStore(dbPath: dbPath)
+        try await store.initialize()
+    }
+
+    override func tearDown() async throws {
+        await store.close()
+        try? FileManager.default.removeItem(atPath: tempDir)
+        try await super.tearDown()
+    }
+
+    func testCadenceGatesTurnCompleted() async {
+        let reflector = Reflector(store: store)
+        let outcomes = await reflector.reflect(ReflectionInput(
+            trigger: .turnCompleted(turnIndex: 1),
+            projectRoot: "/test/project",
+            recentAssistantText: ["We decided to always use xcodebuild for this project."]
+        ))
+        XCTAssertTrue(outcomes.isEmpty, "turnCompleted should not fire by itself")
+    }
+
+    func testCadenceFiresOnMultiple() async {
+        let reflector = Reflector(
+            store: store,
+            cadence: ReflectionCadence(nudgeInterval: 3, minContentChars: 10))
+        let outcomes = await reflector.reflect(ReflectionInput(
+            trigger: .cadence(everyNTurns: 3, currentCount: 6),
+            projectRoot: "/test/project",
+            recentAssistantText: ["We decided to always use xcodebuild for this project."]
+        ))
+        XCTAssertFalse(outcomes.isEmpty)
+    }
+
+    func testUserFeedbackAlwaysFiresAndPersists() async throws {
+        let reflector = Reflector(store: store)
+        let outcomes = await reflector.reflect(ReflectionInput(
+            trigger: .userFeedback(text: "Stop running tests with --release."),
+            projectRoot: "/test/project"
+        ))
+        XCTAssertFalse(outcomes.isEmpty)
+        let stats = try await store.stats()
+        XCTAssertGreaterThanOrEqual(stats.activeCount, 1)
+    }
+
+    func testFailureTriggerCreatesGotcha() async throws {
+        let reflector = Reflector(store: store)
+        let outcomes = await reflector.reflect(ReflectionInput(
+            trigger: .failure(reason: "swift test exited 1: missing libcblas"),
+            projectRoot: "/test/project"
+        ))
+        XCTAssertFalse(outcomes.isEmpty)
+        let scope = RetrievalScope(projectRoot: "/test/project")
+        let results = try await store.retrieve(query: "libcblas", scope: scope)
+        XCTAssertFalse(results.isEmpty)
+        XCTAssertEqual(results.first?.document.knowledgeKind, .gotcha)
+    }
+
+    func testExplicitCandidatesWriteThrough() async throws {
+        let reflector = Reflector(store: store)
+        let candidate = ReflectionCandidate(
+            memoryType: .semantic,
+            knowledgeKind: .pattern,
+            content: "Test files live next to source files as Foo.test.swift.",
+            tags: ["tests", "convention"],
+            confidence: 0.8,
+            importance: 0.7
+        )
+        let outcomes = await reflector.reflect(ReflectionInput(
+            trigger: .sessionEnd,
+            projectRoot: "/test/project",
+            explicitCandidates: [candidate]
+        ))
+        XCTAssertEqual(outcomes.count, 1)
+        if case .inserted = outcomes.first!.action {
+            // ok
+        } else {
+            XCTFail("expected inserted, got \(outcomes.first!.action)")
+        }
+    }
+}
