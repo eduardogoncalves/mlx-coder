@@ -247,19 +247,18 @@ public actor HybridKnowledgeStore {
         let docs = try fetchDocuments(ids: fusedIDs)
         let lexRankByID: [Int64: Int] = Dictionary(
             uniqueKeysWithValues: lexicalIDs.enumerated().map { ($1, $0) })
-        let semRankByID: [Int64: Int] = Dictionary(
-            uniqueKeysWithValues: semanticIDs.enumerated().map { ($1, $0) })
 
         var candidates: [ScoredDocument] = []
         candidates.reserveCapacity(docs.count)
         for doc in docs {
             let lexRank = lexRankByID[doc.id]
-            let semRank = semRankByID[doc.id]
             let lexScore: Double? = lexRank.map { 1.0 / Double($0 + 1) }
             let semScore: Double? = semanticScoreByID[doc.id]
+            // We compute the fused score from per-source *scores*, not ranks;
+            // the rank dictionaries above are only needed for lexScore (BM25
+            // rank is opaque, so we approximate with reciprocal-rank score).
             let fused: Double = (lexScore ?? 0) * config.weightLexical
                               + (semScore ?? 0) * config.weightSemantic
-            _ = semRank // included rank; semScore already encodes similarity
             candidates.append(ScoredDocument(
                 document: doc,
                 lexicalScore: lexScore,
