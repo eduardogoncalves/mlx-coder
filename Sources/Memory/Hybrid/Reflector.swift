@@ -197,8 +197,13 @@ public actor Reflector {
                 switch outcome {
                 case .inserted(_, let uuid):
                     outcomes.append(.init(candidate: candidate, action: .inserted(uuid: uuid)))
-                case .superseded(let oldID, _, let uuid):
-                    let oldUUID = (try? await fetchUUID(forID: oldID)) ?? uuid
+                case .superseded(_, _, let uuid):
+                    // The store API does not surface the old doc's UUID; only
+                    // its row id. Reporting a placeholder keeps the outcome
+                    // shape stable without forcing an extra round-trip just
+                    // for observability. If a caller needs the real prior
+                    // UUID, it can query `HybridKnowledgeStore` directly.
+                    let oldUUID = UUID()
                     outcomes.append(.init(candidate: candidate,
                                           action: .superseded(oldUUID: oldUUID, newUUID: uuid)))
                 case .duplicate(_, let uuid):
@@ -217,16 +222,6 @@ public actor Reflector {
         }
 
         return outcomes
-    }
-
-    private func fetchUUID(forID id: Int64) async throws -> UUID {
-        // Helper retained for symmetry with the supersede outcome shape; we
-        // intentionally do not expose a public lookup-by-id from the store
-        // (the supersede path returns the new UUID directly, and the old
-        // UUID is only used for observability). If we ever need the real
-        // value, route through `HybridKnowledgeStore.fetchDocuments(ids:)`.
-        _ = id
-        return UUID()
     }
 }
 
