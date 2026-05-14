@@ -1,0 +1,123 @@
+import Foundation
+
+/// Shared file mutation helpers used by the generic write/edit tools and the
+/// dedicated PLAN.MD tool so they apply the same validation, write, and diff behavior.
+enum FileMutationSupport {
+    static func writeContent(
+        _ content: String,
+        to path: String,
+        permissions: PermissionEngine
+    ) -> ToolResult {
+        let resolvedPath: String
+        do {
+            resolvedPath = try permissions.validatePath(path)
+        } catch {
+            return .error(error.localizedDescription)
+        }
+
+        do {
+            let parentDir = (resolvedPath as NSString).deletingLastPathComponent
+            try FileManager.default.createDirectory(
+                atPath: parentDir,
+                withIntermediateDirectories: true
+            )
+
+            let canonicalParent = URL(filePath: parentDir).standardized.resolvingSymlinksInPath().path()
+            let canonicalWorkspaceRoot = URL(filePath: permissions.workspaceRoot)
+                .standardized
+                .resolvingSymlinksInPath()
+                .path()
+            let parentInsideWorkspace = canonicalParent == canonicalWorkspaceRoot
+                || canonicalParent.hasPrefix(canonicalWorkspaceRoot + "/")
+            guard parentInsideWorkspace else {
+                return .error("Security violation: Parent directory path validation failed")
+            }
+
+            try content.write(toFile: resolvedPath, atomically: true, encoding: .utf8)
+
+            let lineCount = content.components(separatedBy: "\n").count
+            return .success("Wrote \(lineCount) lines to \(path)")
+        } catch {
+            return .error("Failed to write file: \(error.localizedDescription)")
+        }
+    }
+
+    static func editContent(
+        in path: String,
+        oldText: String,
+        newText: String,
+        permissions: PermissionEngine
+    ) -> ToolResult {
+        let resolvedPath: String
+        do {
+            resolvedPath = try permissions.validatePath(path)
+        } catch {
+            return .error(error.localizedDescription)
+        }
+
+        guard FileManager.default.fileExists(atPath: resolvedPath) else {
+            return .error("File not found: \(path)")
+        }
+
+        do {
+            let originalContent = try String(contentsOfFile: resolvedPath, encoding: .utf8)
+            let occurrences = originalContent.components(separatedBy: oldText).count - 1
+
+            guard occurrences > 0 else {
+                return .error("old_text not found in file. Make sure the text matches exactly, including whitespace.")
+            }
+
+            if occurrences > 1 {
+                return .error("old_text found \(occurrences) times in file. It must be unique. Add more surrounding context to old_text to make it unique.")
+            }
+
+            let newContent = originalContent.replacingOccurrences(of: oldText, with: newText)
+            try newContent.write(toFile: resolvedPath, atomically: true, encoding: .utf8)
+
+            let diff = generateUnifiedDiff(original: originalContent, updated: newContent, path: path)
+            return .success("Applied edit to \(path)\n\(diff)")
+        } catch {
+            return .error("Failed to edit file: \(error.localizedDescription)")
+        }
+    }
+
+    static func generateUnifiedDiff(original: String, updated: String, path: String) -> String {
+        let origLines = original.components(separatedBy: "\n")
+        let newLines = updated.components(separatedBy: "\n")
+
+        var lo = 0
+        while lo < origLines.count && lo < newLines.count && origLines[lo] == newLines[lo] {
+            lo += 1
+        }
+
+        var origHi = origLines.count
+        var newHi = newLines.count
+        while origHi > lo && newHi > lo && origLines[origHi - 1] == newLines[newHi - 1] {
+            origHi -= 1
+            newHi -= 1
+        }
+
+        guard lo < origHi || lo < newHi else { return "(no changes)" }
+
+        let ctx = 3
+        let hunkStart = max(0, lo - ctx)
+        let hunkOrigEnd = min(origLines.count, origHi + ctx)
+
+        let leadingCtx = lo - hunkStart
+        let deletedCount = origHi - lo
+        let addedCount = newHi - lo
+        let trailingCtx = hunkOrigEnd - origHi
+
+        let totalOrig = leadingCtx + deletedCount + trailingCtx
+        let totalNew = leadingCtx + addedCount + trailingCtx
+
+        var hunk = "@@ -\(hunkStart + 1),\(totalOrig) +\(hunkStart + 1),\(totalNew) @@\n"
+
+        for l in hunkStart..<lo { hunk += " \(origLines[l])\n" }
+        for l in lo..<origHi { hunk += "-\(origLines[l])\n" }
+        for l in lo..<newHi { hunk += "+\(newLines[l])\n" }
+        for l in origHi..<hunkOrigEnd { hunk += " \(origLines[l])\n" }
+
+        return "--- a/\(path)\n+++ b/\(path)\n\(hunk)"
+    }
+}

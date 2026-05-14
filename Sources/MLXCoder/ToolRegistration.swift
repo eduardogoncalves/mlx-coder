@@ -18,6 +18,7 @@ func registerAllTools(
 ) async {
     // Filesystem tools
     await registry.register(ReadFileTool(permissions: permissions))
+    await registry.register(PlanFileTool(permissions: permissions))
     await registry.register(WriteFileTool(permissions: permissions))
     await registry.register(AppendFileTool(permissions: permissions))
     await registry.register(EditFileTool(permissions: permissions))

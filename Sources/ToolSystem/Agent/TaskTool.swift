@@ -622,6 +622,8 @@ public struct TaskTool: Tool {
         switch normalizedToolName {
         case "read_file":
             await registry.register(ReadFileTool(permissions: permissions))
+        case "plan_file":
+            await registry.register(PlanFileTool(permissions: permissions))
         case "write_file":
             await registry.register(WriteFileTool(permissions: permissions))
         case "append_file":

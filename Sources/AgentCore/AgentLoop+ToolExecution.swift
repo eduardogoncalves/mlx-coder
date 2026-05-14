@@ -10,6 +10,7 @@ extension AgentLoop {
 
         // Filesystem tools
         await registry.register(ReadFileTool(permissions: permissions))
+        await registry.register(PlanFileTool(permissions: permissions))
         await registry.register(WriteFileTool(permissions: permissions))
         await registry.register(AppendFileTool(permissions: permissions))
         await registry.register(EditFileTool(permissions: permissions))
@@ -72,7 +73,7 @@ extension AgentLoop {
     }
 
     func isDestructiveToolCall(_ call: ToolCallParser.ParsedToolCall) -> Bool {
-        let alwaysDestructiveTools: Set<String> = ["write_file", "edit_file", "append_file", "patch", "bash", "task"]
+        let alwaysDestructiveTools: Set<String> = ["plan_file", "write_file", "edit_file", "append_file", "patch", "bash", "task"]
         if alwaysDestructiveTools.contains(call.name) {
             return true
         }
@@ -87,6 +88,10 @@ extension AgentLoop {
         }
 
         return false
+    }
+
+    func isFileModificationToolName(_ name: String) -> Bool {
+        ["plan_file", "write_file", "edit_file", "append_file", "patch"].contains(name)
     }
 
     func isReadOnlyBashCall(_ call: ToolCallParser.ParsedToolCall) -> Bool {
@@ -199,7 +204,7 @@ extension AgentLoop {
         let approval: (approved: Bool, suggestion: String?)
         if permissions.approvalMode == .yolo {
             approval = (true, nil)
-        } else if permissions.approvalMode == .autoEdit && !["write_file", "edit_file", "append_file"].contains(call.toolName) {
+        } else if permissions.approvalMode == .autoEdit && !["plan_file", "write_file", "edit_file", "append_file"].contains(call.toolName) {
             // autoEdit only auto-approves edit tools
             var approvalArguments = call.otherArgs
             approvalArguments["path"] = call.path

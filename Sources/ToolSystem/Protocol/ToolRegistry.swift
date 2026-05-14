@@ -160,6 +160,8 @@ public actor ToolRegistry {
         switch name {
         case "read_file", "list_dir", "glob", "grep", "code_search", "read_many":
             return task == "coding" ? 100 : 90
+        case "plan_file":
+            return isPlan ? 99 : 72
         case "edit_file", "write_file", "append_file", "patch":
             return isPlan ? 20 : (task == "coding" ? 95 : 70)
         case "bash":

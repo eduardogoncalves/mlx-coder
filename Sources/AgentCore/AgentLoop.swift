@@ -662,11 +662,11 @@ public actor AgentLoop {
         let blockedRepeatedReadOnlySignature = readOnlyLoopState.shouldBlock ? readOnlyLoopState.signature : nil
         
         // Track file modifications for build checking
-        let isFileModificationTool = (call.name == "write_file" || call.name == "edit_file" || call.name == "append_file" || call.name == "patch")
+        let isFileModificationTool = isFileModificationToolName(call.name)
         
         var result: ToolResult
 
-        let targetPath = extractPolicyTargetPath(from: call.arguments)
+        let targetPath = call.name == "plan_file" ? PlanFileTool.planFileName : extractPolicyTargetPath(from: call.arguments)
         let policyDecision = permissions.evaluateToolPolicy(toolName: call.name, targetPath: targetPath)
         if case .denied(let denyReason) = policyDecision {
             let deniedResult = ToolResult.error(denyReason)
@@ -695,7 +695,9 @@ public actor AgentLoop {
         let allowReadOnlyBashInPlanMode = mode == .plan && isReadOnlyBashCall(call)
         
         let approval: (approved: Bool, suggestion: String?)
-        if isDestructive {
+        if call.name == "plan_file" {
+            approval = (true, nil)
+        } else if isDestructive {
             await hooks.emit(.permissionRequest(toolName: call.name, isPlanMode: mode == .plan && !allowReadOnlyBashInPlanMode))
             if mode == .plan && !allowReadOnlyBashInPlanMode {
                 approval = await askForToolApproval(name: call.name, arguments: call.arguments, isPlanMode: true)

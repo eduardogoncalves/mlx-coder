@@ -29,42 +29,6 @@ public struct WriteFileTool: Tool {
         guard let content = arguments["content"] as? String else {
             return .error("Missing required argument: content")
         }
-
-        let resolvedPath: String
-        do {
-            resolvedPath = try permissions.validatePath(path)
-        } catch {
-            return .error(error.localizedDescription)
-        }
-
-        do {
-            // Create parent directories if needed
-            let parentDir = (resolvedPath as NSString).deletingLastPathComponent
-            try FileManager.default.createDirectory(
-                atPath: parentDir,
-                withIntermediateDirectories: true
-            )
-
-            // Security: Verify parent directory is still within workspace after creation
-            // This additional check protects against TOCTOU attacks where symlinks
-            // are created in the parent directory between validation and write operations.
-            let canonicalParent = URL(filePath: parentDir).standardized.resolvingSymlinksInPath().path()
-            let canonicalWorkspaceRoot = URL(filePath: permissions.workspaceRoot)
-                .standardized
-                .resolvingSymlinksInPath()
-                .path()
-            let parentInsideWorkspace = canonicalParent == canonicalWorkspaceRoot
-                || canonicalParent.hasPrefix(canonicalWorkspaceRoot + "/")
-            guard parentInsideWorkspace else {
-                return .error("Security violation: Parent directory path validation failed")
-            }
-
-            try content.write(toFile: resolvedPath, atomically: true, encoding: .utf8)
-
-            let lineCount = content.components(separatedBy: "\n").count
-            return .success("Wrote \(lineCount) lines to \(path)")
-        } catch {
-            return .error("Failed to write file: \(error.localizedDescription)")
-        }
+        return FileMutationSupport.writeContent(content, to: path, permissions: permissions)
     }
 }
