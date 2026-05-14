@@ -27,6 +27,7 @@ public struct StreamProcessResult: Sendable {
 /// Incremental state machine that detects tool calls in the token stream,
 /// parses JSON arguments, and streams content fields directly to .tmp files.
 public final class StreamingToolCallWriter: @unchecked Sendable {
+    public static let tmpFileStatusPrefix = "Writing to tmp file "
 
     // MARK: - States
 
@@ -187,7 +188,7 @@ public final class StreamingToolCallWriter: @unchecked Sendable {
                             let safeName = path.replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: ".", with: "_")
                             let tmpFile = tmpDir.appendingPathComponent(safeName + ".tmp")
                             FileManager.default.createFile(atPath: tmpFile.path, contents: nil)
-                            onStatusChange?("Writing to tmp file \(tmpFile.path)")
+                            onStatusChange?("\(Self.tmpFileStatusPrefix)\(tmpFile.path)")
                             if let fh = try? FileHandle(forWritingTo: tmpFile) {
                                 try? fh.truncate(atOffset: 0)
                                 state = .streamingContent(
