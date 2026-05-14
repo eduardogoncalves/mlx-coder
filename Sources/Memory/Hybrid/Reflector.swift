@@ -270,10 +270,17 @@ public struct HeuristicCandidateExtractor: CandidateExtractor {
         let actionMarkers = ["decided to", "we should", "always ", "never ",
                              "next step", "next, ", "gotcha", "watch out",
                              "remember to", "use ", "prefer "]
+        // Heuristic line-length window for actionable assistant statements:
+        //   - 24 chars: ~3-4 words; below this is rarely a useful memory.
+        //   - 400 chars: ~5 lines of prose; above this we get paragraphs that
+        //     are too noisy for a single memory entry — a future LLM-backed
+        //     extractor should chunk before storing.
+        let minLineLen = 24
+        let maxLineLen = 400
         for assistantTurn in input.recentAssistantText.suffix(2) {
             for rawLine in assistantTurn.components(separatedBy: .newlines) {
                 let line = rawLine.trimmingCharacters(in: .whitespaces)
-                guard line.count >= 24 && line.count <= 400 else { continue }
+                guard line.count >= minLineLen && line.count <= maxLineLen else { continue }
                 let lower = line.lowercased()
                 guard actionMarkers.contains(where: { lower.contains($0) }) else { continue }
 
