@@ -135,6 +135,14 @@ public actor HybridKnowledgeStore {
         }
     }
 
+    /// Look up a document's UUID by its row id. Returns `nil` if the id is
+    /// unknown. Provided so external callers (notably `Reflector`) can report
+    /// accurate provenance after a `superseded` outcome.
+    public func documentUUID(forID id: Int64) throws -> UUID? {
+        guard db != nil else { throw StoreError.databaseNotOpen }
+        return try? fetchUUID(id: id)
+    }
+
     // MARK: - Public API
 
     /// Persist a document, optionally superseding a near-duplicate.
@@ -313,7 +321,6 @@ public actor HybridKnowledgeStore {
             epochs: [nowEpoch, nowEpoch]
         )
 
-        _ = db
         return workingDeleted + episodicArchived
     }
 

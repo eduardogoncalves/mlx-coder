@@ -197,13 +197,12 @@ public actor Reflector {
                 switch outcome {
                 case .inserted(_, let uuid):
                     outcomes.append(.init(candidate: candidate, action: .inserted(uuid: uuid)))
-                case .superseded(_, _, let uuid):
-                    // The store API does not surface the old doc's UUID; only
-                    // its row id. Reporting a placeholder keeps the outcome
-                    // shape stable without forcing an extra round-trip just
-                    // for observability. If a caller needs the real prior
-                    // UUID, it can query `HybridKnowledgeStore` directly.
-                    let oldUUID = UUID()
+                case .superseded(let oldID, _, let uuid):
+                    // Best-effort lookup of the old doc's UUID for accurate
+                    // provenance. Falls back to a fresh UUID if the row was
+                    // already pruned mid-flight or the lookup failed.
+                    let lookedUp: UUID? = try? await store.documentUUID(forID: oldID)
+                    let oldUUID = lookedUp ?? UUID()
                     outcomes.append(.init(candidate: candidate,
                                           action: .superseded(oldUUID: oldUUID, newUUID: uuid)))
                 case .duplicate(_, let uuid):
