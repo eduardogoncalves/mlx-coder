@@ -295,6 +295,15 @@ public final class SwiftCoderTUIFrontend: AgentFrontend, @unchecked Sendable {
             // Internal status noise (e.g. tool-call writer debug progress)
             // should not be printed into the user-visible chat transcript.
             if s.severity == .debug { return }
+            // During streamed tool-call writes, surface the tmp-file path in the
+            // animated footer label (REPL parity) instead of only printing it.
+            if s.severity == .info,
+               s.text.hasPrefix(StreamingToolCallWriter.tmpFileStatusPrefix),
+               (tokenProcessingActive || generationActive || thinkingActive || pendingGenerationEnd) {
+                await renderer.setThinking(s.text)
+                await renderer.renderFooter()
+                return
+            }
             // Hide the generation indicator before printing final token stats.
             if s.severity == .info && s.text.hasPrefix("Generated ") {
                 if tokenProcessingActive || generationActive || thinkingActive || pendingGenerationEnd {
