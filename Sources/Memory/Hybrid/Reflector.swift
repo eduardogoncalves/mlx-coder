@@ -220,11 +220,11 @@ public actor Reflector {
     }
 
     private func fetchUUID(forID id: Int64) async throws -> UUID {
-        // Helper: re-read the UUID from the store. We don't expose a public
-        // lookup-by-id, so fall back to retrieving an empty-scoped query is
-        // not appropriate. Just return a fresh UUID placeholder if missing.
-        // (The supersede path always returns the new UUID; old UUID is for
-        // observability only.)
+        // Helper retained for symmetry with the supersede outcome shape; we
+        // intentionally do not expose a public lookup-by-id from the store
+        // (the supersede path returns the new UUID directly, and the old
+        // UUID is only used for observability). If we ever need the real
+        // value, route through `HybridKnowledgeStore.fetchDocuments(ids:)`.
         _ = id
         return UUID()
     }
