@@ -39,6 +39,10 @@ public actor HybridKnowledgeStore {
             weightLexical: Double = 0.45,
             weightSemantic: Double = 0.55,
             rrfK: Double = 60,
+            // 120 ms keeps the pipeline interactive (well under the agent
+            // turn budget) while leaving headroom for a heavier reranker if
+            // one is plugged in later. The default `LexicalReranker` runs
+            // far below this; the budget is a ceiling, not a target.
             rerankBudget: TimeInterval = 0.12,
             nearDuplicateCosineThreshold: Double = 0.85,
             nearDuplicateTokenJaccardThreshold: Double = 0.7
