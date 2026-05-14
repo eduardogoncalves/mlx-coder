@@ -247,6 +247,7 @@ public func runSwiftCoderTUISession(
                 await renderer.renderFooter()
             } else if let prev = inputHistory.previous() {
                 await renderer.setInputBuffer(prev)
+                await normalizeInputSoftWrap(renderer: renderer)
                 await renderer.renderFooter()
             }
 
@@ -256,6 +257,7 @@ public func runSwiftCoderTUISession(
                 await renderer.renderFooter()
             } else if let next = inputHistory.next() {
                 await renderer.setInputBuffer(next)
+                await normalizeInputSoftWrap(renderer: renderer)
                 await renderer.renderFooter()
             } else {
                 await renderer.setInputBuffer("")
@@ -318,6 +320,7 @@ public func runSwiftCoderTUISession(
 
         case .paste(let pasted):
             await renderer.insertText(pasted)
+            await normalizeInputSoftWrap(renderer: renderer)
             await renderer.renderFooter()
 
         case .ctrlV:
@@ -326,6 +329,7 @@ public func runSwiftCoderTUISession(
 
         case .altEnter, .shiftEnter:
             await renderer.insertText("\n")
+            await normalizeInputSoftWrap(renderer: renderer)
             await renderer.renderFooter()
 
         case .enter:
@@ -682,6 +686,7 @@ private func startVoiceInput(renderer: Renderer) async {
         let spoken = try await VoiceInput.transcribe()
         if !spoken.isEmpty {
             await renderer.insertText(spoken)
+            await normalizeInputSoftWrap(renderer: renderer)
         }
     } catch {
         await renderer.printScrollLine("\(DesignSystem.brightRed)✗ Voice input failed: \(error.localizedDescription)\(DesignSystem.reset)")
@@ -710,9 +715,94 @@ private func flushPendingTypedChunk(_ pending: inout String, renderer: Renderer,
         .replacingOccurrences(of: "\r", with: "\n")
     pending.removeAll(keepingCapacity: true)
     await renderer.insertText(normalized)
+    await normalizeInputSoftWrap(renderer: renderer)
     if render {
         await renderer.renderFooter()
     }
+}
+
+@MainActor
+private func normalizeInputSoftWrap(renderer: Renderer) async {
+    let original = await renderer.getInputBuffer()
+    let originalCursor = await renderer.getCursorPos()
+    let footerWidth = max(1, await renderer.currentCols() - 1)
+    let isAutopilot = await renderer.isAutopilotEnabled()
+
+    let wrapped = wrappedInputTextForSoftWrap(
+        original,
+        cursor: originalCursor,
+        footerWidth: footerWidth,
+        isAutopilot: isAutopilot
+    )
+
+    guard wrapped.text != original else { return }
+    await renderer.setInputBuffer(wrapped.text)
+
+    let moveLeftCount = max(0, wrapped.text.count - wrapped.cursor)
+    if moveLeftCount > 0 {
+        for _ in 0..<moveLeftCount {
+            await renderer.moveCursorLeft()
+        }
+    }
+}
+
+func wrappedInputTextForSoftWrap(
+    _ input: String,
+    cursor: Int,
+    footerWidth: Int,
+    isAutopilot: Bool
+) -> (text: String, cursor: Int) {
+    let firstPrefixWidth: Int
+    let rawPrefix: String
+
+    if input.hasPrefix("!!") {
+        rawPrefix = "!!"
+        firstPrefixWidth = 3
+    } else if input.hasPrefix("!") {
+        rawPrefix = "!"
+        firstPrefixWidth = 2
+    } else {
+        rawPrefix = ""
+        firstPrefixWidth = isAutopilot ? 4 : 2
+    }
+
+    let display = String(input.dropFirst(rawPrefix.count))
+    let displayCursor = max(0, min(display.count, cursor - rawPrefix.count))
+    let continuationPrefixWidth = 2
+
+    var out = ""
+    out.reserveCapacity(display.count + max(1, display.count / max(1, footerWidth - continuationPrefixWidth)))
+
+    var seen = 0
+    var cursorOut = 0
+    var col = 0
+    var lineWidth = max(1, footerWidth - firstPrefixWidth)
+
+    for ch in display {
+        if ch == "\n" {
+            out.append(ch)
+            if seen < displayCursor { cursorOut += 1 }
+            seen += 1
+            col = 0
+            lineWidth = max(1, footerWidth - continuationPrefixWidth)
+            continue
+        }
+
+        let w = max(1, VisibleWidth.measure(String(ch)))
+        if col + w > lineWidth {
+            out.append("\n")
+            if seen < displayCursor { cursorOut += 1 }
+            col = 0
+            lineWidth = max(1, footerWidth - continuationPrefixWidth)
+        }
+
+        out.append(ch)
+        if seen < displayCursor { cursorOut += 1 }
+        seen += 1
+        col += w
+    }
+
+    return (rawPrefix + out, rawPrefix.count + cursorOut)
 }
 
 private func modeIndex(
