@@ -104,10 +104,9 @@ final class EditFileToolTests: XCTestCase {
     // MARK: - generateUnifiedDiff unit tests
 
     func testDiffHelperSingleLineChange() {
-        let tool = EditFileTool(permissions: PermissionEngine(workspaceRoot: NSTemporaryDirectory()))
         let orig    = "a\nb\nc\n"
         let updated = "a\nB\nc\n"
-        let diff = tool.generateUnifiedDiff(original: orig, updated: updated, path: "x.txt")
+        let diff = FileMutationSupport.generateUnifiedDiff(original: orig, updated: updated, path: "x.txt")
 
         XCTAssertTrue(diff.contains("-b"))
         XCTAssertTrue(diff.contains("+B"))
@@ -115,17 +114,15 @@ final class EditFileToolTests: XCTestCase {
     }
 
     func testDiffHelperNoChanges() {
-        let tool = EditFileTool(permissions: PermissionEngine(workspaceRoot: NSTemporaryDirectory()))
         let content = "same\n"
-        let diff = tool.generateUnifiedDiff(original: content, updated: content, path: "x.txt")
+        let diff = FileMutationSupport.generateUnifiedDiff(original: content, updated: content, path: "x.txt")
         XCTAssertEqual(diff, "(no changes)")
     }
 
     func testDiffHelperContextLines() {
-        let tool = EditFileTool(permissions: PermissionEngine(workspaceRoot: NSTemporaryDirectory()))
         let orig    = "1\n2\n3\n4\nOLD\n6\n7\n8\n9\n"
         let updated = "1\n2\n3\n4\nNEW\n6\n7\n8\n9\n"
-        let diff = tool.generateUnifiedDiff(original: orig, updated: updated, path: "x.txt")
+        let diff = FileMutationSupport.generateUnifiedDiff(original: orig, updated: updated, path: "x.txt")
 
         // Should include 3 lines of context before and after the change
         XCTAssertTrue(diff.contains(" 2"), "context line 2")
