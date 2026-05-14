@@ -57,15 +57,19 @@ final class RerankerTests: XCTestCase {
     }
 
     func testRerankerHonoursTimeBudget() async {
-        // Zero budget → first candidate is scored (Date check after start),
-        // but subsequent candidates may be skipped. Result should still be
-        // non-empty and the same length as input.
+        // Zero budget → reranker scores at most one candidate (the budget
+        // check fires after the first iteration). All inputs must still be
+        // returned; later items keep nil rerankScore so the caller can fall
+        // back to fused ranking for them.
         let reranker = LexicalReranker()
         let candidates = (1...20).map { makeDoc(id: Int64($0), content: "doc number \($0)") }
         let reranked = await reranker.rerank(
             query: "doc", candidates: candidates, timeBudget: 0.0)
         XCTAssertEqual(reranked.count, candidates.count,
                        "reranker must not drop candidates on budget exhaustion")
+        let unscored = reranked.filter { $0.rerankScore == nil }
+        XCTAssertGreaterThanOrEqual(unscored.count, candidates.count - 1,
+            "with a 0s budget, at most one candidate should have been scored")
     }
 
     func testRerankerEmptyQueryShortCircuits() async {

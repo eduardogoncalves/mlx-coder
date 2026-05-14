@@ -290,26 +290,53 @@ public actor HybridKnowledgeStore {
         let nowEpoch = Int64(now.timeIntervalSince1970)
 
         // Hard-delete working memory whose TTL has lapsed.
-        try exec("""
-            DELETE FROM memory_documents
-            WHERE memory_type = 'working'
-              AND expires_at IS NOT NULL
-              AND expires_at < \(nowEpoch);
-        """)
-        let workingDeleted = Int(sqlite3_changes(db))
+        let workingDeleted = try execWithBoundEpoch(
+            sql: """
+                DELETE FROM memory_documents
+                WHERE memory_type = 'working'
+                  AND expires_at IS NOT NULL
+                  AND expires_at < ?;
+            """,
+            epoch: nowEpoch
+        )
 
         // Archive episodic memory whose TTL has lapsed (preserve history).
-        try exec("""
-            UPDATE memory_documents
-            SET status = 'archived', updated_at = \(nowEpoch)
-            WHERE memory_type = 'episodic'
-              AND status = 'active'
-              AND expires_at IS NOT NULL
-              AND expires_at < \(nowEpoch);
-        """)
-        let episodicArchived = Int(sqlite3_changes(db))
+        let episodicArchived = try execWithBoundEpoch(
+            sql: """
+                UPDATE memory_documents
+                SET status = 'archived', updated_at = ?
+                WHERE memory_type = 'episodic'
+                  AND status = 'active'
+                  AND expires_at IS NOT NULL
+                  AND expires_at < ?;
+            """,
+            epochs: [nowEpoch, nowEpoch]
+        )
 
+        _ = db
         return workingDeleted + episodicArchived
+    }
+
+    /// Single-binding convenience for `prune`'s parameterized statements.
+    private func execWithBoundEpoch(sql: String, epoch: Int64) throws -> Int {
+        try execWithBoundEpoch(sql: sql, epochs: [epoch])
+    }
+
+    /// Multi-binding variant for `prune`'s parameterized statements.
+    private func execWithBoundEpoch(sql: String, epochs: [Int64]) throws -> Int {
+        guard let db else { throw StoreError.databaseNotOpen }
+        var stmt: OpaquePointer?
+        defer { sqlite3_finalize(stmt) }
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+            throw StoreError.sqliteError("prune prepare", sqlite3_errcode(db))
+        }
+        for (i, epoch) in epochs.enumerated() {
+            sqlite3_bind_int64(stmt, Int32(i + 1), epoch)
+        }
+        guard sqlite3_step(stmt) == SQLITE_DONE else {
+            throw StoreError.sqliteError("prune step", sqlite3_errcode(db))
+        }
+        return Int(sqlite3_changes(db))
     }
 
     /// Run a consolidation pass: find near-duplicates within scope and
@@ -927,14 +954,14 @@ public actor HybridKnowledgeStore {
     }
 
     private func linkSupersede(winnerID: Int64, loserID: Int64) throws {
-        // Mark loser superseded; do not rewrite the winner's history pointer
-        // (the winner already exists independently).
+        // Mark loser superseded; point the winner at it for lineage tracking.
+        // We deliberately overwrite an existing supersedes_id on the winner —
+        // in a multi-merge round the winner ends up linked to its most-recent
+        // predecessor; older predecessors are still recoverable via their own
+        // supersedes_id chain (each row carries its own pointer).
         try setStatus(id: loserID, status: .superseded)
         guard let db else { throw StoreError.databaseNotOpen }
-        let sql = """
-            UPDATE memory_documents SET supersedes_id = ?
-            WHERE id = ? AND supersedes_id IS NULL;
-        """
+        let sql = "UPDATE memory_documents SET supersedes_id = ? WHERE id = ?;"
         var stmt: OpaquePointer?
         defer { sqlite3_finalize(stmt) }
         guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
