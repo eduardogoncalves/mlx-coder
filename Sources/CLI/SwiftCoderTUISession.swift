@@ -65,7 +65,7 @@ public func runSwiftCoderTUISession(
 
     let caffeinateManager = CaffeinateManager()
 
-    let dynamicCommandNames: Set<String> = ["/model", "/effort", "/caffeinate"]
+    let dynamicCommandNames: Set<String> = ["/model", "/effort", "/caffeinate", "/memory"]
     let staticItems = frontend.appConfig.commands
         .filter { !dynamicCommandNames.contains($0.name) }
         .map {
@@ -76,6 +76,7 @@ public func runSwiftCoderTUISession(
             TUIModelSlashCommand(models: frontend.appConfig.models),
             TUIEffortSlashCommand(),
             CaffeinateSlashCommand(),
+            TUIMemorySlashCommand(),
         ],
         staticCommands: staticItems
     )
@@ -769,7 +770,14 @@ private func normalizeInputSoftWrap(renderer: Renderer) async {
 
     guard wrapped.text != original else { return }
     await renderer.setInputBuffer(wrapped.text)
-    await renderer.setCursorPos(wrapped.cursor)
+    // Renderer no longer exposes direct cursor setters; reposition from end.
+    await renderer.moveCursorToEnd()
+    let movesLeft = max(0, wrapped.text.count - wrapped.cursor)
+    if movesLeft > 0 {
+        for _ in 0..<movesLeft {
+            await renderer.moveCursorLeft()
+        }
+    }
 }
 
 func wrappedInputTextForSoftWrap(
