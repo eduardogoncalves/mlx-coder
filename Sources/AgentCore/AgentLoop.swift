@@ -45,6 +45,7 @@ public actor AgentLoop {
     var modelPath: String
     let memoryLimit: Int?
     let cacheLimit: Int?
+    let loadVisionWeights: Bool
     let dryRun: Bool
     let useShadowContextForToolResults: Bool
     let hooks: HookPipeline
@@ -124,7 +125,8 @@ public actor AgentLoop {
         promptSectionTokenEstimates: [PromptSection: Int] = [:],
         maxToolIterations: Int = 20,
         memoryLimit: Int? = nil,
-        cacheLimit: Int? = nil
+        cacheLimit: Int? = nil,
+        loadVisionWeights: Bool = false
     ) {
         self.modelContainer = modelContainer
         self.registry = registry
@@ -149,6 +151,7 @@ public actor AgentLoop {
         self.promptSectionTokenEstimates = promptSectionTokenEstimates
         self.memoryLimit = memoryLimit
         self.cacheLimit = cacheLimit
+        self.loadVisionWeights = loadVisionWeights
         
         // Initialize interactive input for branch name prompting
         self.interactiveInput = InteractiveInput()

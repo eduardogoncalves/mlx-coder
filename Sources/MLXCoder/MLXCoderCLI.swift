@@ -123,6 +123,9 @@ struct ModelArguments: ParsableArguments, Sendable {
     @Flag(name: .long, help: "Show verbose output including thinking blocks")
     var verbose: Bool = false
 
+    @Flag(name: .long, help: "Load vision encoder weights (skipped by default to save VRAM)")
+    var vision: Bool = false
+
     @Option(name: .long, help: "Initial working mode (agent or plan)")
     var mode: String = "plan"
 

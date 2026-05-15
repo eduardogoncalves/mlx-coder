@@ -6,6 +6,7 @@ import Hub
 import MLX
 import MLXLLM
 import MLXLMCommon
+import MLXNN
 import MLXVLM
 import Tokenizers
 
@@ -29,12 +30,19 @@ public final class ModelLoader: Sendable {
     ///   - path: Absolute path to the model directory (e.g. ~/models/Qwen/Qwen3.5-9B-4bit)
     ///   - memoryLimit: Maximum memory in bytes (nil = no limit)
     ///   - cacheLimit: Maximum cache size in bytes (nil = no limit)
-    /// - Returns: A loaded `ModelContainer` ready for generation
+    ///   - loadVisionWeights: When `false` (the default for the CLI), any
+    ///     vision-encoder weights on the resulting model are dropped and the
+    ///     freed VRAM is returned to the allocator. A no-op on pure LLM
+    ///     checkpoints. Pass `true` to retain the full VLM checkpoint.
+    /// - Returns: A loaded `ModelContainer` ready for generation, plus a
+    ///   flag indicating whether vision weights were actually present and
+    ///   skipped (so the caller can print a one-line user notice).
     public static func load(
         from path: String,
         memoryLimit: Int? = nil,
-        cacheLimit: Int? = nil
-    ) async throws -> ModelContainer {
+        cacheLimit: Int? = nil,
+        loadVisionWeights: Bool = true
+    ) async throws -> (container: ModelContainer, visionSkipped: Bool) {
         let expandedPath = NSString(string: path).expandingTildeInPath
         var modelURL = URL(filePath: expandedPath)
         let modelsBaseURL = URL(filePath: NSString(string: "~").expandingTildeInPath)
@@ -156,7 +164,14 @@ public final class ModelLoader: Sendable {
             pruneHuggingFaceCache(forModelID: path)
         }
 
-        return container
+        var visionSkipped = false
+        if !loadVisionWeights {
+            visionSkipped = await container.perform { context in
+                VisionWeightFilter.dropVisionWeights(in: context.model)
+            }
+        }
+
+        return (container, visionSkipped)
     }
 
     // MARK: - Git-accelerated Download Helpers

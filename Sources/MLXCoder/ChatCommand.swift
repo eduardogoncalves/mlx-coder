@@ -55,13 +55,17 @@ struct ChatCommand: AsyncParsableCommand {
         // Load model
         renderer.printStatus("Loading model from \(selectedModel)...")
         let modelContainer: ModelContainer
+        let visionSkipped: Bool
         do {
-            modelContainer = try await loadModelWithCancellation(
+            let result = try await loadModelWithCancellation(
                 from: selectedModel,
                 memoryLimit: budget.totalBytes,
                 cacheLimit: budget.cacheBytes,
+                loadVisionWeights: args.vision,
                 renderer: renderer
             )
+            modelContainer = result.container
+            visionSkipped = result.visionSkipped
         } catch is CancellationError {
             return
         } catch {
@@ -69,6 +73,9 @@ struct ChatCommand: AsyncParsableCommand {
             return
         }
         renderer.printStatus("Model loaded successfully")
+        if visionSkipped {
+            renderer.printStatus("[model] Vision weights skipped (use --vision to enable)")
+        }
 
         // Start update check in background so it runs in parallel with the rest of setup.
         // We'll collect the result right before the REPL header so the notice always
@@ -179,7 +186,8 @@ struct ChatCommand: AsyncParsableCommand {
             skillsMetadata: skillMetadata,
             promptSectionTokenEstimates: promptComposition.sectionTokenEstimates,
             memoryLimit: budget.totalBytes,
-            cacheLimit: budget.cacheBytes
+            cacheLimit: budget.cacheBytes,
+            loadVisionWeights: args.vision
         )
 
         // Wire up raw-terminal approval UI for the legacy (non-TUI) path.
@@ -188,8 +196,9 @@ struct ChatCommand: AsyncParsableCommand {
             await agentLoop.rawTerminalApprovalInteraction(request: request)
         }
 
-        // Clear the 5 startup status lines to make the UI cleaner
-        renderer.clearPreviousLines(count: 5)
+        // Clear the 5 startup status lines (plus the optional vision-skipped
+        // notice) to make the UI cleaner.
+        renderer.clearPreviousLines(count: visionSkipped ? 6 : 5)
 
         // Collect update check result (already running in background since model load).
         // Race against a 2-second deadline so startup is never blocked.

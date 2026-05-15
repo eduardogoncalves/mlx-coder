@@ -83,18 +83,25 @@ struct RunCommand: AsyncParsableCommand {
         // Load model
         renderer.printStatus("Loading model...")
         let modelContainer: ModelContainer
+        let visionSkipped: Bool
         do {
-            modelContainer = try await loadModelWithCancellation(
+            let result = try await loadModelWithCancellation(
                 from: selectedModel,
                 memoryLimit: budget.totalBytes,
                 cacheLimit: budget.cacheBytes,
+                loadVisionWeights: args.vision,
                 renderer: renderer
             )
+            modelContainer = result.container
+            visionSkipped = result.visionSkipped
         } catch is CancellationError {
             return
         } catch {
             renderer.printError("Failed to load model: \(error.localizedDescription)")
             return
+        }
+        if visionSkipped {
+            renderer.printStatus("[model] Vision weights skipped (use --vision to enable)")
         }
 
         // Run single prompt setup
@@ -186,7 +193,8 @@ struct RunCommand: AsyncParsableCommand {
             skillsMetadata: skillMetadata,
             promptSectionTokenEstimates: promptComposition.sectionTokenEstimates,
             memoryLimit: budget.totalBytes,
-            cacheLimit: budget.cacheBytes
+            cacheLimit: budget.cacheBytes,
+            loadVisionWeights: args.vision
         )
 
         let parsedPrompt = ImageAttachmentParser.parse(prompt: effectivePrompt)

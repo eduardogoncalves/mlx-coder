@@ -20,13 +20,14 @@ extension AgentLoop {
         MLX.Memory.clearCache()
         
         // Load fresh container
-        let newContainer = try await ModelLoader.load(
+        let result = try await ModelLoader.load(
             from: modelPath,
             memoryLimit: memoryLimit,
-            cacheLimit: cacheLimit
+            cacheLimit: cacheLimit,
+            loadVisionWeights: loadVisionWeights
         )
-        
-        self.modelContainer = newContainer
+
+        self.modelContainer = result.container
         
         // Update loaded tracking parameters
         self.loadedModelPath = modelPath
