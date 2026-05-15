@@ -128,4 +128,41 @@ final class ReflectorTests: XCTestCase {
         XCTAssertNotNil(oldUUID)
         XCTAssertNotEqual(oldUUID, newUUID)
     }
+
+    func testSupersededOutcomeKeepsSuccessWhenOldUUIDUnavailable() async throws {
+        let seed = DocumentInput(
+            memoryType: .semantic,
+            knowledgeKind: .fact,
+            content: "Always run swift build before swift test.",
+            source: .assistant,
+            projectRoot: "/test/project",
+            confidence: 0.5,
+            importance: 0.5
+        )
+        _ = try await store.write(seed)
+
+        let reflector = Reflector(
+            store: store,
+            resolveDocumentUUID: { _ in nil }
+        )
+        let candidate = ReflectionCandidate(
+            memoryType: .semantic,
+            knowledgeKind: .fact,
+            content: "Always run swift build before swift test.",
+            confidence: 0.9,
+            importance: 0.7
+        )
+        let outcomes = await reflector.reflect(ReflectionInput(
+            trigger: .sessionEnd,
+            projectRoot: "/test/project",
+            explicitCandidates: [candidate]
+        ))
+
+        XCTAssertEqual(outcomes.count, 1)
+        guard case .superseded(let oldID, let oldUUID, _) = outcomes[0].action else {
+            return XCTFail("expected superseded, got \(outcomes[0].action)")
+        }
+        XCTAssertGreaterThan(oldID, 0)
+        XCTAssertNil(oldUUID)
+    }
 }

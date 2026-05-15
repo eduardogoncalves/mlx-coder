@@ -145,15 +145,20 @@ public actor Reflector {
     private let store: HybridKnowledgeStore
     private let extractor: CandidateExtractor
     private let cadence: ReflectionCadence
+    private let resolveDocumentUUID: @Sendable (Int64) async throws -> UUID?
 
     public init(
         store: HybridKnowledgeStore,
         extractor: CandidateExtractor = HeuristicCandidateExtractor(),
-        cadence: ReflectionCadence = ReflectionCadence()
+        cadence: ReflectionCadence = ReflectionCadence(),
+        resolveDocumentUUID: (@Sendable (Int64) async throws -> UUID?)? = nil
     ) {
         self.store = store
         self.extractor = extractor
         self.cadence = cadence
+        self.resolveDocumentUUID = resolveDocumentUUID ?? { id in
+            try await store.documentUUID(forID: id)
+        }
     }
 
     /// Run a reflection pass. Safe to call from a background task.
@@ -201,7 +206,7 @@ public actor Reflector {
                     // Preserve successful supersede outcomes even when the old
                     // UUID cannot be resolved (for example, if row visibility
                     // changes mid-flight). Keep provenance via oldID.
-                    let oldUUID = try await store.documentUUID(forID: oldID)
+                    let oldUUID = try await resolveDocumentUUID(oldID)
                     outcomes.append(.init(candidate: candidate,
                                           action: .superseded(oldID: oldID, oldUUID: oldUUID, newUUID: uuid)))
                 case .duplicate(_, let uuid):
