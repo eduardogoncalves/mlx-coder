@@ -73,15 +73,16 @@ public struct TodoTool: Tool {
             .map(normalizeTodoFormat)
     }
 
-    private func saveTodos(_ todos: [String]) {
+    private func saveTodos(_ todos: [String]) -> Bool {
         let content = todos.map(normalizeTodoFormat).joined(separator: "\n")
         do {
             try content.write(toFile: todoFilePath, atomically: true, encoding: .utf8)
             if FileManager.default.fileExists(atPath: legacyTodoFilePath) {
                 try? FileManager.default.removeItem(atPath: legacyTodoFilePath)
             }
+            return true
         } catch {
-            // Preserve existing best-effort behavior: ignore write failures.
+            return false
         }
     }
 
@@ -97,8 +98,8 @@ public struct TodoTool: Tool {
     private func addTodo(_ item: String) -> ToolResult {
         var todos = loadTodos()
         todos.append("[ ] \(item)")
-        saveTodos(todos)
-        return .success("Added: \(item)")
+        let persisted = saveTodos(todos)
+        return .success(successMessage("Added: \(item)", persisted: persisted))
     }
 
     private func completeTodo(at index: Int) -> ToolResult {
@@ -108,8 +109,8 @@ public struct TodoTool: Tool {
             return .error("Invalid todo number: \(index) (valid range is 1–\(todos.count))")
         }
         todos[i] = markTodoCompleted(todos[i])
-        saveTodos(todos)
-        return .success("Completed: \(todos[i])")
+        let persisted = saveTodos(todos)
+        return .success(successMessage("Completed: \(todos[i])", persisted: persisted))
     }
 
     private func uncompleteTodo(at index: Int) -> ToolResult {
@@ -119,8 +120,8 @@ public struct TodoTool: Tool {
             return .error("Invalid todo number: \(index) (valid range is 1–\(todos.count))")
         }
         todos[i] = markTodoUncompleted(todos[i])
-        saveTodos(todos)
-        return .success("Uncompleted: \(todos[i])")
+        let persisted = saveTodos(todos)
+        return .success(successMessage("Uncompleted: \(todos[i])", persisted: persisted))
     }
 
     private func removeTodo(at index: Int) -> ToolResult {
@@ -130,8 +131,13 @@ public struct TodoTool: Tool {
             return .error("Invalid todo number: \(index) (valid range is 1–\(todos.count))")
         }
         let removed = todos.remove(at: i)
-        saveTodos(todos)
-        return .success("Removed: \(removed)")
+        let persisted = saveTodos(todos)
+        return .success(successMessage("Removed: \(removed)", persisted: persisted))
+    }
+
+    private func successMessage(_ message: String, persisted: Bool) -> String {
+        guard !persisted else { return message }
+        return "\(message) (warning: failed to persist todo file changes)"
     }
 
     private func integerTodoIndex(from rawValue: Any?) -> Int? {

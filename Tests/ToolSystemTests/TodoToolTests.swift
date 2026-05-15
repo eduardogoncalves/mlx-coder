@@ -216,6 +216,48 @@ final class TodoToolTests: XCTestCase {
         XCTAssertEqual(try String(contentsOf: todoFile, encoding: .utf8), "[x] first")
     }
 
+    func testCompleteWarnsWhenPersistFails() async throws {
+        let workspace = try makeWorkspace()
+        defer { try? FileManager.default.removeItem(at: workspace) }
+
+        try "[ ] first".write(
+            to: workspace.appendingPathComponent(".native-agent-todo.md"),
+            atomically: true,
+            encoding: .utf8
+        )
+        try FileManager.default.createDirectory(
+            at: workspace.appendingPathComponent(".mlx-coder-todo"),
+            withIntermediateDirectories: false
+        )
+
+        let tool = TodoTool(workspaceRoot: workspace.path)
+        let result = try await tool.execute(arguments: ["action": "complete", "item": 1])
+
+        XCTAssertFalse(result.isError)
+        XCTAssertTrue(result.content.contains("warning: failed to persist todo file changes"))
+    }
+
+    func testRemoveWarnsWhenPersistFails() async throws {
+        let workspace = try makeWorkspace()
+        defer { try? FileManager.default.removeItem(at: workspace) }
+
+        try "[ ] first".write(
+            to: workspace.appendingPathComponent(".native-agent-todo.md"),
+            atomically: true,
+            encoding: .utf8
+        )
+        try FileManager.default.createDirectory(
+            at: workspace.appendingPathComponent(".mlx-coder-todo"),
+            withIntermediateDirectories: false
+        )
+
+        let tool = TodoTool(workspaceRoot: workspace.path)
+        let result = try await tool.execute(arguments: ["action": "remove", "item": 1])
+
+        XCTAssertFalse(result.isError)
+        XCTAssertTrue(result.content.contains("warning: failed to persist todo file changes"))
+    }
+
     private func makeWorkspace() throws -> URL {
         let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
             .appendingPathComponent(".build", isDirectory: true)
