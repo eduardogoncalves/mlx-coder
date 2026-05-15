@@ -412,9 +412,9 @@ public actor HybridKnowledgeStore {
                 // revisited as an outer-loop candidate in a later iteration,
                 // so one call may leave some merges for a subsequent call to
                 // `consolidate` if the caller needs a fixed point.
-                // Once one merge is established for anchor `a`, move on to the
-                // next outer candidate to keep per-pass work bounded.
-                continue outer
+                // If `a` lost, stop comparing it further: its vector is now
+                // defunct and any further pair (a, k) would be invalid.
+                if !aWins { continue outer }
             }
         }
         return merged
