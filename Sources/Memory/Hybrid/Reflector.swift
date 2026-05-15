@@ -101,7 +101,7 @@ public protocol CandidateExtractor: Sendable {
 public struct ReflectionOutcome: Sendable, Equatable {
     public enum Action: Sendable, Equatable {
         case inserted(uuid: UUID)
-        case superseded(oldUUID: UUID, newUUID: UUID)
+        case superseded(oldID: Int64, oldUUID: UUID?, newUUID: UUID)
         case duplicate(uuid: UUID)
         case skipped(reason: String)
     }
@@ -198,21 +198,12 @@ public actor Reflector {
                 case .inserted(_, let uuid):
                     outcomes.append(.init(candidate: candidate, action: .inserted(uuid: uuid)))
                 case .superseded(let oldID, _, let uuid):
-                    // Preserve accurate provenance when possible. If the old
-                    // document's UUID can no longer be resolved (for example,
-                    // the row was pruned mid-flight), do not fabricate a UUID.
-                    // Instead, downgrade this candidate to a skipped outcome.
-                    if let oldUUID = try await store.documentUUID(forID: oldID) {
-                        outcomes.append(.init(candidate: candidate,
-                                              action: .superseded(oldUUID: oldUUID, newUUID: uuid)))
-                    } else {
-                        outcomes.append(.init(
-                            candidate: candidate,
-                            action: .skipped(
-                                reason: "Superseded document UUID could not be resolved for id \(oldID)"
-                            )
-                        ))
-                    }
+                    // Preserve successful supersede outcomes even when the old
+                    // UUID cannot be resolved (for example, if row visibility
+                    // changes mid-flight). Keep provenance via oldID.
+                    let oldUUID = try await store.documentUUID(forID: oldID)
+                    outcomes.append(.init(candidate: candidate,
+                                          action: .superseded(oldID: oldID, oldUUID: oldUUID, newUUID: uuid)))
                 case .duplicate(_, let uuid):
                     outcomes.append(.init(candidate: candidate, action: .duplicate(uuid: uuid)))
                 }
