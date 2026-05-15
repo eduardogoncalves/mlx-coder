@@ -75,7 +75,14 @@ public struct TodoTool: Tool {
 
     private func saveTodos(_ todos: [String]) {
         let content = todos.map(normalizeTodoFormat).joined(separator: "\n")
-        try? content.write(toFile: todoFilePath, atomically: true, encoding: .utf8)
+        do {
+            try content.write(toFile: todoFilePath, atomically: true, encoding: .utf8)
+            if FileManager.default.fileExists(atPath: legacyTodoFilePath) {
+                try? FileManager.default.removeItem(atPath: legacyTodoFilePath)
+            }
+        } catch {
+            // Preserve existing best-effort behavior: ignore write failures.
+        }
     }
 
     private func readTodos() -> ToolResult {
