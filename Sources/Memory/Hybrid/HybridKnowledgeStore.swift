@@ -403,6 +403,12 @@ public actor HybridKnowledgeStore {
                 merged += 1
                 // If `a` lost, stop comparing it further: its vector is now
                 // defunct and any further pair (a, k) would be invalid.
+                // This consolidation pass is intentionally single-pass: we do
+                // not continue from the winning `b` to compare `(b, k)` for
+                // later `k` here. Those comparisons are deferred until `b` is
+                // revisited as an outer-loop candidate in a later iteration,
+                // so one call may leave some merges for a subsequent call to
+                // `consolidate` if the caller needs a fixed point.
                 if !aWins { continue outer }
             }
         }
