@@ -146,6 +146,7 @@ public struct TodoTool: Tool {
     }
 
     private func normalizeTodoFormat(_ todo: String) -> String {
+        let todo = stripOrderedListPrefix(todo)
         if todo.hasPrefix("[ ]") {
             return normalizeCheckboxSpacing(todo, prefix: "[ ]")
         }
@@ -159,6 +160,26 @@ public struct TodoTool: Tool {
         }
 
         return normalizeLegacyUncheckedCheckbox(todo)
+    }
+
+    private func stripOrderedListPrefix(_ todo: String) -> String {
+        let trimmed = todo.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else { return todo }
+        var idx = trimmed.startIndex
+        while idx < trimmed.endIndex, trimmed[idx].isNumber {
+            idx = trimmed.index(after: idx)
+        }
+        guard idx > trimmed.startIndex,
+              idx < trimmed.endIndex,
+              trimmed[idx] == "." else {
+            return todo
+        }
+        idx = trimmed.index(after: idx)
+        while idx < trimmed.endIndex, trimmed[idx].isWhitespace {
+            idx = trimmed.index(after: idx)
+        }
+        guard idx < trimmed.endIndex else { return todo }
+        return String(trimmed[idx...])
     }
 
     private func markTodoCompleted(_ todo: String) -> String {

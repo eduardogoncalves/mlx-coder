@@ -369,10 +369,12 @@ public actor HybridKnowledgeStore {
         guard db != nil else { throw StoreError.databaseNotOpen }
         let docs = try fetchActiveDocuments(scope: scope, limit: 500)
         var embeddings: [Int64: [Float]] = [:]
+        var tokenSets: [Int64: Set<String>] = [:]
         for doc in docs {
             if let vec = try fetchEmbedding(docID: doc.id) {
                 embeddings[doc.id] = vec
             }
+            tokenSets[doc.id] = LexicalReranker.tokens(in: doc.content)
         }
 
         var merged = 0
@@ -382,15 +384,15 @@ public actor HybridKnowledgeStore {
             let a = docs[i]
             if supersededIDs.contains(a.id) { continue }
             guard let va = embeddings[a.id] else { continue }
+            guard let aTokens = tokenSets[a.id] else { continue }
             for j in (i + 1)..<docs.count {
                 let b = docs[j]
                 if supersededIDs.contains(b.id) { continue }
                 guard let vb = embeddings[b.id] else { continue }
+                guard let bTokens = tokenSets[b.id] else { continue }
                 let cos = HashEmbeddingProvider.cosine(va, vb)
                 guard cos >= config.nearDuplicateCosineThreshold else { continue }
 
-                let aTokens = LexicalReranker.tokens(in: a.content)
-                let bTokens = LexicalReranker.tokens(in: b.content)
                 let jacc = LexicalReranker.jaccard(aTokens, bTokens)
                 guard jacc >= config.nearDuplicateTokenJaccardThreshold else { continue }
 
@@ -410,7 +412,9 @@ public actor HybridKnowledgeStore {
                 // revisited as an outer-loop candidate in a later iteration,
                 // so one call may leave some merges for a subsequent call to
                 // `consolidate` if the caller needs a fixed point.
-                if !aWins { continue outer }
+                // Once one merge is established for anchor `a`, move on to the
+                // next outer candidate to keep per-pass work bounded.
+                continue outer
             }
         }
         return merged
@@ -753,7 +757,11 @@ public actor HybridKnowledgeStore {
     /// quotes — neutralises operator characters (`-`, `:`, `*`, `(`, `)`)
     /// that would otherwise be interpreted as syntax and can cause
     /// `SQLITE_ERROR: malformed MATCH expression`. Tokens are joined with
-    /// spaces so FTS5 retains its default implicit AND semantics.
+    /// spaces so FTS5 retains its default implicit AND semantics. Note that
+    /// punctuation like `=` remains tokenizer-dependent: unicode61/porter
+    /// typically splits `TOOLCHAINS=swift` into adjacent `toolchains` + `swift`
+    /// tokens, so matching is token-based (adjacency/phrase), not literal
+    /// substring preservation of punctuation characters.
     static func escapeFTS(_ query: String) -> String {
         let parts = query
             .components(separatedBy: .whitespacesAndNewlines)

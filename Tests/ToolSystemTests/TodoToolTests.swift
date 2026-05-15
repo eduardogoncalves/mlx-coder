@@ -185,6 +185,37 @@ final class TodoToolTests: XCTestCase {
         XCTAssertEqual(result.content, "1. [ ] first")
     }
 
+    func testReadNormalizesOrderedMarkdownTodoFormat() async throws {
+        let workspace = try makeWorkspace()
+        defer { try? FileManager.default.removeItem(at: workspace) }
+
+        try "1. [ ] first".write(
+            to: workspace.appendingPathComponent(".mlx-coder-todo"),
+            atomically: true,
+            encoding: .utf8
+        )
+
+        let tool = TodoTool(workspaceRoot: workspace.path)
+        let result = try await tool.execute(arguments: ["action": "read"])
+
+        XCTAssertFalse(result.isError)
+        XCTAssertEqual(result.content, "1. [ ] first")
+    }
+
+    func testCompleteHandlesOrderedMarkdownTodoFormat() async throws {
+        let workspace = try makeWorkspace()
+        defer { try? FileManager.default.removeItem(at: workspace) }
+
+        let todoFile = workspace.appendingPathComponent(".mlx-coder-todo")
+        try "1. [ ] first".write(to: todoFile, atomically: true, encoding: .utf8)
+
+        let tool = TodoTool(workspaceRoot: workspace.path)
+        let result = try await tool.execute(arguments: ["action": "complete", "item": 1])
+
+        XCTAssertFalse(result.isError)
+        XCTAssertEqual(try String(contentsOf: todoFile, encoding: .utf8), "[x] first")
+    }
+
     private func makeWorkspace() throws -> URL {
         let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
             .appendingPathComponent(".build", isDirectory: true)
