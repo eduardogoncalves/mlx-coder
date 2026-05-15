@@ -184,7 +184,7 @@ public actor HybridKnowledgeStore {
         let now = Date()
         let expiresAt: Date? = input.ttl.map { now.addingTimeInterval($0) }
 
-        if let near = nearDup, input.confidence >= near.confidence {
+        if let near = nearDup, input.confidence > near.confidence {
             // Supersede: insert new version pointing at old, mark old superseded.
             let newID = try insertDocument(
                 input: input,
