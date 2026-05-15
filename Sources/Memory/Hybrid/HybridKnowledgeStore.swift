@@ -175,7 +175,7 @@ public actor HybridKnowledgeStore {
             knowledgeKind: input.knowledgeKind,
             contentHash: contentHash
         ) {
-            try touch(id: existing.id)
+            try? touch(id: existing.id)
             return .duplicate(id: existing.id, uuid: existing.uuid)
         }
 
