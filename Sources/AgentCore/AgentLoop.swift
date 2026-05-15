@@ -50,6 +50,11 @@ public actor AgentLoop {
     let useShadowContextForToolResults: Bool
     let hooks: HookPipeline
     let memoryPromptSection: String?
+    /// Optional pluggable long-term memory backend. When non-nil, AgentLoop
+    /// fires a best-effort `reflect(.turnCompleted)` at the end of every
+    /// turn so the provider can mine the conversation for new memories.
+    /// Defaults to nil, which preserves legacy behaviour (no reflection).
+    let memoryProvider: (any MemoryProvider)?
     let customizationPromptSection: String?
     let skillsMetadata: [SkillMetadata]
     var promptSectionTokenEstimates: [PromptSection: Int]
@@ -120,6 +125,7 @@ public actor AgentLoop {
         dryRun: Bool = false,
         hooks: HookPipeline = HookPipeline(),
         memoryPromptSection: String? = nil,
+        memoryProvider: (any MemoryProvider)? = nil,
         customizationPromptSection: String? = nil,
         skillsMetadata: [SkillMetadata] = [],
         promptSectionTokenEstimates: [PromptSection: Int] = [:],
@@ -150,6 +156,7 @@ public actor AgentLoop {
         self.useShadowContextForToolResults = useShadowContextForToolResults
         self.hooks = hooks
         self.memoryPromptSection = memoryPromptSection
+        self.memoryProvider = memoryProvider
         self.customizationPromptSection = customizationPromptSection
         self.skillsMetadata = skillsMetadata
         self.promptSectionTokenEstimates = promptSectionTokenEstimates
@@ -341,7 +348,25 @@ public actor AgentLoop {
                         }
                     }
                 }
-                
+
+                // Best-effort end-of-turn reflection. Fires on a detached
+                // task so the user-visible turn has already returned by the
+                // time embedding / extraction work runs. Errors are
+                // swallowed inside the provider — never re-thrown here.
+                // TODO: also wire per-turn `recallForTurn` injection once
+                // ConversationHistory supports a mutable system-prompt slot.
+                if let provider = memoryProvider {
+                    let snapshot = ReflectionInput(
+                        trigger: .turnCompleted(turnIndex: history.messages.count),
+                        projectRoot: projectWorkspaceRoot,
+                        recentAssistantText: [response],
+                        recentUserText: history.latestUserMessage.map { [$0] } ?? []
+                    )
+                    Task.detached(priority: .utility) { [provider] in
+                        await provider.reflect(snapshot)
+                    }
+                }
+
                 return
             }
 
