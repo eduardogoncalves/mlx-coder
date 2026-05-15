@@ -225,6 +225,8 @@ final class TodoToolTests: XCTestCase {
             atomically: true,
             encoding: .utf8
         )
+        // Force saveTodos to fail writes to the new file path while still
+        // allowing loadTodos to read the legacy fallback content above.
         try FileManager.default.createDirectory(
             at: workspace.appendingPathComponent(".mlx-coder-todo"),
             withIntermediateDirectories: false
@@ -246,6 +248,8 @@ final class TodoToolTests: XCTestCase {
             atomically: true,
             encoding: .utf8
         )
+        // Force saveTodos to fail writes to the new file path while still
+        // allowing loadTodos to read the legacy fallback content above.
         try FileManager.default.createDirectory(
             at: workspace.appendingPathComponent(".mlx-coder-todo"),
             withIntermediateDirectories: false
