@@ -126,6 +126,10 @@ public actor AgentLoop {
         maxToolIterations: Int = 20,
         memoryLimit: Int? = nil,
         cacheLimit: Int? = nil,
+        // Defaults to `false` here to match the CLI's "skip vision by default"
+        // behaviour, which is the opposite of `ModelLoader.load(...)`'s default
+        // of `true` (kept that way to preserve backwards compatibility for any
+        // library consumer that calls `ModelLoader.load` directly).
         loadVisionWeights: Bool = false
     ) {
         self.modelContainer = modelContainer

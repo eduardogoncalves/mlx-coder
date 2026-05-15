@@ -45,9 +45,11 @@ public enum VisionWeightFilter {
         let flat = model.parameters().flattened()
         var replacements: [(String, MLXArray)] = []
 
-        let placeholder = MLXArray(0)
         for (key, _) in flat where isVisionKey(key) {
-            replacements.append((key, placeholder))
+            // Use a fresh placeholder per key so each module ends up with its
+            // own MLXArray reference (avoids any chance of unintended aliasing
+            // if a future caller mutates one in place).
+            replacements.append((key, MLXArray(0)))
         }
 
         guard !replacements.isEmpty else { return false }
