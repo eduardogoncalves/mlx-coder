@@ -97,7 +97,7 @@ final class ReflectorTests: XCTestCase {
     func testSupersededOutcomePreservesOldIDProvenance() async throws {
         let seed = DocumentInput(
             memoryType: .semantic,
-            knowledgeKind: .fact,
+            knowledgeKind: .decision,
             content: "Always run swift build before swift test.",
             source: .assistant,
             projectRoot: "/test/project",
@@ -109,7 +109,7 @@ final class ReflectorTests: XCTestCase {
         let reflector = Reflector(store: store)
         let candidate = ReflectionCandidate(
             memoryType: .semantic,
-            knowledgeKind: .fact,
+            knowledgeKind: .decision,
             content: "Always run swift build before swift test.",
             confidence: 0.9,
             importance: 0.7
@@ -132,7 +132,7 @@ final class ReflectorTests: XCTestCase {
     func testSupersededOutcomeKeepsSuccessWhenOldUUIDUnavailable() async throws {
         let seed = DocumentInput(
             memoryType: .semantic,
-            knowledgeKind: .fact,
+            knowledgeKind: .decision,
             content: "Always run swift build before swift test.",
             source: .assistant,
             projectRoot: "/test/project",
@@ -147,7 +147,7 @@ final class ReflectorTests: XCTestCase {
         )
         let candidate = ReflectionCandidate(
             memoryType: .semantic,
-            knowledgeKind: .fact,
+            knowledgeKind: .decision,
             content: "Always run swift build before swift test.",
             confidence: 0.9,
             importance: 0.7
