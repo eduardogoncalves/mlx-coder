@@ -23,6 +23,12 @@ public enum KnowledgeKind: String, Codable, CaseIterable, Sendable {
     case plan
     case sessionState = "session_state"
     case summary
+
+    /// All knowledge kinds that participate in normal (persistent) retrieval.
+    /// Excludes `.sessionState`, which is scratch context with TTL; callers
+    /// that need session state in their results must opt in explicitly.
+    public static let persistentKinds: [KnowledgeKind] =
+        allCases.filter { $0 != .sessionState }
 }
 
 /// Lifecycle status for a document.
@@ -211,7 +217,7 @@ public struct RetrievalScope: Sendable {
     public init(
         projectRoot: String,
         memoryTypes: [MemoryType] = [.episodic, .semantic],
-        knowledgeKinds: [KnowledgeKind] = KnowledgeKind.allCases,
+        knowledgeKinds: [KnowledgeKind] = KnowledgeKind.persistentKinds,
         includeSuperseded: Bool = false
     ) {
         self.projectRoot = projectRoot
