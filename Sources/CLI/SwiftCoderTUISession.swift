@@ -769,13 +769,7 @@ private func normalizeInputSoftWrap(renderer: Renderer) async {
 
     guard wrapped.text != original else { return }
     await renderer.setInputBuffer(wrapped.text)
-
-    let moveLeftCount = max(0, wrapped.text.count - wrapped.cursor)
-    if moveLeftCount > 0 {
-        for _ in 0..<moveLeftCount {
-            await renderer.moveCursorLeft()
-        }
-    }
+    await renderer.setCursorPos(wrapped.cursor)
 }
 
 func wrappedInputTextForSoftWrap(
