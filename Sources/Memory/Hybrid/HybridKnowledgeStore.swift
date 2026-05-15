@@ -233,6 +233,140 @@ public actor HybridKnowledgeStore {
         return .inserted(id: newID, uuid: uuid)
     }
 
+    /// Persist a (potentially long) document by splitting its content into
+    /// smaller chunks via `MemoryChunker`. Each chunk is written as its own
+    /// row, tagged with `chunk:<groupUUID>:<index>/<total>` so siblings can
+    /// be re-assembled at retrieval time.
+    ///
+    /// Behaviour:
+    ///  * Short content (≤ `MemoryChunker.minSplitChars` and ≤ `maxChars`)
+    ///    is written verbatim — single outcome, no chunk tag.
+    ///  * Each chunk inherits all of `input`'s metadata; only `content` and
+    ///    `tags` differ. The shared chunk tag is appended to existing tags.
+    ///  * Each chunk goes through the normal `write` path — that means
+    ///    exact-dedup and near-duplicate supersede checks fire per chunk
+    ///    (so re-importing the same long doc collapses cleanly).
+    ///
+    /// Returns one outcome per chunk, in chunk order. An empty input string
+    /// returns an empty array.
+    @discardableResult
+    public func writeChunked(
+        _ input: DocumentInput,
+        maxChars: Int = MemoryChunker.defaultMaxChars,
+        overlap: Int = MemoryChunker.defaultOverlapChars
+    ) async throws -> [WriteOutcome] {
+        let chunks = MemoryChunker.chunk(input.content, maxChars: maxChars, overlap: overlap)
+        guard !chunks.isEmpty else { return [] }
+        if chunks.count == 1, chunks[0].count == input.content.trimmingCharacters(in: .whitespacesAndNewlines).count {
+            return [try await write(input)]
+        }
+
+        let groupID = UUID()
+        let total = chunks.count
+        var outcomes: [WriteOutcome] = []
+        outcomes.reserveCapacity(total)
+        for (idx, piece) in chunks.enumerated() {
+            var perChunk = input
+            perChunk.content = piece
+            perChunk.tags = input.tags + [
+                MemoryChunker.chunkTag(groupID: groupID, index: idx, total: total)
+            ]
+            outcomes.append(try await write(perChunk))
+        }
+        return outcomes
+    }
+
+    // MARK: - Feedback signals
+
+    /// Strongly-typed delta applied to a document's `feedback_score`. Wraps a
+    /// `Double` clamped into `[-1, 1]` so callers cannot accidentally write
+    /// out-of-range signals.
+    public struct FeedbackDelta: Sendable, Equatable {
+        public let value: Double
+        public init(_ raw: Double) {
+            self.value = Swift.max(-1.0, Swift.min(1.0, raw))
+        }
+        /// Convenience constants for thumbs-up / thumbs-down style signals.
+        public static let upvote = FeedbackDelta(0.5)
+        public static let downvote = FeedbackDelta(-0.5)
+        public static let strongUpvote = FeedbackDelta(1.0)
+        public static let strongDownvote = FeedbackDelta(-1.0)
+    }
+
+    /// Apply a feedback signal to a document. The score is accumulated into
+    /// the existing `feedback_score` (treating `NULL` as `0`) and clamped to
+    /// `[-1, 1]` so repeated signals saturate instead of growing unboundedly.
+    /// Returns the new score, or `nil` if the document does not exist.
+    @discardableResult
+    public func recordFeedback(documentID: Int64, delta: FeedbackDelta) throws -> Double? {
+        guard let db else { throw StoreError.databaseNotOpen }
+        // Verify document exists; emitting feedback for a missing row is a
+        // caller bug we surface as `nil` rather than silently inserting.
+        var existsStmt: OpaquePointer?
+        defer { sqlite3_finalize(existsStmt) }
+        guard sqlite3_prepare_v2(
+            db, "SELECT 1 FROM memory_documents WHERE id = ? LIMIT 1;", -1, &existsStmt, nil
+        ) == SQLITE_OK else {
+            throw StoreError.sqliteError("feedback exists prepare", sqlite3_errcode(db))
+        }
+        sqlite3_bind_int64(existsStmt, 1, documentID)
+        guard sqlite3_step(existsStmt) == SQLITE_ROW else { return nil }
+
+        let upsert = """
+            INSERT INTO memory_metadata (doc_id, feedback_score)
+            VALUES (?, ?)
+            ON CONFLICT(doc_id) DO UPDATE SET
+                feedback_score = MAX(-1.0, MIN(1.0,
+                    COALESCE(memory_metadata.feedback_score, 0.0) + excluded.feedback_score
+                ));
+        """
+        var stmt: OpaquePointer?
+        defer { sqlite3_finalize(stmt) }
+        guard sqlite3_prepare_v2(db, upsert, -1, &stmt, nil) == SQLITE_OK else {
+            throw StoreError.sqliteError("feedback upsert prepare", sqlite3_errcode(db))
+        }
+        sqlite3_bind_int64(stmt, 1, documentID)
+        sqlite3_bind_double(stmt, 2, delta.value)
+        guard sqlite3_step(stmt) == SQLITE_DONE else {
+            throw StoreError.sqliteError("feedback upsert step", sqlite3_errcode(db))
+        }
+
+        // Read back the now-current score.
+        var readStmt: OpaquePointer?
+        defer { sqlite3_finalize(readStmt) }
+        guard sqlite3_prepare_v2(
+            db,
+            "SELECT feedback_score FROM memory_metadata WHERE doc_id = ?;",
+            -1, &readStmt, nil
+        ) == SQLITE_OK else {
+            throw StoreError.sqliteError("feedback read prepare", sqlite3_errcode(db))
+        }
+        sqlite3_bind_int64(readStmt, 1, documentID)
+        guard sqlite3_step(readStmt) == SQLITE_ROW else { return nil }
+        if sqlite3_column_type(readStmt, 0) == SQLITE_NULL { return 0.0 }
+        return sqlite3_column_double(readStmt, 0)
+    }
+
+    /// UUID-keyed convenience — looks the row up and forwards to
+    /// `recordFeedback(documentID:delta:)`. Returns `nil` if the UUID is
+    /// unknown.
+    @discardableResult
+    public func recordFeedback(documentUUID: UUID, delta: FeedbackDelta) throws -> Double? {
+        guard let db else { throw StoreError.databaseNotOpen }
+        var stmt: OpaquePointer?
+        defer { sqlite3_finalize(stmt) }
+        guard sqlite3_prepare_v2(
+            db, "SELECT id FROM memory_documents WHERE doc_uuid = ? LIMIT 1;", -1, &stmt, nil
+        ) == SQLITE_OK else {
+            throw StoreError.sqliteError("feedback lookup prepare", sqlite3_errcode(db))
+        }
+        let uuidStr = documentUUID.uuidString
+        sqlite3_bind_text(stmt, 1, uuidStr, -1, _swift_sqlite_transient)
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
+        let id = sqlite3_column_int64(stmt, 0)
+        return try recordFeedback(documentID: id, delta: delta)
+    }
+
     /// Hybrid retrieval: FTS5 + vector → RRF → reranker.
     public func retrieve(
         query: String,
