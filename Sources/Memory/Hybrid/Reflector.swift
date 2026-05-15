@@ -198,13 +198,21 @@ public actor Reflector {
                 case .inserted(_, let uuid):
                     outcomes.append(.init(candidate: candidate, action: .inserted(uuid: uuid)))
                 case .superseded(let oldID, _, let uuid):
-                    // Best-effort lookup of the old doc's UUID for accurate
-                    // provenance. Falls back to a fresh UUID if the row was
-                    // already pruned mid-flight or the lookup failed.
-                    let lookedUp: UUID? = try? await store.documentUUID(forID: oldID)
-                    let oldUUID = lookedUp ?? UUID()
-                    outcomes.append(.init(candidate: candidate,
-                                          action: .superseded(oldUUID: oldUUID, newUUID: uuid)))
+                    // Preserve accurate provenance when possible. If the old
+                    // document's UUID can no longer be resolved (for example,
+                    // the row was pruned mid-flight), do not fabricate a UUID.
+                    // Instead, downgrade this candidate to a skipped outcome.
+                    if let oldUUID = try await store.documentUUID(forID: oldID) {
+                        outcomes.append(.init(candidate: candidate,
+                                              action: .superseded(oldUUID: oldUUID, newUUID: uuid)))
+                    } else {
+                        outcomes.append(.init(
+                            candidate: candidate,
+                            action: .skipped(
+                                reason: "Superseded document UUID could not be resolved for id \(oldID)"
+                            )
+                        ))
+                    }
                 case .duplicate(_, let uuid):
                     outcomes.append(.init(candidate: candidate, action: .duplicate(uuid: uuid)))
                 }
