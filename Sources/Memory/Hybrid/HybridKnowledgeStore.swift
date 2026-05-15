@@ -31,6 +31,13 @@ public actor HybridKnowledgeStore {
         public var rerankBudget: TimeInterval
         public var nearDuplicateCosineThreshold: Double
         public var nearDuplicateTokenJaccardThreshold: Double
+        /// Maximum number of embedding rows scanned per `vectorSearch` call.
+        /// Acts as a safety ceiling before the corpus migrates to sqlite-vec;
+        /// rows are ordered newest-first so the most relevant entries are
+        /// scanned first and the cap only trims very old tail embeddings.
+        public var vectorSearchScanCap: Int
+        /// Maximum number of candidates evaluated per `findNearDuplicate` call.
+        public var nearDuplicateScanCap: Int
 
         public init(
             topNLexical: Int = 40,
@@ -45,7 +52,9 @@ public actor HybridKnowledgeStore {
             // far below this; the budget is a ceiling, not a target.
             rerankBudget: TimeInterval = 0.12,
             nearDuplicateCosineThreshold: Double = 0.85,
-            nearDuplicateTokenJaccardThreshold: Double = 0.7
+            nearDuplicateTokenJaccardThreshold: Double = 0.7,
+            vectorSearchScanCap: Int = 2000,
+            nearDuplicateScanCap: Int = 200
         ) {
             self.topNLexical = topNLexical
             self.topNSemantic = topNSemantic
@@ -56,6 +65,8 @@ public actor HybridKnowledgeStore {
             self.rerankBudget = rerankBudget
             self.nearDuplicateCosineThreshold = nearDuplicateCosineThreshold
             self.nearDuplicateTokenJaccardThreshold = nearDuplicateTokenJaccardThreshold
+            self.vectorSearchScanCap = vectorSearchScanCap
+            self.nearDuplicateScanCap = nearDuplicateScanCap
         }
 
         public static let `default` = Config()
@@ -503,20 +514,52 @@ public actor HybridKnowledgeStore {
         queryContent: String,
         scope: RetrievalScope
     ) async throws -> DupHit? {
-        // Pull active candidates within scope and run cosine + jaccard gates.
-        let docs = try fetchActiveDocuments(scope: scope, limit: 200)
+        // Single JOIN fetches document metadata + embedding in one pass,
+        // replacing the previous fetchActiveDocuments + N×fetchEmbedding pattern.
+        guard let db else { throw StoreError.databaseNotOpen }
+        let typesIn = scope.memoryTypes.map { "'\($0.rawValue)'" }.joined(separator: ",")
+        let kindsIn = scope.knowledgeKinds.map { "'\($0.rawValue)'" }.joined(separator: ",")
+        let sql = """
+            SELECT d.id, d.doc_uuid, d.content, d.confidence, d.version,
+                   e.dim, e.embedding
+            FROM memory_documents d
+            JOIN memory_embeddings e ON e.doc_id = d.id
+            WHERE d.project_root = ?
+              AND d.status = 'active'
+              AND d.memory_type IN (\(typesIn))
+              AND d.knowledge_kind IN (\(kindsIn))
+            ORDER BY d.updated_at DESC
+            LIMIT ?;
+        """
+        var stmt: OpaquePointer?
+        defer { sqlite3_finalize(stmt) }
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+            throw StoreError.sqliteError("near-dup prepare", sqlite3_errcode(db))
+        }
+        sqlite3_bind_text(stmt, 1, scope.projectRoot, -1, _swift_sqlite_transient)
+        sqlite3_bind_int(stmt, 2, Int32(config.nearDuplicateScanCap))
+
         let queryTokens = LexicalReranker.tokens(in: queryContent)
-        for doc in docs {
-            guard let vec = try fetchEmbedding(docID: doc.id) else { continue }
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            let id = sqlite3_column_int64(stmt, 0)
+            guard let uuidStr = sqlite3_column_text(stmt, 1).map({ String(cString: $0) }),
+                  let uuid = UUID(uuidString: uuidStr),
+                  let content = sqlite3_column_text(stmt, 2).map({ String(cString: $0) })
+            else { continue }
+            let confidence = sqlite3_column_double(stmt, 3)
+            let version = Int(sqlite3_column_int(stmt, 4))
+            let dim = Int(sqlite3_column_int(stmt, 5))
+            let blobLen = Int(sqlite3_column_bytes(stmt, 6))
+            guard let blobPtr = sqlite3_column_blob(stmt, 6) else { continue }
+            let data = Data(bytes: blobPtr, count: blobLen)
+            guard let vec = EmbeddingBlob.decode(data, dimension: dim) else { continue }
+
             let cos = HashEmbeddingProvider.cosine(queryEmbedding, vec)
             guard cos >= config.nearDuplicateCosineThreshold else { continue }
             let jacc = LexicalReranker.jaccard(
-                queryTokens, LexicalReranker.tokens(in: doc.content))
+                queryTokens, LexicalReranker.tokens(in: content))
             guard jacc >= config.nearDuplicateTokenJaccardThreshold else { continue }
-            return DupHit(
-                id: doc.id, uuid: doc.uuid,
-                confidence: doc.confidence, version: doc.version
-            )
+            return DupHit(id: id, uuid: uuid, confidence: confidence, version: version)
         }
         return nil
     }
@@ -714,8 +757,10 @@ public actor HybridKnowledgeStore {
     private func vectorSearch(
         queryEmbedding: [Float], scope: RetrievalScope, limit: Int
     ) throws -> [(Int64, Double)] {
-        // Pull all in-scope embeddings into memory and compute cosine.
-        // For large corpora this is the migration boundary to sqlite-vec.
+        // Pull in-scope embeddings into memory and compute cosine similarity.
+        // Rows are ordered newest-first so the scan cap preferentially covers
+        // recent (higher-utility) embeddings. Full sqlite-vec migration removes
+        // this Swift-side loop entirely.
         guard let db else { throw StoreError.databaseNotOpen }
         let typesIn = scope.memoryTypes.map { "'\($0.rawValue)'" }.joined(separator: ",")
         let kindsIn = scope.knowledgeKinds.map { "'\($0.rawValue)'" }.joined(separator: ",")
@@ -727,7 +772,9 @@ public actor HybridKnowledgeStore {
             WHERE d.project_root = ?
               AND d.memory_type IN (\(typesIn))
               AND d.knowledge_kind IN (\(kindsIn))
-              \(statusClause);
+              \(statusClause)
+            ORDER BY d.updated_at DESC
+            LIMIT ?;
         """
         var stmt: OpaquePointer?
         defer { sqlite3_finalize(stmt) }
@@ -735,6 +782,7 @@ public actor HybridKnowledgeStore {
             throw StoreError.sqliteError("vec search prepare", sqlite3_errcode(db))
         }
         sqlite3_bind_text(stmt, 1, scope.projectRoot, -1, _swift_sqlite_transient)
+        sqlite3_bind_int(stmt, 2, Int32(config.vectorSearchScanCap))
 
         var hits: [(Int64, Double)] = []
         while sqlite3_step(stmt) == SQLITE_ROW {
