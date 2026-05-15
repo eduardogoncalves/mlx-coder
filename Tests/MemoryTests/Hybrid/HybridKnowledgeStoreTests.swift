@@ -118,6 +118,35 @@ final class HybridKnowledgeStoreTests: XCTestCase {
         XCTAssertFalse(results.isEmpty)
     }
 
+    func testRetrieveWithEmptyScopeFiltersReturnsNoResults() async throws {
+        _ = try await store.write(makeInput(content: "Always use xcodebuild for this project."))
+        let scope = RetrievalScope(
+            projectRoot: "/test/project",
+            memoryTypes: [],
+            knowledgeKinds: []
+        )
+
+        let results = try await store.retrieve(query: "xcodebuild", scope: scope, limit: 5)
+        XCTAssertTrue(results.isEmpty)
+    }
+
+    func testConsolidateWithEmptyScopeFiltersReturnsZero() async throws {
+        _ = try await store.write(makeInput(
+            content: "Prefer swift build over manual invocations of swiftc.",
+            confidence: 0.4))
+        _ = try await store.write(makeInput(
+            content: "Prefer swift build over manual invocations of swiftc CLI.",
+            confidence: 0.6))
+        let scope = RetrievalScope(
+            projectRoot: "/test/project",
+            memoryTypes: [],
+            knowledgeKinds: []
+        )
+
+        let merged = try await store.consolidate(scope: scope)
+        XCTAssertEqual(merged, 0)
+    }
+
     func testPruneRemovesExpiredWorkingMemory() async throws {
         let expired = DocumentInput(
             memoryType: .working,

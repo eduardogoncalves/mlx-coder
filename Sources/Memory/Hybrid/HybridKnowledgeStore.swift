@@ -240,6 +240,7 @@ public actor HybridKnowledgeStore {
         limit: Int = 10
     ) async throws -> [ScoredDocument] {
         guard db != nil else { throw StoreError.databaseNotOpen }
+        guard scopeHasQueryFilters(scope) else { return [] }
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return [] }
 
@@ -520,6 +521,7 @@ public actor HybridKnowledgeStore {
         queryContent: String,
         scope: RetrievalScope
     ) async throws -> DupHit? {
+        guard scopeHasQueryFilters(scope) else { return nil }
         // Single JOIN fetches document metadata + embedding in one pass,
         // replacing the previous fetchActiveDocuments + N×fetchEmbedding pattern.
         guard let db else { throw StoreError.databaseNotOpen }
@@ -715,6 +717,7 @@ public actor HybridKnowledgeStore {
     private func ftsSearch(
         query: String, scope: RetrievalScope, limit: Int
     ) throws -> [Int64] {
+        guard scopeHasQueryFilters(scope) else { return [] }
         guard let db else { throw StoreError.databaseNotOpen }
         let typesIn = scope.memoryTypes.map { "'\($0.rawValue)'" }.joined(separator: ",")
         let kindsIn = scope.knowledgeKinds.map { "'\($0.rawValue)'" }.joined(separator: ",")
@@ -763,6 +766,7 @@ public actor HybridKnowledgeStore {
     private func vectorSearch(
         queryEmbedding: [Float], scope: RetrievalScope, limit: Int
     ) throws -> [(Int64, Double)] {
+        guard scopeHasQueryFilters(scope) else { return [] }
         // Pull in-scope embeddings into memory and compute cosine similarity.
         // Rows are ordered newest-first so the scan cap preferentially covers
         // recent (higher-utility) embeddings. Full sqlite-vec migration removes
@@ -878,6 +882,7 @@ public actor HybridKnowledgeStore {
     }
 
     private func fetchActiveDocuments(scope: RetrievalScope, limit: Int) throws -> [MemoryDocument] {
+        guard scopeHasQueryFilters(scope) else { return [] }
         guard let db else { throw StoreError.databaseNotOpen }
         let typesIn = scope.memoryTypes.map { "'\($0.rawValue)'" }.joined(separator: ",")
         let kindsIn = scope.knowledgeKinds.map { "'\($0.rawValue)'" }.joined(separator: ",")
@@ -978,6 +983,10 @@ public actor HybridKnowledgeStore {
             taskID: taskID,
             feedbackScore: feedback
         )
+    }
+
+    private func scopeHasQueryFilters(_ scope: RetrievalScope) -> Bool {
+        !scope.memoryTypes.isEmpty && !scope.knowledgeKinds.isEmpty
     }
 
     private func touch(id: Int64) throws {
