@@ -52,6 +52,16 @@ public struct BashTool: Tool {
             return .error("Command denied by permission rules: \(command)")
         }
 
+        // Defense-in-depth: block `ln -s` commands whose target resolves outside
+        // the workspace. This prevents using a symlink-then-read pattern to leak
+        // data from outside the sandbox via shell tools (cat, head, less, ...).
+        if let symlinkError = SymlinkEscapeGuard.checkLnCommand(
+            command,
+            workspaceRoot: permissions.effectiveWorkspaceRoot
+        ) {
+            return .error(symlinkError)
+        }
+
         let finalCommand: String
         if useSandbox {
             finalCommand = sandboxEngine.wrap(command: command, workspaceRoot: permissions.effectiveWorkspaceRoot)
@@ -59,11 +69,21 @@ public struct BashTool: Tool {
             finalCommand = command
         }
 
+        let result: ToolResult
         if mode == "background" {
-            return try await executeBackground(command: finalCommand, initialWait: initialWait)
+            result = try await executeBackground(command: finalCommand, initialWait: initialWait)
         } else {
-            return try await executeSync(command: finalCommand, timeout: timeout)
+            result = try await executeSync(command: finalCommand, timeout: timeout)
         }
+
+        // Post-execution sweep: remove any newly-created symlinks within the
+        // workspace that point outside it (defense in depth against ln/symlink
+        // escapes via tools we can't statically parse).
+        SymlinkEscapeGuard.removeEscapingSymlinks(
+            in: permissions.effectiveWorkspaceRoot
+        )
+
+        return result
     }
 
     // MARK: - Synchronous Execution
