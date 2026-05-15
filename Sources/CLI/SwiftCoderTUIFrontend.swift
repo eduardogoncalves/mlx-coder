@@ -351,7 +351,36 @@ public final class SwiftCoderTUIFrontend: AgentFrontend, @unchecked Sendable {
             await renderer.printScrollLine("\(DesignSystem.dim)model: \(describe(m))\(DesignSystem.reset)")
 
         case .memoryEvent(let mem):
-            await renderer.printScrollLine("\(DesignSystem.dim)memory: \(describe(mem))\(DesignSystem.reset)")
+            switch mem {
+            case .checkpointSaved(let summary):
+                await renderer.printScrollLine("\(DesignSystem.dim)memory: checkpoint saved (\(summary))\(DesignSystem.reset)")
+            case .checkpointFailed(let reason):
+                await renderer.printScrollLine("\(DesignSystem.brightRed)memory: checkpoint failed: \(reason)\(DesignSystem.reset)")
+            case .factSaved(let subject, let fact):
+                await renderer.printScrollLine("\(DesignSystem.dim)memory: fact [\(subject)]: \(fact)\(DesignSystem.reset)")
+            case .factsListed(let action, _, let lines):
+                let actionEntry = SessionEntry(role: .toolCall, content: "memory \(action)")
+                await renderer.printScrollLine(actionEntry.render())
+                let resultBody = lines.joined(separator: "\n")
+                let resultEntry = SessionEntry(role: .toolOutput, content: resultBody)
+                await renderer.printScrollLine(resultEntry.render())
+            case .searchResults(let action, _, let lines):
+                let actionEntry = SessionEntry(role: .toolCall, content: "memory \(action)")
+                await renderer.printScrollLine(actionEntry.render())
+                let resultBody = lines.joined(separator: "\n")
+                let resultEntry = SessionEntry(role: .toolOutput, content: resultBody)
+                await renderer.printScrollLine(resultEntry.render())
+            case .status(let action, let lines):
+                let actionEntry = SessionEntry(role: .toolCall, content: "memory \(action)")
+                await renderer.printScrollLine(actionEntry.render())
+                let resultBody = lines.joined(separator: "\n")
+                let resultEntry = SessionEntry(role: .toolOutput, content: resultBody)
+                await renderer.printScrollLine(resultEntry.render())
+            case .undone(let message):
+                await renderer.printScrollLine("\(DesignSystem.dim)memory: \(message)\(DesignSystem.reset)")
+            case .error(let message):
+                await renderer.printScrollLine("\(DesignSystem.brightRed)memory: error: \(message)\(DesignSystem.reset)")
+            }
 
         case .buildCheck(let bc):
             await renderer.printScrollLine("\(DesignSystem.dim)build: \(describe(bc))\(DesignSystem.reset)")
@@ -527,10 +556,10 @@ public final class SwiftCoderTUIFrontend: AgentFrontend, @unchecked Sendable {
         case .checkpointSaved(let s): return "checkpoint saved (\(s))"
         case .checkpointFailed(let s): return "checkpoint failed: \(s)"
         case .factSaved(let subj, let fact): return "fact [\(subj)]: \(fact)"
-        case .factsListed(let n, _): return "\(n) fact(s)"
-        case .searchResults(let q, _): return "search: \(q)"
+        case .factsListed(_, let n, _): return "\(n) fact(s)"
+        case .searchResults(_, let q, _): return "search: \(q)"
         case .undone(let s): return s
-        case .status(_): return "status"
+        case .status(_, _): return "status"
         case .error(let s): return "error: \(s)"
         }
     }

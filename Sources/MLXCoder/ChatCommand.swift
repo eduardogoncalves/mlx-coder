@@ -866,7 +866,7 @@ func handleMemoryCommand(
     let parts = trimmed.split(separator: " ", maxSplits: 2, omittingEmptySubsequences: true)
     
     guard parts.count >= 2 else {
-        frontend.emit(.memoryEvent(.status(lines: [
+        frontend.emit(.memoryEvent(.status(action: "help", lines: [
             "Usage: /memory <subcommand> [args]",
             "",
             "Memory subcommands:",
@@ -999,7 +999,7 @@ func handleMemorySearch(query: String, workspaceRoot: String, store: KnowledgeSt
         let entries = try await store.search(query: query, projectRoot: workspaceRoot)
         
         if entries.isEmpty {
-            frontend.emit(.memoryEvent(.searchResults(query: query, lines: ["No results found."])))
+            frontend.emit(.memoryEvent(.searchResults(action: "search \(query)", query: query, lines: ["No results found."])))
             return
         }
         
@@ -1010,7 +1010,7 @@ func handleMemorySearch(query: String, workspaceRoot: String, store: KnowledgeSt
                 lines.append("  surface: \(surface)")
             }
         }
-        frontend.emit(.memoryEvent(.searchResults(query: query, lines: lines)))
+        frontend.emit(.memoryEvent(.searchResults(action: "search \(query)", query: query, lines: lines)))
     } catch {
         frontend.emit(.memoryEvent(.error("Search failed: \(error)")))
     }
@@ -1019,6 +1019,7 @@ func handleMemorySearch(query: String, workspaceRoot: String, store: KnowledgeSt
 func handleMemoryList(typeFilter: String?, workspaceRoot: String, store: KnowledgeStore, frontend: any AgentFrontend) async {
     do {
         let type: KnowledgeType?
+        let actionStr: String
         if let typeFilter {
             let typeStr = typeFilter.replacingOccurrences(of: "--type ", with: "")
                 .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1027,14 +1028,16 @@ func handleMemoryList(typeFilter: String?, workspaceRoot: String, store: Knowled
                 frontend.emit(.memoryEvent(.error("Invalid type: \(typeStr)")))
                 return
             }
+            actionStr = "list --type \(typeStr)"
         } else {
             type = nil
+            actionStr = "list"
         }
         
         let entries = try await store.list(projectRoot: workspaceRoot, type: type, limit: 50)
         
         if entries.isEmpty {
-            frontend.emit(.memoryEvent(.factsListed(count: 0, lines: ["No entries found."])))
+            frontend.emit(.memoryEvent(.factsListed(action: actionStr, count: 0, lines: ["No entries found."])))
             return
         }
         
@@ -1050,7 +1053,7 @@ func handleMemoryList(typeFilter: String?, workspaceRoot: String, store: Knowled
                 lines.append("  surface: \(surface)")
             }
         }
-        frontend.emit(.memoryEvent(.factsListed(count: entries.count, lines: lines)))
+        frontend.emit(.memoryEvent(.factsListed(action: actionStr, count: entries.count, lines: lines)))
     } catch {
         frontend.emit(.memoryEvent(.error("List failed: \(error)")))
     }
@@ -1075,7 +1078,7 @@ func handleMemoryUndo(workspaceRoot: String, store: KnowledgeStore, frontend: an
 func handleMemoryStatus(store: KnowledgeStore, frontend: any AgentFrontend) async {
     do {
         let stats = try await store.stats()
-        frontend.emit(.memoryEvent(.status(lines: [
+        frontend.emit(.memoryEvent(.status(action: "status", lines: [
             "Memory Status:",
             "- Entries: \(stats.entryCount)",
             "- DB size: \(stats.dbSizeBytes / 1024) KB",
@@ -1108,7 +1111,7 @@ func handleMemorySnippet(window: String?, workspaceRoot: String, store: Knowledg
             window: timeWindow,
             format: .markdown
         )
-        frontend.emit(.memoryEvent(.status(lines: snippet.split(separator: "\n").map(String.init))))
+        frontend.emit(.memoryEvent(.status(action: "snippet", lines: snippet.split(separator: "\n").map(String.init))))
     } catch {
         frontend.emit(.memoryEvent(.error("Snippet generation failed: \(error)")))
     }

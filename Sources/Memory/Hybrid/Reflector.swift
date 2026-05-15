@@ -19,7 +19,7 @@ public enum ReflectionTrigger: Sendable, Equatable {
 }
 
 /// One candidate piece of knowledge extracted from a turn.
-public struct ReflectionCandidate: Sendable {
+public struct ReflectionCandidate: Sendable, Equatable {
     public var memoryType: MemoryType
     public var knowledgeKind: KnowledgeKind
     public var content: String

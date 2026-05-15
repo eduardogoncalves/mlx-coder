@@ -152,10 +152,10 @@ public enum MemoryEvent: Sendable {
     case checkpointSaved(summary: String)
     case checkpointFailed(reason: String)
     case factSaved(subject: String, fact: String)
-    case factsListed(count: Int, lines: [String])
-    case searchResults(query: String, lines: [String])
+    case factsListed(action: String, count: Int, lines: [String])
+    case searchResults(action: String, query: String, lines: [String])
     case undone(message: String)
-    case status(lines: [String])
+    case status(action: String, lines: [String])
     case error(String)
 }
 
