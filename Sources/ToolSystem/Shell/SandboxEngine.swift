@@ -45,6 +45,7 @@ public struct SandboxEngine: Sendable {
         let escapedWorkspaceRoot = escapeForProfileString(canonicalWorkspaceRoot)
 
         let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let escapedHome = escapeForProfileString(home)
         // Balanced developer baseline:
         // Explicit writable subpaths for common package managers/toolchains,
         // while keeping broad home-directory writes denied.
@@ -77,6 +78,32 @@ public struct SandboxEngine: Sendable {
             .map { "        (allow file-write* (subpath \"\(escapeForProfileString($0))\"))" }
             .joined(separator: "\n")
 
+        // Read-allow exceptions inside the user's home directory. These are
+        // re-permitted after the broad home-read deny below so common dev tools
+        // (git, package managers, swiftpm) keep functioning while user data
+        // (notes, documents, ssh keys, credentials) stays unreadable.
+        let readableHomePaths: [String] = packageCachePaths + [
+            // Git configuration
+            "\(home)/.gitconfig",
+            "\(home)/.gitignore_global",
+            "\(home)/.config/git",
+            // Shell / tool configuration commonly inspected by build scripts
+            "\(home)/.zshenv",
+            "\(home)/.profile",
+            // Read-only metadata for already-writable caches isn't needed —
+            // file-write* implies neither read nor list, so we explicitly
+            // re-allow reads on the same subpaths via packageCachePaths above.
+        ]
+        let readableHomeRules = readableHomePaths
+            .map { path -> String in
+                let escaped = escapeForProfileString(path)
+                // Use literal for files, subpath for directories. Seatbelt
+                // accepts subpath for both (file paths just match themselves)
+                // so subpath is safe and uniform.
+                return "        (allow file-read* (subpath \"\(escaped)\"))"
+            }
+            .joined(separator: "\n")
+
         let networkRule: String
         switch networkPolicy {
         case .allow:
@@ -92,6 +119,15 @@ public struct SandboxEngine: Sendable {
             "        ;; Block all writes by default",
             "        (deny file-write*)",
             "        ",
+            "        ;; Block reads of user data outside the workspace. This",
+            "        ;; prevents commands like `cat ~/secret.md` or",
+            "        ;; `cat /Users/other/...` from exfiltrating files outside",
+            "        ;; the sandboxed workspace. System paths (/etc, /usr,",
+            "        ;; /System, /Library, /tmp) remain readable so tools and",
+            "        ;; libraries continue to function.",
+            "        (deny file-read* (subpath \"\(escapedHome)\"))",
+            "        (deny file-read* (subpath \"/Users\"))",
+            "        ",
             "        ;; Allow null/tty devices — git and many tools open /dev/null O_RDWR",
             "        (allow file-write* (literal \"/dev/null\"))",
             "        (allow file-read* (literal \"/dev/null\"))",
@@ -104,11 +140,16 @@ public struct SandboxEngine: Sendable {
             "        (allow file-write* (subpath \"/var/folders\"))",
             "        (allow file-write* (subpath \"/private/var/folders\"))",
             "        ",
-            "        ;; Allow writes within the workspace",
+            "        ;; Allow reads + writes within the workspace",
+            "        (allow file-read* (subpath \"\(escapedWorkspaceRoot)\"))",
             "        (allow file-write* (subpath \"\(escapedWorkspaceRoot)\"))",
             "        ",
             "        ;; Package manager caches / data dirs (NuGet, npm, cargo, etc.)",
             packageCacheRules,
+            "        ",
+            "        ;; Re-allow reads for tool config and package caches inside HOME",
+            "        ;; (overrides the broad home-read deny above).",
+            readableHomeRules,
             "        ",
             "        ;; Allow process execution and networking (permissive-open style)",
             "        (allow process*)",
