@@ -700,14 +700,15 @@ public actor HybridKnowledgeStore {
     /// Escape a free-form query for FTS5 by wrapping each token in double
     /// quotes — neutralises operator characters (`-`, `:`, `*`, `(`, `)`)
     /// that would otherwise be interpreted as syntax and can cause
-    /// `SQLITE_ERROR: malformed MATCH expression`.
+    /// `SQLITE_ERROR: malformed MATCH expression`. Tokens are joined with
+    /// spaces so FTS5 retains its default implicit AND semantics.
     static func escapeFTS(_ query: String) -> String {
         let parts = query
             .components(separatedBy: .whitespacesAndNewlines)
             .map { $0.trimmingCharacters(in: CharacterSet(charactersIn: "\"")) }
             .filter { !$0.isEmpty }
         guard !parts.isEmpty else { return "\"\"" }
-        return parts.map { "\"\($0)\"" }.joined(separator: " OR ")
+        return parts.map { "\"\($0)\"" }.joined(separator: " ")
     }
 
     private func vectorSearch(
