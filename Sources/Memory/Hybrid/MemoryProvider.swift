@@ -199,8 +199,14 @@ public actor HybridMemoryProvider: MemoryProvider {
             logger?("memory.reflect: \(outcomes.count) outcome(s) processed")
         }
         pendingReflections.append(task)
-        // Drop already-finished tasks so the array doesn't grow unboundedly.
-        pendingReflections.removeAll { $0.isCancelled }
+        Task {
+            _ = await task.value
+            await removePendingReflection(task)
+        }
+    }
+
+    private func removePendingReflection(_ task: Task<Void, Never>) {
+        pendingReflections.removeAll { $0 == task }
     }
 
     public func recordFeedback(
