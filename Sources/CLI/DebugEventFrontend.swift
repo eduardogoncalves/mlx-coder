@@ -14,19 +14,42 @@ import Foundation
 
 public final class DebugEventFrontend: AgentFrontend, @unchecked Sendable {
 
-    private let logURL = URL(fileURLWithPath: "/tmp/mlx-coder-events.log")
+    private let logURL: URL
     private let fileHandle: FileHandle?
     private let startTime: Date
 
+    /// Per-user, per-process log path under the user's temporary directory.
+    /// Using the user-specific temp dir (and a unique filename) prevents
+    /// symlink-overwrite attacks that were possible against the previous
+    /// hard-coded `/tmp/mlx-coder-events.log` on multi-user systems.
+    private static func makeLogURL() -> URL {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mlx-coder-debug", isDirectory: true)
+        try? FileManager.default.createDirectory(
+            at: dir,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        return dir.appendingPathComponent("events-\(ProcessInfo.processInfo.processIdentifier).log")
+    }
+
     public init() {
         self.startTime = Date()
-        // Truncate/create the log file at startup.
-        FileManager.default.createFile(atPath: "/tmp/mlx-coder-events.log", contents: nil)
-        self.fileHandle = try? FileHandle(forWritingTo: logURL)
+        let url = Self.makeLogURL()
+        self.logURL = url
+        // Atomically create with 0600 perms inside the just-created 0700
+        // directory so the file is scoped to the current user and other local
+        // users cannot pre-create it as a symlink to overwrite arbitrary files.
+        FileManager.default.createFile(
+            atPath: url.path,
+            contents: nil,
+            attributes: [.posixPermissions: 0o600]
+        )
+        self.fileHandle = try? FileHandle(forWritingTo: url)
         fileHandle?.seekToEndOfFile()
         log("=== DebugEventFrontend started at \(Date()) ===")
-        print("[debug] Logging events to /tmp/mlx-coder-events.log")
-        print("[debug] Run in another terminal: tail -f /tmp/mlx-coder-events.log")
+        print("[debug] Logging events to \(url.path)")
+        print("[debug] Run in another terminal: tail -f \(url.path)")
     }
 
     deinit {

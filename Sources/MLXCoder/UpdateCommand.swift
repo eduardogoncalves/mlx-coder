@@ -84,7 +84,13 @@ struct UpdateCommand: AsyncParsableCommand {
         }
 
         let pkgPath = try await downloadAsset(pkgAsset, version: latestVersion)
-        defer { try? FileManager.default.removeItem(atPath: pkgPath) }
+        defer {
+            // Clean up both the .pkg and its parent UUID directory (created
+            // by `downloadAsset` with 0700 perms to defeat symlink races).
+            let parent = URL(fileURLWithPath: pkgPath).deletingLastPathComponent()
+            try? FileManager.default.removeItem(atPath: pkgPath)
+            try? FileManager.default.removeItem(at: parent)
+        }
 
         try runInstaller(pkgPath: pkgPath)
         print("Update complete. mlx-coder \(latestVersion) is now installed.")
@@ -142,17 +148,43 @@ struct UpdateCommand: AsyncParsableCommand {
             throw UpdateError.downloadFailed("invalid URL: \(asset.browserDownloadURL)")
         }
 
-        let destination = NSTemporaryDirectory() + "mlx-coder-update-\(version).pkg"
+        // Download into a freshly created 0700 directory so a local attacker
+        // cannot race a symlink onto the predictable destination path between
+        // download and `sudo installer`.
+        let parentDir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("mlx-coder-update-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: parentDir,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        let destination = parentDir.appendingPathComponent("mlx-coder-\(version).pkg").path
 
         print("Downloading \(asset.name)…")
 
-        let (tmpURL, response) = try await URLSession.shared.download(from: url)
+        // Reject HTTP redirects that leave the github.com / githubusercontent.com
+        // trust set. Without this, a compromised CDN or DNS could substitute
+        // an attacker-controlled installer payload that we then run as root.
+        let session = URLSession(
+            configuration: .ephemeral,
+            delegate: GitHubRedirectGuard(),
+            delegateQueue: nil
+        )
+        defer { session.finishTasksAndInvalidate() }
+
+        let (tmpURL, response) = try await session.download(from: url)
         guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
             throw UpdateError.downloadFailed("HTTP \((response as? HTTPURLResponse)?.statusCode ?? 0)")
         }
 
         try? FileManager.default.removeItem(atPath: destination)
         try FileManager.default.moveItem(at: tmpURL, to: URL(fileURLWithPath: destination))
+        // Tighten perms on the downloaded payload so other local users cannot
+        // tamper with it before it is consumed by `installer`.
+        try? FileManager.default.setAttributes(
+            [.posixPermissions: 0o600],
+            ofItemAtPath: destination
+        )
         print("Downloaded to \(destination)")
         return destination
     }
@@ -160,6 +192,12 @@ struct UpdateCommand: AsyncParsableCommand {
     // MARK: - Install
 
     private func runInstaller(pkgPath: String) throws {
+        // Verify the package signature before invoking `sudo installer`. An
+        // unsigned or non-Apple-trusted pkg should never be silently
+        // installed with root privileges; this is the last line of defence if
+        // an attacker controlled the GitHub release asset.
+        try verifyPackageSignature(pkgPath: pkgPath)
+
         print("Running installer (may require your password)…")
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/sudo")
@@ -168,6 +206,77 @@ struct UpdateCommand: AsyncParsableCommand {
         process.waitUntilExit()
         guard process.terminationStatus == 0 else {
             throw UpdateError.installFailed(process.terminationStatus)
+        }
+    }
+
+    /// Runs `pkgutil --check-signature` and refuses to install when the
+    /// package is not signed by a trusted Apple Developer ID. The accepted
+    /// substrings match `pkgutil`'s human-readable status lines on macOS 13+.
+    private func verifyPackageSignature(pkgPath: String) throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/sbin/pkgutil")
+        process.arguments = ["--check-signature", pkgPath]
+        let outPipe = Pipe()
+        let errPipe = Pipe()
+        process.standardOutput = outPipe
+        process.standardError = errPipe
+        do {
+            try process.run()
+        } catch {
+            throw UpdateError.installFailed(-1)
+        }
+        process.waitUntilExit()
+
+        let out = String(data: outPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        let err = String(data: errPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+
+        guard process.terminationStatus == 0 else {
+            fputs("error: package signature check failed:\n\(out)\(err)", stderr)
+            throw UpdateError.installFailed(process.terminationStatus)
+        }
+
+        // pkgutil prints e.g. "Status: signed by a developer certificate issued by Apple for distribution"
+        // or "Status: signed Apple Software".
+        let acceptableStatuses = [
+            "signed by a developer certificate issued by Apple",
+            "signed Apple Software",
+            "signed by a certificate trusted by Mac OS X",
+        ]
+        guard acceptableStatuses.contains(where: { out.contains($0) }) else {
+            fputs("error: refusing to install — package is not signed by a trusted Apple Developer ID:\n\(out)", stderr)
+            throw UpdateError.installFailed(-1)
+        }
+    }
+}
+
+/// URLSession delegate that refuses HTTP redirects whose host is not on the
+/// known GitHub release-asset trust set. Without this, a hijacked redirect
+/// could swap the downloaded `.pkg` payload before `sudo installer` runs it.
+private final class GitHubRedirectGuard: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+    private static let allowedHosts: Set<String> = [
+        "github.com",
+        "api.github.com",
+        "objects.githubusercontent.com",
+        "release-assets.githubusercontent.com",
+        "codeload.github.com",
+    ]
+
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest request: URLRequest,
+        completionHandler: @escaping (URLRequest?) -> Void
+    ) {
+        guard let host = request.url?.host?.lowercased() else {
+            completionHandler(nil)
+            return
+        }
+        if Self.allowedHosts.contains(host) {
+            completionHandler(request)
+        } else {
+            // Cancel the request by passing nil; URLSession will fail the task.
+            completionHandler(nil)
         }
     }
 }

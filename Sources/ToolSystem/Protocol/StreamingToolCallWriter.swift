@@ -81,7 +81,18 @@ public final class StreamingToolCallWriter: @unchecked Sendable {
         self.toolCallOpen = toolCallOpen
         self.toolCallClose = toolCallClose
         self.onStatusChange = onStatusChange
-        try? FileManager.default.createDirectory(at: self.tmpDir, withIntermediateDirectories: true)
+        // 0700: streamed LLM content may contain secrets being written to the
+        // workspace. Other local users must not read or list the staging area.
+        try? FileManager.default.createDirectory(
+            at: self.tmpDir,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        // If the directory existed previously with looser perms, tighten it.
+        try? FileManager.default.setAttributes(
+            [.posixPermissions: 0o700],
+            ofItemAtPath: self.tmpDir.path
+        )
     }
 
     public func drainCompletedCalls() -> [StreamedToolCall] {
@@ -186,8 +197,17 @@ public final class StreamingToolCallWriter: @unchecked Sendable {
                     if let (key, _) = detectContentField(buffer) {
                         if let (path, toolName) = extractPathAndArgs(buffer, contentKey: key) {
                             let safeName = path.replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: ".", with: "_")
-                            let tmpFile = tmpDir.appendingPathComponent(safeName + ".tmp")
-                            FileManager.default.createFile(atPath: tmpFile.path, contents: nil)
+                            // Append a per-call UUID so the filename is not
+                            // statically predictable from the workspace path.
+                            // Combined with 0700 on tmpDir and 0600 on the
+                            // file this defeats the symlink-overwrite TOCTOU
+                            // against shared temp directories.
+                            let tmpFile = tmpDir.appendingPathComponent("\(safeName)-\(UUID().uuidString).tmp")
+                            FileManager.default.createFile(
+                                atPath: tmpFile.path,
+                                contents: nil,
+                                attributes: [.posixPermissions: 0o600]
+                            )
                             onStatusChange?("\(Self.tmpFileStatusPrefix)\(tmpFile.path)")
                             if let fh = try? FileHandle(forWritingTo: tmpFile) {
                                 try? fh.truncate(atOffset: 0)
@@ -314,10 +334,18 @@ public final class StreamingToolCallWriter: @unchecked Sendable {
             // This means the content was small enough to fit in the buffer before
             // we detected the closing tag. Parse it normally.
             let safeName = path.replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: ".", with: "_")
-            let tmpFile = tmpDir.appendingPathComponent(safeName + ".tmp")
+            // UUID suffix mirrors the streaming path above to avoid
+            // statically-predictable temp filenames (CWE-377).
+            let tmpFile = tmpDir.appendingPathComponent("\(safeName)-\(UUID().uuidString).tmp")
 
             if let content = arguments[contentKey] as? String {
                 try? content.write(to: tmpFile, atomically: true, encoding: .utf8)
+                // Tighten perms on the just-written file. `String.write(to:)`
+                // honours umask which may be 022 by default.
+                try? FileManager.default.setAttributes(
+                    [.posixPermissions: 0o600],
+                    ofItemAtPath: tmpFile.path
+                )
                 var otherArgs = arguments
                 otherArgs.removeValue(forKey: contentKey)
                 completedCalls.append(StreamedToolCall(

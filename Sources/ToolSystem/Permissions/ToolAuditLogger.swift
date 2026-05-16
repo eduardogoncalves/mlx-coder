@@ -2,6 +2,11 @@
 // Persistent audit logging for tool approval and execution events
 
 import Foundation
+#if canImport(Darwin)
+import Darwin
+#else
+import Glibc
+#endif
 
 public actor ToolAuditLogger {
     private let logFilePath: String
@@ -130,7 +135,8 @@ public actor ToolAuditLogger {
 
     private func write(_ payload: [String: Any]) {
         guard let data = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]),
-              let line = String(data: data, encoding: .utf8)?.appending("\n") else {
+              let line = String(data: data, encoding: .utf8)?.appending("\n"),
+              let lineData = line.data(using: .utf8) else {
             return
         }
 
@@ -138,25 +144,24 @@ public actor ToolAuditLogger {
         let directory = URL(filePath: logFilePath).deletingLastPathComponent()
         try? fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
 
-        if !fileManager.fileExists(atPath: logFilePath) {
-            fileManager.createFile(atPath: logFilePath, contents: nil)
+        // Open with O_APPEND so concurrent writers from multiple processes
+        // (e.g. parallel `mlx-coder` sessions, nested `task` subagents) never
+        // overwrite each other's entries. POSIX guarantees that a single
+        // `write(2)` call up to PIPE_BUF bytes with O_APPEND atomically
+        // extends the file. Audit lines are short (<= ~2KiB after clamp),
+        // well below PIPE_BUF on macOS/Linux.
+        let fd = logFilePath.withCString { path in
+            open(path, O_WRONLY | O_CREAT | O_APPEND, 0o600)
         }
+        guard fd >= 0 else { return }
+        defer { close(fd) }
 
-        guard let handle = try? FileHandle(forWritingTo: URL(filePath: logFilePath)) else {
-            return
-        }
-
-        defer {
-            try? handle.close()
-        }
-
-        do {
-            try handle.seekToEnd()
-            if let lineData = line.data(using: .utf8) {
-                try handle.write(contentsOf: lineData)
-            }
-        } catch {
-            // Keep logging best-effort and non-fatal.
+        _ = lineData.withUnsafeBytes { (buffer: UnsafeRawBufferPointer) -> Int in
+            guard let base = buffer.baseAddress else { return 0 }
+            // Best-effort single write. Short writes are accepted as no log
+            // message exceeds PIPE_BUF on supported platforms; any error is
+            // intentionally swallowed to keep logging non-fatal.
+            return write(fd, base, buffer.count)
         }
     }
 }

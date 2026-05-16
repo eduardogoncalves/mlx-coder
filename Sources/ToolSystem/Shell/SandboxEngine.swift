@@ -28,15 +28,30 @@ public struct SandboxEngine: Sendable {
     /// - Returns: A sandboxed command string.
     public func wrap(command: String, workspaceRoot: String) -> String {
         let profile = generateProfile(workspaceRoot: workspaceRoot)
-        
+
         // Escape the profile and command to be safe for inclusion in a shell command
         // Wrap both in single quotes and escape any single quotes inside.
         let escapedProfile = profile.replacingOccurrences(of: "'", with: "'\\''")
         let escapedCommand = command.replacingOccurrences(of: "'", with: "'\\''")
-        
+
         // Return the wrapped command. Use an explicit shell entrypoint so commands with
         // arguments/operators are executed correctly under sandbox-exec.
         return "sandbox-exec -p '\(escapedProfile)' /bin/zsh -c '\(escapedCommand)'"
+    }
+
+    /// Returns `true` when `workspaceRoot` is safe to embed in a Seatbelt profile
+    /// string. Profiles are S-expressions; embedded `(`, `)`, `"`, `\`, `;` or
+    /// newline characters in the workspace path can break out of the
+    /// `(subpath "...")` literal and either neutralise the sandbox or inject
+    /// new rules. Callers that receive `false` should reject the request
+    /// rather than weakening the sandbox.
+    public static func isWorkspaceRootSandboxSafe(_ workspaceRoot: String) -> Bool {
+        // Disallow characters that have special meaning inside Seatbelt
+        // S-expression string literals or the surrounding shell quoting.
+        // The set is intentionally conservative: real macOS workspace roots
+        // never contain these characters in practice.
+        let forbidden: Set<Character> = ["\"", "\\", "(", ")", "\n", "\r", ";", "'", "`", "$"]
+        return !workspaceRoot.contains(where: { forbidden.contains($0) })
     }
     
     /// Generates a Seatbelt profile string.

@@ -427,10 +427,7 @@ public actor GitService {
         shell.standardError = stderr
 
         try shell.run()
-        shell.waitUntilExit()
-
-        let out = String(data: stdout.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        let err = String(data: stderr.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        let (out, err) = Self.drainAndWait(process: shell, stdoutPipe: stdout, stderrPipe: stderr)
         let merged = (out + err).trimmingCharacters(in: .whitespacesAndNewlines)
 
         guard shell.terminationStatus == 0 else {
@@ -446,29 +443,70 @@ public actor GitService {
         process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
         process.arguments = args
         process.currentDirectoryURL = URL(fileURLWithPath: cwd)
-        
+
         let standardOutput = Pipe()
         let standardError = Pipe()
         process.standardOutput = standardOutput
         process.standardError = standardError
-        
+
         try process.run()
-        process.waitUntilExit()
-        
-        let outputData = standardOutput.fileHandleForReading.readDataToEndOfFile()
-        let errorData = standardError.fileHandleForReading.readDataToEndOfFile()
-        
-        let output = String(data: outputData, encoding: .utf8) ?? ""
-        let errorOutput = String(data: errorData, encoding: .utf8) ?? ""
-        
+        let (output, errorOutput) = Self.drainAndWait(
+            process: process,
+            stdoutPipe: standardOutput,
+            stderrPipe: standardError
+        )
+
         guard process.terminationStatus == 0 else {
             throw GitError.gitCommandFailed(
                 command: "git \(args.joined(separator: " "))",
                 stderr: errorOutput.isEmpty ? "Unknown error" : errorOutput
             )
         }
-        
+
         return output
+    }
+
+    /// Drain stdout and stderr pipes concurrently with the child process to
+    /// avoid the pipe-buffer deadlock that occurs when a child writes more
+    /// than ~16-64 KiB before exiting (it would block in kernel `write(2)`
+    /// while `waitUntilExit` waits forever for the child to exit). After the
+    /// process exits the readability handlers are torn down and any final
+    /// bytes are drained synchronously.
+    private static func drainAndWait(
+        process: Process,
+        stdoutPipe: Pipe,
+        stderrPipe: Pipe
+    ) -> (stdout: String, stderr: String) {
+        let collector = PipeOutputCollector()
+        stdoutPipe.fileHandleForReading.readabilityHandler = { handle in
+            let data = handle.availableData
+            if data.isEmpty {
+                handle.readabilityHandler = nil
+                return
+            }
+            collector.appendStdout(data)
+        }
+        stderrPipe.fileHandleForReading.readabilityHandler = { handle in
+            let data = handle.availableData
+            if data.isEmpty {
+                handle.readabilityHandler = nil
+                return
+            }
+            collector.appendStderr(data)
+        }
+
+        process.waitUntilExit()
+
+        stdoutPipe.fileHandleForReading.readabilityHandler = nil
+        stderrPipe.fileHandleForReading.readabilityHandler = nil
+        let tailOut = stdoutPipe.fileHandleForReading.availableData
+        let tailErr = stderrPipe.fileHandleForReading.availableData
+        if !tailOut.isEmpty { collector.appendStdout(tailOut) }
+        if !tailErr.isEmpty { collector.appendStderr(tailErr) }
+
+        let outStr = String(data: collector.stdoutSnapshot(), encoding: .utf8) ?? ""
+        let errStr = String(data: collector.stderrSnapshot(), encoding: .utf8) ?? ""
+        return (outStr, errStr)
     }
 
     private func resolveWorktreePath(for branch: String) throws -> String? {
