@@ -210,6 +210,7 @@ mlx-coder doctor --strict --json
 | `--mcp-name` | `remote` | MCP tool prefix namespace |
 | `--mcp-timeout` | `30` | MCP request timeout in seconds |
 | `--verbose` | `false` | Show verbose output including thinking blocks |
+| `--vision` | `false` | Load vision encoder weights (skipped by default to save VRAM) |
 | `--voice` | `false` | (`run` only) Record voice prompt via Speech Recognition instead of `--prompt` |
 | `--voice-silence-timeout` | `2.0` | Seconds of silence before voice recording stops automatically |
 | `--voice-locale` | device locale | BCP 47 locale tag for speech recognition, e.g. `en-US`, `fr-FR` |

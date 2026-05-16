@@ -45,6 +45,7 @@ public actor AgentLoop {
     var modelPath: String
     let memoryLimit: Int?
     let cacheLimit: Int?
+    public internal(set) var loadVisionWeights: Bool
     let dryRun: Bool
     let useShadowContextForToolResults: Bool
     let hooks: HookPipeline
@@ -130,7 +131,10 @@ public actor AgentLoop {
         promptSectionTokenEstimates: [PromptSection: Int] = [:],
         maxToolIterations: Int = 20,
         memoryLimit: Int? = nil,
-        cacheLimit: Int? = nil
+        cacheLimit: Int? = nil,
+        // Defaults to `false` here to match the CLI's "skip vision by default"
+        // behaviour.
+        loadVisionWeights: Bool = false
     ) {
         self.modelContainer = modelContainer
         self.registry = registry
@@ -156,6 +160,7 @@ public actor AgentLoop {
         self.promptSectionTokenEstimates = promptSectionTokenEstimates
         self.memoryLimit = memoryLimit
         self.cacheLimit = cacheLimit
+        self.loadVisionWeights = loadVisionWeights
         
         // Initialize interactive input for branch name prompting
         self.interactiveInput = InteractiveInput()
@@ -232,6 +237,15 @@ public actor AgentLoop {
         if pendingReload {
             try await reloadModel()
             pendingReload = false
+        }
+
+        // If the user attached images but the current model was loaded without
+        // vision weights, the processor path cannot encode the image and the
+        // model will respond as if no image were present. Auto-enable vision
+        // and reload the model before continuing so the image is actually seen.
+        if !images.isEmpty && !loadVisionWeights {
+            frontend.emitStatus("🖼️  Image attached — enabling vision weights and reloading model…")
+            try await setVisionLoading(true)
         }
 
         // Discard preserved new_text buffers from previous turns — they are stale once

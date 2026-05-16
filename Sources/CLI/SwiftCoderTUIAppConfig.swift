@@ -87,6 +87,7 @@ public enum SwiftCoderTUIAppConfigBuilder {
                 AppConfig.CommandConfig(name: "/ask",     description: "Ask a side question without changing main context"),
                 AppConfig.CommandConfig(name: "/merge-approval", description: "Configure merge approvals"),
                 AppConfig.CommandConfig(name: "/gittree", description: "Inspect git tree/worktree"),
+                AppConfig.CommandConfig(name: "/vision", description: "Show vision status (alias: /vison)"),
                 AppConfig.CommandConfig(name: "/memory",  description: "Memory subsystem (save/list/search/...)"),
                 AppConfig.CommandConfig(name: "/help",    description: "Show help and shortcuts"),
                 AppConfig.CommandConfig(name: "/model",   description: "Switch the active model"),

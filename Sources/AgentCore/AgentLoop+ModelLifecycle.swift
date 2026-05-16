@@ -20,13 +20,14 @@ extension AgentLoop {
         MLX.Memory.clearCache()
         
         // Load fresh container
-        let newContainer = try await ModelLoader.load(
+        let result = try await ModelLoader.load(
             from: modelPath,
             memoryLimit: memoryLimit,
-            cacheLimit: cacheLimit
+            cacheLimit: cacheLimit,
+            loadVisionWeights: loadVisionWeights
         )
-        
-        self.modelContainer = newContainer
+
+        self.modelContainer = result.container
         
         // Update loaded tracking parameters
         self.loadedModelPath = modelPath
@@ -66,6 +67,24 @@ extension AgentLoop {
         modelPath = trimmed
         pendingReload = false
         try await reloadModel()
+    }
+
+    /// Toggle (or set) the vision-weights loading flag and reload the model so
+    /// the change takes effect immediately.
+    ///
+    /// - Parameter enabled: When `true`, the next model load retains the
+    ///   vision encoder weights (enables image input). When `false`, vision
+    ///   weights are dropped and the freed VRAM is returned to the allocator.
+    /// - Returns: The new value of `loadVisionWeights` after the reload.
+    @discardableResult
+    public func setVisionLoading(_ enabled: Bool) async throws -> Bool {
+        if loadVisionWeights == enabled {
+            return loadVisionWeights
+        }
+        loadVisionWeights = enabled
+        pendingReload = false
+        try await reloadModel()
+        return loadVisionWeights
     }
 
     /// Stage a model switch to be applied on the next user message turn.

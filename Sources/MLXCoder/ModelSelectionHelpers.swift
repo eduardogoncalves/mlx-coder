@@ -116,22 +116,24 @@ func loadModelWithCancellation(
     from path: String,
     memoryLimit: Int?,
     cacheLimit: Int?,
+    loadVisionWeights: Bool,
     renderer: StreamRenderer
-) async throws -> ModelContainer {
+) async throws -> (container: ModelContainer, visionSkipped: Bool) {
     let loadTask = Task {
         try await ModelLoader.load(
             from: path,
             memoryLimit: memoryLimit,
-            cacheLimit: cacheLimit
+            cacheLimit: cacheLimit,
+            loadVisionWeights: loadVisionWeights
         )
     }
 
     await CancelController.shared.setTask(loadTask)
 
     do {
-        let container = try await loadTask.value
+        let result = try await loadTask.value
         await CancelController.shared.setTask(nil)
-        return container
+        return result
     } catch {
         await CancelController.shared.setTask(nil)
         if error is CancellationError {

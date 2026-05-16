@@ -55,7 +55,8 @@ public func runSwiftCoderTUISession(
     frontend: SwiftCoderTUIFrontend,
     skillMetadata: [SkillMetadata],
     hooks: HookPipeline,
-    initialSandboxEnabled: Bool
+    initialSandboxEnabled: Bool,
+    initialVisionEnabled: Bool
 ) async {
     let processTerminal = ProcessTerminal()
     processTerminal.setupRawMode(title: frontend.appConfig.appName)
@@ -452,6 +453,15 @@ public func runSwiftCoderTUISession(
             if commandInput == "/help" || commandInput == "?" {
                 for line in helpLines() {
                     await renderer.printScrollLine(line)
+                }
+                continue
+            }
+            if commandInput == "/vision" || commandInput == "/vison" {
+                let enabled = await agentLoop.loadVisionWeights
+                if enabled {
+                    await renderer.printScrollLine("\(DesignSystem.dim)👁 Vision weights are enabled for this session.\(DesignSystem.reset)")
+                } else {
+                    await renderer.printScrollLine("\(DesignSystem.dim)👁 Vision weights are disabled for this session (start with --vision to enable).\(DesignSystem.reset)")
                 }
                 continue
             }
@@ -958,6 +968,7 @@ private func helpLines() -> [String] {
         "  /ask [question] ask a quick side question without changing main context",
         "  /merge-approval run merge approval flow",
         "  /gittree run git tree flow",
+        "  /vision show vision status (alias: /vison)",
         "  /quit    exit the TUI",
         "  ! <cmd>  run a shell command and keep output in transcript/context",
         "  !!<cmd>  run a shell command without adding output to transcript/context",
