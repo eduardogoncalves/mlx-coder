@@ -46,7 +46,7 @@ public enum SymlinkEscapeGuard {
                     // If trackedCWD is already nil (prior indeterminate cd),
                     // we cannot meaningfully resolve the new path, so leave it nil.
                     if let base = trackedCWD {
-                        let newDir = resolveTarget(tokens[1], workspaceRoot: base)
+                        let newDir = resolveTarget(tokens[1], basePath: base)
                         trackedCWD = pathIsInside(newDir, root: normalizedRoot) ? newDir : nil
                     }
                 } else {
@@ -87,7 +87,7 @@ public enum SymlinkEscapeGuard {
             guard symbolic else { continue }
             guard let target = positional.first else { continue }
 
-            let resolvedTarget = resolveTarget(target, workspaceRoot: cwd)
+            let resolvedTarget = resolveTarget(target, basePath: cwd)
             if !pathIsInside(resolvedTarget, root: normalizedRoot) {
                 return """
                     Refused to create symlink: target '\(target)' resolves to \
@@ -160,7 +160,7 @@ public enum SymlinkEscapeGuard {
 
                 let resolved = resolveTarget(
                     destination,
-                    workspaceRoot: url.deletingLastPathComponent().path
+                    basePath: url.deletingLastPathComponent().path
                 )
 
                 if !pathIsInside(resolved, root: normalizedRoot) {
@@ -196,7 +196,7 @@ public enum SymlinkEscapeGuard {
                       token.contains("/") || token.hasPrefix("~")
                 else { continue }
 
-                let resolved = resolveTarget(token, workspaceRoot: workspaceRoot)
+                let resolved = resolveTarget(token, basePath: workspaceRoot)
                 guard pathIsInside(resolved, root: workspaceRoot) else { continue }
 
                 var isDir: ObjCBool = false
@@ -331,18 +331,18 @@ public enum SymlinkEscapeGuard {
         return tokens
     }
 
-    /// Resolve a shell-supplied target path. Symlink target paths are
-    /// interpreted relative to the directory containing the link, which for
-    /// the pre-execution check we approximate using the workspace root (the
-    /// command's CWD).
+    /// Resolve a shell-supplied target path relative to `basePath` (the
+    /// directory the shell command executes from, e.g. the tracked CWD or
+    /// the directory containing the symlink). Absolute paths and tilde-paths
+    /// are left as-is; relative paths are anchored at `basePath`.
     private static func resolveTarget(
         _ target: String,
-        workspaceRoot: String
+        basePath: String
     ) -> String {
         let expanded = NSString(string: target).expandingTildeInPath
         let combined = expanded.hasPrefix("/")
             ? expanded
-            : workspaceRoot + "/" + expanded
+            : basePath + "/" + expanded
         return URL(filePath: combined).standardized.path()
     }
 
