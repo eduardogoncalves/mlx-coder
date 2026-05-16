@@ -227,6 +227,11 @@ final class TodoToolTests: XCTestCase {
         )
         // Force saveTodos to fail writes to the new file path while still
         // allowing loadTodos to read the legacy fallback content above.
+        // Note: placing a *directory* at the `.mlx-coder-todo` path means every
+        // subsequent saveTodos call in this test will also fail — that is
+        // intentional: we want a persistently broken write path for the duration
+        // of the test. The workspace is torn down by the `defer` above, so this
+        // does not pollute other tests.
         try FileManager.default.createDirectory(
             at: workspace.appendingPathComponent(".mlx-coder-todo"),
             withIntermediateDirectories: false
@@ -250,6 +255,11 @@ final class TodoToolTests: XCTestCase {
         )
         // Force saveTodos to fail writes to the new file path while still
         // allowing loadTodos to read the legacy fallback content above.
+        // Note: placing a *directory* at the `.mlx-coder-todo` path means every
+        // subsequent saveTodos call in this test will also fail — that is
+        // intentional: we want a persistently broken write path for the duration
+        // of the test. The workspace is torn down by the `defer` above, so this
+        // does not pollute other tests.
         try FileManager.default.createDirectory(
             at: workspace.appendingPathComponent(".mlx-coder-todo"),
             withIntermediateDirectories: false
