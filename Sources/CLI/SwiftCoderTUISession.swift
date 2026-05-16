@@ -457,10 +457,18 @@ public func runSwiftCoderTUISession(
                 continue
             }
             if commandInput == "/vision" || commandInput == "/vison" {
-                if initialVisionEnabled {
-                    await renderer.printScrollLine("\(DesignSystem.dim)👁 Vision is enabled for this session.\(DesignSystem.reset)")
-                } else {
-                    await renderer.printScrollLine("\(DesignSystem.dim)👁 Vision is disabled for this session (restart with --vision to enable).\(DesignSystem.reset)")
+                if await renderer.getIsGenerating() {
+                    await renderer.printScrollLine("\(DesignSystem.brightRed)✗ /vision unavailable while generation is active. Press Esc first.\(DesignSystem.reset)")
+                    continue
+                }
+                let current = await agentLoop.loadVisionWeights
+                let target = !current
+                await renderer.printScrollLine("\(DesignSystem.dim)👁 \(target ? "Enabling" : "Disabling") vision weights — reloading model…\(DesignSystem.reset)")
+                do {
+                    let newState = try await agentLoop.setVisionLoading(target)
+                    await renderer.printScrollLine("\(DesignSystem.dim)👁 Vision \(newState ? "enabled" : "disabled") for this session.\(DesignSystem.reset)")
+                } catch {
+                    await renderer.printScrollLine("\(DesignSystem.brightRed)✗ /vision failed: \(error.localizedDescription)\(DesignSystem.reset)")
                 }
                 continue
             }
@@ -967,7 +975,7 @@ private func helpLines() -> [String] {
         "  /ask [question] ask a quick side question without changing main context",
         "  /merge-approval run merge approval flow",
         "  /gittree run git tree flow",
-        "  /vision show vision-load status for this session (alias: /vison)",
+        "  /vision toggle vision weights on/off (reloads the model)",
         "  /quit    exit the TUI",
         "  ! <cmd>  run a shell command and keep output in transcript/context",
         "  !!<cmd>  run a shell command without adding output to transcript/context",

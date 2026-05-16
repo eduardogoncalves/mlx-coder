@@ -67,6 +67,34 @@ public enum ImageAttachmentParser {
             .joined(separator: " ")
             .trimmingCharacters(in: .whitespaces)
 
-        return ParseResult(cleanedPrompt: cleaned, imageURLs: imageURLs)
+        let normalizedPrompt = normalizedPromptForImageAttachments(
+            cleanedPrompt: cleaned,
+            imageCount: imageURLs.count
+        )
+
+        return ParseResult(cleanedPrompt: normalizedPrompt, imageURLs: imageURLs)
+    }
+
+    private static func normalizedPromptForImageAttachments(cleanedPrompt: String, imageCount: Int) -> String {
+        guard imageCount > 0 else { return cleanedPrompt }
+
+        let trimmed = cleanedPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
+            return defaultDescribePrompt(imageCount: imageCount)
+        }
+
+        let canonical = trimmed
+            .trimmingCharacters(in: .punctuationCharacters)
+            .lowercased()
+
+        if canonical == "describe" {
+            return defaultDescribePrompt(imageCount: imageCount)
+        }
+
+        return cleanedPrompt
+    }
+
+    private static func defaultDescribePrompt(imageCount: Int) -> String {
+        imageCount == 1 ? "Describe the attached image." : "Describe the attached images."
     }
 }

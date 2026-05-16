@@ -69,6 +69,24 @@ extension AgentLoop {
         try await reloadModel()
     }
 
+    /// Toggle (or set) the vision-weights loading flag and reload the model so
+    /// the change takes effect immediately.
+    ///
+    /// - Parameter enabled: When `true`, the next model load retains the
+    ///   vision encoder weights (enables image input). When `false`, vision
+    ///   weights are dropped and the freed VRAM is returned to the allocator.
+    /// - Returns: The new value of `loadVisionWeights` after the reload.
+    @discardableResult
+    public func setVisionLoading(_ enabled: Bool) async throws -> Bool {
+        if loadVisionWeights == enabled {
+            return loadVisionWeights
+        }
+        loadVisionWeights = enabled
+        pendingReload = false
+        try await reloadModel()
+        return loadVisionWeights
+    }
+
     /// Stage a model switch to be applied on the next user message turn.
     /// This updates `modelPath` and marks `pendingReload` without reloading immediately.
     public func stageModelSwitch(to newModelPath: String) async throws {

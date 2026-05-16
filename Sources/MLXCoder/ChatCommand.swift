@@ -439,10 +439,14 @@ struct ChatCommand: AsyncParsableCommand {
                 continue
             }
             if trimmed == "/vision" || trimmed == "/vison" {
-                if args.vision {
-                    renderer.printStatus("👁 Vision is enabled for this session.")
-                } else {
-                    renderer.printStatus("👁 Vision is disabled for this session (restart with --vision to enable).")
+                let current = await agentLoop.loadVisionWeights
+                let target = !current
+                renderer.printStatus("👁 \(target ? "Enabling" : "Disabling") vision weights — reloading model…")
+                do {
+                    let newState = try await agentLoop.setVisionLoading(target)
+                    renderer.printStatus("👁 Vision \(newState ? "enabled" : "disabled") for this session.")
+                } catch {
+                    renderer.printError("/vision failed: \(error.localizedDescription)")
                 }
                 continue
             }
@@ -821,7 +825,7 @@ func printREPLHelp() {
       \u{001B}[32m/merge-approval\u{001B}[0m Trigger the "Awaiting approval before merge" flow
       \u{001B}[32m/gittree\u{001B}[0m       List git worktrees and switch workspace/branch to one
       \u{001B}[32m/sandbox\u{001B}[0m       Toggle macOS Seatbelt sandbox for shell commands
-      \u{001B}[32m/vision\u{001B}[0m        Show vision-load status for this session (alias: /vison)
+      \u{001B}[32m/vision\u{001B}[0m        Toggle vision weights on/off (reloads the model)
       \u{001B}[32m/voice, Ctrl+V\u{001B}[0m  Voice input (STT) — fills transcription into input box for editing
       \u{001B}[32m/voice-locale [id]\u{001B}[0m Set STT language (no arg = list all available locales)
       \u{001B}[32mCtrl+J, Option+Enter, \\+Enter\u{001B}[0m Insert newline in input box

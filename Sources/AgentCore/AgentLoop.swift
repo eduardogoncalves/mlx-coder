@@ -45,7 +45,7 @@ public actor AgentLoop {
     var modelPath: String
     let memoryLimit: Int?
     let cacheLimit: Int?
-    let loadVisionWeights: Bool
+    public internal(set) var loadVisionWeights: Bool
     let dryRun: Bool
     let useShadowContextForToolResults: Bool
     let hooks: HookPipeline
@@ -239,6 +239,15 @@ public actor AgentLoop {
         if pendingReload {
             try await reloadModel()
             pendingReload = false
+        }
+
+        // If the user attached images but the current model was loaded without
+        // vision weights, the processor path cannot encode the image and the
+        // model will respond as if no image were present. Auto-enable vision
+        // and reload the model before continuing so the image is actually seen.
+        if !images.isEmpty && !loadVisionWeights {
+            frontend.emitStatus("🖼️  Image attached — enabling vision weights and reloading model…")
+            try await setVisionLoading(true)
         }
 
         // Discard preserved new_text buffers from previous turns — they are stale once
