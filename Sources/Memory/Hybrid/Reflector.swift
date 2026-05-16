@@ -286,7 +286,10 @@ public struct HeuristicCandidateExtractor: CandidateExtractor {
                 let line = rawLine.trimmingCharacters(in: .whitespaces)
                 guard line.count >= minLineLen && line.count <= maxLineLen else { continue }
                 let lower = line.lowercased()
-                guard actionMarkers.contains(where: { lower.contains($0) }) else { continue }
+                // Require the marker at the start of the (trimmed) line so
+                // mid-sentence occurrences ("I'll use…", "the API prefers…")
+                // do not produce spurious low-confidence memory candidates.
+                guard actionMarkers.contains(where: { lower.hasPrefix($0) }) else { continue }
 
                 let kind: KnowledgeKind
                 if lower.contains("gotcha") || lower.contains("watch out") {

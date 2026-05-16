@@ -39,12 +39,41 @@ final class ReflectorTests: XCTestCase {
         let reflector = Reflector(
             store: store,
             cadence: ReflectionCadence(nudgeInterval: 3, minContentChars: 10))
+        // Line starts with "always " so the heuristic extractor will pick it up.
         let outcomes = await reflector.reflect(ReflectionInput(
             trigger: .cadence(everyNTurns: 3, currentCount: 6),
             projectRoot: "/test/project",
-            recentAssistantText: ["We decided to always use xcodebuild for this project."]
+            recentAssistantText: ["Always use xcodebuild when building Apple platform targets."]
         ))
         XCTAssertFalse(outcomes.isEmpty)
+    }
+
+    func testHeuristicExtractorIgnoresMidSentenceMarkers() async {
+        // "use " and "prefer " appear mid-sentence here; they must not produce candidates.
+        let extractor = HeuristicCandidateExtractor()
+        let candidates = await extractor.extract(from: ReflectionInput(
+            trigger: .cadence(everyNTurns: 1, currentCount: 1),
+            projectRoot: "/test/project",
+            recentAssistantText: [
+                "I'll use the existing helper rather than writing a new one.",
+                "This happens because the API prefers asynchronous calls in this context."
+            ]
+        ))
+        XCTAssertTrue(candidates.isEmpty, "mid-sentence markers should not produce candidates")
+    }
+
+    func testHeuristicExtractorPicksLineStartMarkers() async {
+        // Lines that *start* with an action marker should be captured.
+        let extractor = HeuristicCandidateExtractor()
+        let candidates = await extractor.extract(from: ReflectionInput(
+            trigger: .cadence(everyNTurns: 1, currentCount: 1),
+            projectRoot: "/test/project",
+            recentAssistantText: [
+                "Always run swift build before swift test to catch type errors early."
+            ]
+        ))
+        XCTAssertFalse(candidates.isEmpty)
+        XCTAssertEqual(candidates.first?.knowledgeKind, .pattern)
     }
 
     func testUserFeedbackAlwaysFiresAndPersists() async throws {
