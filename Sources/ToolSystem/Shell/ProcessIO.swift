@@ -49,6 +49,10 @@ final class PipeOutputCollector: @unchecked Sendable {
 /// already configured `process.executableURL` / `arguments` / etc., and that
 /// the caller will invoke `process.run()` itself or rely on the runner
 /// helpers below.
+///
+/// `BashTool.executeSync` inlines an equivalent collector + drain because it
+/// also wires `withTaskCancellationHandler` and a timeout `Task` around
+/// `waitUntilExit`; the helpers here cover the simpler synchronous case.
 enum ProcessIO {
 
     /// Installs readability handlers on `stdoutPipe` and `stderrPipe`, blocks

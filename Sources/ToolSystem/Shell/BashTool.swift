@@ -193,6 +193,12 @@ public struct BashTool: Tool {
         // could otherwise inject shell metacharacters. We reject any path
         // containing the single quote (which closes the redirect quoting),
         // newline / CR (which start a new shell command), or NUL.
+        //
+        // This validator is intentionally narrower than
+        // `SandboxEngine.unsafeWorkspaceRootCharacters` — that one guards an
+        // S-expression literal (more metachars are dangerous), while here
+        // we're inside a single-quoted shell argument so only the quote and
+        // line terminators can break out.
         let unsafeChars: Set<Character> = ["'", "\n", "\r", "\0"]
         guard !outputFile.path.contains(where: { unsafeChars.contains($0) }) else {
             return .error("Refusing to launch background job: temporary directory path is unsafe for shell quoting")

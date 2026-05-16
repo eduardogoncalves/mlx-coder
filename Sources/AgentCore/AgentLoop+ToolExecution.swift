@@ -119,7 +119,11 @@ extension AgentLoop {
         // outside of any redirection check (`-fprint`, `-fprintf`, `-fls`
         // take a destination filename argument). Tokens are checked whole
         // word to avoid blocking innocent substrings (e.g. a file path
-        // called "delete-old").
+        // called "delete-old"); we additionally strip surrounding shell
+        // quotes from each token so that `find . '-delete'` and
+        // `find . "-delete"` are also caught — without this, the naive
+        // whitespace-split would treat the quoted argument as a distinct
+        // token (`'-delete'`) and miss the match.
         let mutatingTokens: Set<String> = [
             "-delete",
             "-exec",
@@ -130,7 +134,10 @@ extension AgentLoop {
             "-ok",
             "-okdir",
         ]
-        let tokens = lowered.split(whereSeparator: { $0.isWhitespace }).map(String.init)
+        let quoteChars = CharacterSet(charactersIn: "'\"")
+        let tokens = lowered
+            .split(whereSeparator: { $0.isWhitespace })
+            .map { String($0).trimmingCharacters(in: quoteChars) }
         if tokens.contains(where: { mutatingTokens.contains($0) }) {
             return false
         }

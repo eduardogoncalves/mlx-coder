@@ -319,13 +319,18 @@ private final class GitHubRedirectGuard: NSObject, URLSessionTaskDelegate, @unch
         completionHandler: @escaping (URLRequest?) -> Void
     ) {
         guard let host = request.url?.host?.lowercased() else {
+            fputs("update: refused redirect to URL with no host\n", stderr)
             completionHandler(nil)
             return
         }
         if Self.allowedHosts.contains(host) {
             completionHandler(request)
         } else {
-            // Cancel the request by passing nil; URLSession will fail the task.
+            // Cancel the request by passing nil; URLSession will fail the
+            // task. Log the rejected host so that legitimate GitHub
+            // infrastructure changes (new CDN endpoints) can be diagnosed
+            // and the allowlist updated.
+            fputs("update: refused redirect to disallowed host \"\(host)\"\n", stderr)
             completionHandler(nil)
         }
     }

@@ -384,7 +384,19 @@ public actor BuildToolErrorDetector {
         let stderr = String(data: collector.stderrSnapshot(), encoding: .utf8) ?? ""
 
         if !allowNonZeroExit && process.terminationStatus != 0 {
-            throw NSError(domain: "BuildToolErrorDetector", code: Int(process.terminationStatus), userInfo: [NSLocalizedDescriptionKey: stderr])
+            // Include both stdout and stderr in the diagnostic — many build
+            // tools (e.g. `swift build`, `tsc`) write errors to stdout, not
+            // stderr, so dropping stdout here would lose the actual error
+            // text the caller needs to surface.
+            let combined: String
+            if stdout.isEmpty {
+                combined = stderr
+            } else if stderr.isEmpty {
+                combined = stdout
+            } else {
+                combined = "\(stdout)\n[stderr]\n\(stderr)"
+            }
+            throw NSError(domain: "BuildToolErrorDetector", code: Int(process.terminationStatus), userInfo: [NSLocalizedDescriptionKey: combined])
         }
 
         return (stdout, stderr)
