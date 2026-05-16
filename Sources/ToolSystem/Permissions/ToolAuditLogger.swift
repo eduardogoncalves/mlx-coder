@@ -150,8 +150,8 @@ public actor ToolAuditLogger {
         // `write(2)` call up to PIPE_BUF bytes with O_APPEND atomically
         // extends the file. Audit lines are short (<= ~2KiB after clamp),
         // well below PIPE_BUF on macOS/Linux.
-        let fd = logFilePath.withCString { path in
-            open(path, O_WRONLY | O_CREAT | O_APPEND, 0o600)
+        let fd: Int32 = logFilePath.withCString { path in
+            open(path, O_WRONLY | O_CREAT | O_APPEND, mode_t(0o600))
         }
         guard fd >= 0 else { return }
         defer { close(fd) }

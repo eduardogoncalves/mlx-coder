@@ -220,6 +220,29 @@ struct UpdateCommand: AsyncParsableCommand {
         let errPipe = Pipe()
         process.standardOutput = outPipe
         process.standardError = errPipe
+
+        // Drain concurrently to avoid the pipe-buffer deadlock pattern: a
+        // `pkgutil --check-signature` of a deeply-chained certificate could
+        // in theory exceed the kernel pipe buffer (~16-64 KiB) and stall
+        // `waitUntilExit` while the child blocks on `write(2)`.
+        let collector = PipeOutputCollector()
+        outPipe.fileHandleForReading.readabilityHandler = { handle in
+            let data = handle.availableData
+            if data.isEmpty {
+                handle.readabilityHandler = nil
+                return
+            }
+            collector.appendStdout(data)
+        }
+        errPipe.fileHandleForReading.readabilityHandler = { handle in
+            let data = handle.availableData
+            if data.isEmpty {
+                handle.readabilityHandler = nil
+                return
+            }
+            collector.appendStderr(data)
+        }
+
         do {
             try process.run()
         } catch {
@@ -227,8 +250,15 @@ struct UpdateCommand: AsyncParsableCommand {
         }
         process.waitUntilExit()
 
-        let out = String(data: outPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        let err = String(data: errPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        outPipe.fileHandleForReading.readabilityHandler = nil
+        errPipe.fileHandleForReading.readabilityHandler = nil
+        let tailOut = outPipe.fileHandleForReading.availableData
+        let tailErr = errPipe.fileHandleForReading.availableData
+        if !tailOut.isEmpty { collector.appendStdout(tailOut) }
+        if !tailErr.isEmpty { collector.appendStderr(tailErr) }
+
+        let out = String(data: collector.stdoutSnapshot(), encoding: .utf8) ?? ""
+        let err = String(data: collector.stderrSnapshot(), encoding: .utf8) ?? ""
 
         guard process.terminationStatus == 0 else {
             fputs("error: package signature check failed:\n\(out)\(err)", stderr)
