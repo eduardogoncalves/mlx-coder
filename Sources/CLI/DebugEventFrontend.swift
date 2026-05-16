@@ -2,13 +2,14 @@
 // Debug frontend for validating event timing and content.
 //
 // Activated with `--ui debug`. Writes every AgentEvent to stdout with a
-// microsecond timestamp and to /tmp/mlx-coder-events.log so you can
-// `tail -f` it in a parallel terminal.
+// microsecond timestamp, and to a per-user, per-process log file under the
+// user's temporary directory (printed at startup). You can `tail -f` that
+// file in a parallel terminal.
 //
 // Usage:
 //   mlx-coder chat --ui debug
-//   # In another terminal:
-//   tail -f /tmp/mlx-coder-events.log
+//   # In another terminal, tail the path printed at startup, e.g.:
+//   tail -f "$TMPDIR/mlx-coder-debug/events-<pid>.log"
 
 import Foundation
 

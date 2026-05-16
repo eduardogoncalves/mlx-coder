@@ -234,8 +234,10 @@ struct ChatCommand: AsyncParsableCommand {
         // Default is already planLow from AgentLoop initializer
 
         // Debug front-end branch — logs every AgentEvent with timestamps so you
-        // can validate that events arrive per-token and not batched.
-        // Run a second terminal with: tail -f /tmp/mlx-coder-events.log
+        // can validate that events arrive per-token and not batched. The exact
+        // log path (a per-user, per-process file under the user's temp dir)
+        // is printed by `DebugEventFrontend` at startup; `tail -f` that path
+        // in a parallel terminal to watch events stream.
         if args.ui.lowercased() == "debug" {
             let debugFrontend = DebugEventFrontend()
             await agentLoop.swapFrontend(debugFrontend)

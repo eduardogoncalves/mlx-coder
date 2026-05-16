@@ -56,14 +56,17 @@ public struct CodeSearchTool: Tool {
             ]
 
             let pipe = Pipe()
+            let errPipe = Pipe()
             process.standardOutput = pipe
-            process.standardError = Pipe()
+            process.standardError = errPipe
 
             try process.run()
-            process.waitUntilExit()
-
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            let output = String(data: data, encoding: .utf8) ?? ""
+            // Drain concurrently — see GrepTool for the deadlock rationale.
+            let (output, _) = ProcessIO.drainAndWait(
+                process: process,
+                stdoutPipe: pipe,
+                stderrPipe: errPipe
+            )
 
             let lines = output
                 .components(separatedBy: "\n")
@@ -152,18 +155,21 @@ public struct CodeSearchTool: Tool {
         process.arguments = arguments
 
         let pipe = Pipe()
+        let errPipe = Pipe()
         process.standardOutput = pipe
-        process.standardError = Pipe()
+        process.standardError = errPipe
 
         do {
             try process.run()
-            process.waitUntilExit()
         } catch {
             return []
         }
-
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        let output = String(data: data, encoding: .utf8) ?? ""
+        // Drain concurrently — see GrepTool for the deadlock rationale.
+        let (output, _) = ProcessIO.drainAndWait(
+            process: process,
+            stdoutPipe: pipe,
+            stderrPipe: errPipe
+        )
 
         return output
             .components(separatedBy: "\n")

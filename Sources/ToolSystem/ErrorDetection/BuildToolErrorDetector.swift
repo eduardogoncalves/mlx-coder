@@ -323,35 +323,70 @@ public actor BuildToolErrorDetector {
     private func runProcess(_ process: Process, allowNonZeroExit: Bool = false) throws -> (stdout: String, stderr: String) {
         let stdoutPipe = Pipe()
         let stderrPipe = Pipe()
-        
+
         process.standardOutput = stdoutPipe
         process.standardError = stderrPipe
-        
+
+        // Install readability handlers BEFORE the child starts so it can
+        // produce output of arbitrary size without blocking on the pipe.
+        // Without this, `swift build` / `tsc` / `cargo` output (frequently
+        // hundreds of KiB of warnings) overflows the kernel pipe buffer and
+        // wedges the loop below forever.
+        let collector = PipeOutputCollector()
+        stdoutPipe.fileHandleForReading.readabilityHandler = { handle in
+            let data = handle.availableData
+            if data.isEmpty {
+                handle.readabilityHandler = nil
+                return
+            }
+            collector.appendStdout(data)
+        }
+        stderrPipe.fileHandleForReading.readabilityHandler = { handle in
+            let data = handle.availableData
+            if data.isEmpty {
+                handle.readabilityHandler = nil
+                return
+            }
+            collector.appendStderr(data)
+        }
+
         try process.run()
-        
-        // Set timeout
+
+        // Cooperative timeout: poll until the deadline. `terminate()` is a
+        // no-op if the child has already exited, so we don't need an
+        // `isRunning` TOCTOU check around it.
         let stopDate = Date().addingTimeInterval(timeout)
         while process.isRunning && Date() < stopDate {
             usleep(100_000) // 100ms
         }
-        
+
         if process.isRunning {
             process.terminate()
+            // Wait for terminate to take effect so the handlers settle and
+            // we don't leak a still-running child past this scope.
+            process.waitUntilExit()
+            stdoutPipe.fileHandleForReading.readabilityHandler = nil
+            stderrPipe.fileHandleForReading.readabilityHandler = nil
             throw NSError(domain: "BuildToolErrorDetector", code: -1, userInfo: [NSLocalizedDescriptionKey: "Build check timed out"])
         }
-        
+
+        // Make sure we have collected all bytes the child emitted before we
+        // read termination status.
+        process.waitUntilExit()
+        stdoutPipe.fileHandleForReading.readabilityHandler = nil
+        stderrPipe.fileHandleForReading.readabilityHandler = nil
+        let tailOut = stdoutPipe.fileHandleForReading.availableData
+        let tailErr = stderrPipe.fileHandleForReading.availableData
+        if !tailOut.isEmpty { collector.appendStdout(tailOut) }
+        if !tailErr.isEmpty { collector.appendStderr(tailErr) }
+
+        let stdout = String(data: collector.stdoutSnapshot(), encoding: .utf8) ?? ""
+        let stderr = String(data: collector.stderrSnapshot(), encoding: .utf8) ?? ""
+
         if !allowNonZeroExit && process.terminationStatus != 0 {
-            let stderrData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
-            let stderr = String(data: stderrData, encoding: .utf8) ?? ""
             throw NSError(domain: "BuildToolErrorDetector", code: Int(process.terminationStatus), userInfo: [NSLocalizedDescriptionKey: stderr])
         }
-        
-        let stdoutData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
-        let stderrData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
-        
-        let stdout = String(data: stdoutData, encoding: .utf8) ?? ""
-        let stderr = String(data: stderrData, encoding: .utf8) ?? ""
-        
+
         return (stdout, stderr)
     }
     
@@ -359,20 +394,16 @@ public actor BuildToolErrorDetector {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/which")
         process.arguments = [binary]
-        
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        
-        try process.run()
-        process.waitUntilExit()
-        
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        let path = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        
+
+        // `which` output is small but using the shared helper keeps the
+        // pattern uniform and removes another deadlock-prone call site.
+        let (stdout, _) = try ProcessIO.runCapturing(process)
+        let path = stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+
         guard !path.isEmpty else {
             throw NSError(domain: "BuildToolErrorDetector", code: -1, userInfo: [NSLocalizedDescriptionKey: "\(binary) not found in PATH"])
         }
-        
+
         return URL(fileURLWithPath: path)
     }
     
