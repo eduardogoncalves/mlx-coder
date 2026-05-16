@@ -967,7 +967,7 @@ private func helpLines() -> [String] {
         "  /ask [question] ask a quick side question without changing main context",
         "  /merge-approval run merge approval flow",
         "  /gittree run git tree flow",
-        "  /vison  show vision-load status for this session (alias: /vision)",
+        "  /vision show vision-load status for this session (alias: /vison)",
         "  /quit    exit the TUI",
         "  ! <cmd>  run a shell command and keep output in transcript/context",
         "  !!<cmd>  run a shell command without adding output to transcript/context",

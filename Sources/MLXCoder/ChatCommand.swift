@@ -272,6 +272,8 @@ struct ChatCommand: AsyncParsableCommand {
             }
             if args.vision {
                 modelConfigs = modelConfigs.map { config in
+                    // Keep labels idempotent in case an existing model name already
+                    // includes the marker (or this list is rebuilt multiple times).
                     guard !config.label.contains("👁") else { return config }
                     return AppConfig.ModelConfig(id: config.id, label: "\(config.label) 👁")
                 }
@@ -819,7 +821,7 @@ func printREPLHelp() {
       \u{001B}[32m/merge-approval\u{001B}[0m Trigger the "Awaiting approval before merge" flow
       \u{001B}[32m/gittree\u{001B}[0m       List git worktrees and switch workspace/branch to one
       \u{001B}[32m/sandbox\u{001B}[0m       Toggle macOS Seatbelt sandbox for shell commands
-      \u{001B}[32m/vison\u{001B}[0m         Show vision-load status for this session (alias: /vision)
+      \u{001B}[32m/vision\u{001B}[0m        Show vision-load status for this session (alias: /vison)
       \u{001B}[32m/voice, Ctrl+V\u{001B}[0m  Voice input (STT) — fills transcription into input box for editing
       \u{001B}[32m/voice-locale [id]\u{001B}[0m Set STT language (no arg = list all available locales)
       \u{001B}[32mCtrl+J, Option+Enter, \\+Enter\u{001B}[0m Insert newline in input box
