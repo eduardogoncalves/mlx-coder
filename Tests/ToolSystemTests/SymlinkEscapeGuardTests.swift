@@ -64,8 +64,9 @@ final class SymlinkEscapeGuardTests: XCTestCase {
         )
     }
 
-    /// A bare `cd` resets CWD to home (unknown), so the subsequent `ln -s`
-    /// check is deferred to the post-execution sweep (no false-positive block).
+    /// A bare `cd` goes to home -- we can't determine the new CWD statically,
+    /// so the subsequent `ln -s` check is skipped (falls back to the
+    /// post-execution sweep). This must not produce a false-positive block.
     func testBareCdSkipsLnCheck() {
         let error = SymlinkEscapeGuard.checkLnCommand(
             "cd && ln -s ../etc link",
