@@ -113,10 +113,12 @@ extension AgentLoop {
         }
 
         // Reject command flags that mutate the filesystem even on otherwise
-        // read-only commands (e.g. `find . -delete`, `find . -exec rm {} +`,
-        // `grep --recursive ... -l ...` is fine, but `xargs rm` would be
-        // chained via pipe and already blocked above). Tokens are checked
-        // whole-word to avoid blocking innocent substrings (e.g. a file path
+        // read-only commands. Each token below either deletes (`-delete`),
+        // spawns another mutating command (`-exec`, `-execdir`, `-ok`,
+        // `-okdir`), or writes its results into an attacker-controlled file
+        // outside of any redirection check (`-fprint`, `-fprintf`, `-fls`
+        // take a destination filename argument). Tokens are checked whole
+        // word to avoid blocking innocent substrings (e.g. a file path
         // called "delete-old").
         let mutatingTokens: Set<String> = [
             "-delete",

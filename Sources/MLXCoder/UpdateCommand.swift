@@ -266,7 +266,12 @@ struct UpdateCommand: AsyncParsableCommand {
         }
 
         // pkgutil prints e.g. "Status: signed by a developer certificate issued by Apple for distribution"
-        // or "Status: signed Apple Software".
+        // (Developer ID-signed installers on modern macOS) or, for Apple's own
+        // packages, "Status: signed Apple Software" / "signed by a certificate
+        // trusted by Mac OS X" (the latter is legacy branding still emitted
+        // on some packages). We accept all three; any other status — including
+        // "no signature", "broken", or distrust strings — falls through to the
+        // refusal path below.
         let acceptableStatuses = [
             "signed by a developer certificate issued by Apple",
             "signed Apple Software",
@@ -284,6 +289,17 @@ struct UpdateCommand: AsyncParsableCommand {
 /// could swap the downloaded `.pkg` payload before `sudo installer` runs it.
 private final class GitHubRedirectGuard: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
     private static let allowedHosts: Set<String> = [
+        // Public GitHub web + asset hosts. GitHub redirects release-asset
+        // download URLs through some of these depending on age and region,
+        // so each must be in the trust set:
+        //   - github.com / api.github.com: the canonical release-metadata
+        //     endpoints; the initial URL handed to us comes from here.
+        //   - objects.githubusercontent.com: legacy raw-content / large-file
+        //     storage backend that release-asset URLs may 302 to.
+        //   - release-assets.githubusercontent.com: current dedicated host
+        //     for `/releases/download/...` payloads.
+        //   - codeload.github.com: source-archive endpoint; included for
+        //     completeness so a future archive-download path doesn't break.
         "github.com",
         "api.github.com",
         "objects.githubusercontent.com",

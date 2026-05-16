@@ -196,13 +196,10 @@ public final class StreamingToolCallWriter: @unchecked Sendable {
                     // Check if this is a content-heavy tool call we should stream
                     if let (key, _) = detectContentField(buffer) {
                         if let (path, toolName) = extractPathAndArgs(buffer, contentKey: key) {
-                            let safeName = path.replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: ".", with: "_")
-                            // Append a per-call UUID so the filename is not
-                            // statically predictable from the workspace path.
-                            // Combined with 0700 on tmpDir and 0600 on the
-                            // file this defeats the symlink-overwrite TOCTOU
-                            // against shared temp directories.
-                            let tmpFile = tmpDir.appendingPathComponent("\(safeName)-\(UUID().uuidString).tmp")
+                            // Per-call UUID-suffixed name with 0o700 dir +
+                            // 0o600 file defeats predictable-path symlink
+                            // overwrite. See `makeTmpFile(forPath:)`.
+                            let tmpFile = makeTmpFile(forPath: path)
                             FileManager.default.createFile(
                                 atPath: tmpFile.path,
                                 contents: nil,
@@ -333,10 +330,8 @@ public final class StreamingToolCallWriter: @unchecked Sendable {
             // Content was streamed to tmp during generation, but we didn't catch it
             // This means the content was small enough to fit in the buffer before
             // we detected the closing tag. Parse it normally.
-            let safeName = path.replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: ".", with: "_")
-            // UUID suffix mirrors the streaming path above to avoid
-            // statically-predictable temp filenames (CWE-377).
-            let tmpFile = tmpDir.appendingPathComponent("\(safeName)-\(UUID().uuidString).tmp")
+            // UUID-suffixed name matches the streaming path for symmetry.
+            let tmpFile = makeTmpFile(forPath: path)
 
             if let content = arguments[contentKey] as? String {
                 try? content.write(to: tmpFile, atomically: true, encoding: .utf8)
@@ -420,6 +415,20 @@ public final class StreamingToolCallWriter: @unchecked Sendable {
     }
 
     // MARK: - Helpers
+
+    /// Constructs a per-call temp-file URL under `tmpDir`.
+    ///
+    /// The filename mangles the user-supplied target `path` (so logs are
+    /// debuggable) but appends a fresh UUID and `.tmp` extension. Combined
+    /// with the 0o700 perms on `tmpDir` and the 0o600 perms callers set on
+    /// the file itself, this defeats predictable-path symlink-overwrite
+    /// attacks (CWE-377) by other local users on shared temp filesystems.
+    private func makeTmpFile(forPath path: String) -> URL {
+        let safeName = path
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: ".", with: "_")
+        return tmpDir.appendingPathComponent("\(safeName)-\(UUID().uuidString).tmp")
+    }
 
     private func trailingPossibleTagPrefix(in text: String, for tag: String) -> String {
         guard !text.isEmpty else { return "" }

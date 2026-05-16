@@ -190,9 +190,9 @@ public struct BashTool: Tool {
         // Defence in depth: the output-file path is interpolated into a
         // single-quoted shell redirect below. A poisoned `TMPDIR` (which the
         // parent inherits and is read by `FileManager.temporaryDirectory`)
-        // could otherwise inject shell metacharacters. Reject any path
-        // containing characters that would break out of the single-quote
-        // wrapper.
+        // could otherwise inject shell metacharacters. We reject any path
+        // containing the single quote (which closes the redirect quoting),
+        // newline / CR (which start a new shell command), or NUL.
         let unsafeChars: Set<Character> = ["'", "\n", "\r", "\0"]
         guard !outputFile.path.contains(where: { unsafeChars.contains($0) }) else {
             return .error("Refusing to launch background job: temporary directory path is unsafe for shell quoting")

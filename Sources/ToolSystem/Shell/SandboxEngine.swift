@@ -45,14 +45,23 @@ public struct SandboxEngine: Sendable {
     /// `(subpath "...")` literal and either neutralise the sandbox or inject
     /// new rules. Callers that receive `false` should reject the request
     /// rather than weakening the sandbox.
+    ///
+    /// The forbidden set also includes shell metacharacters (`'`, `` ` ``,
+    /// `$`). `wrap(command:workspaceRoot:)` does single-quote-escape its
+    /// inputs, but two consecutive injection points (the inner profile and
+    /// the outer `/bin/zsh -c '…'`) plus the historical pattern of callers
+    /// re-interpolating workspace paths into shell strings (see
+    /// `BashTool.executeBackground`) means we apply defence in depth here.
     public static func isWorkspaceRootSandboxSafe(_ workspaceRoot: String) -> Bool {
-        // Disallow characters that have special meaning inside Seatbelt
-        // S-expression string literals or the surrounding shell quoting.
-        // The set is intentionally conservative: real macOS workspace roots
-        // never contain these characters in practice.
-        let forbidden: Set<Character> = ["\"", "\\", "(", ")", "\n", "\r", ";", "'", "`", "$"]
-        return !workspaceRoot.contains(where: { forbidden.contains($0) })
+        return !workspaceRoot.contains(where: { unsafeWorkspaceRootCharacters.contains($0) })
     }
+
+    /// Shared forbidden-character set used by both `isWorkspaceRootSandboxSafe`
+    /// and `BashTool.executeBackground`'s temp-path validator so the two
+    /// validation points cannot drift apart.
+    public static let unsafeWorkspaceRootCharacters: Set<Character> = [
+        "\"", "\\", "(", ")", "\n", "\r", ";", "'", "`", "$"
+    ]
     
     /// Generates a Seatbelt profile string.
     private func generateProfile(workspaceRoot: String) -> String {
