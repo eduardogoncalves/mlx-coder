@@ -199,7 +199,7 @@ public actor HybridMemoryProvider: MemoryProvider {
             logger?("memory.reflect: \(outcomes.count) outcome(s) processed")
         }
         pendingReflections.append(task)
-        Task {
+        _ = Task {
             _ = await task.value
             await removePendingReflection(task)
         }

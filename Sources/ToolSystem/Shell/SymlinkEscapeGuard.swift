@@ -148,7 +148,7 @@ public enum SymlinkEscapeGuard {
     /// are unlikely to contain agent-created symlinks. Skipping them avoids
     /// significant per-command overhead on large workspaces.
     private static let knownHeavyDirectories: Set<String> = [
-        "node_modules", "Pods", "DerivedData", "dist", "vendor",
+        "node_modules", "Pods", "DerivedData", "dist", "vendor"
     ]
 
     /// Extract unique workspace-relative directory paths explicitly referenced
