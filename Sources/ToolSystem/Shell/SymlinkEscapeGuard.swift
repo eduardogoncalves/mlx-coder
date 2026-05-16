@@ -41,13 +41,14 @@ public enum SymlinkEscapeGuard {
             guard let first = tokens.first else { continue }
 
             if first == "cd" {
-                // `cd -` is the only case `tokens[1]` does not represent a
-                // resolvable path; bare `cd` (no argument) is handled by the
-                // outer condition below. All other forms — including `cd ~`,
-                // `cd ~/path`, absolute paths, and relative paths — are
-                // resolved by `resolveTarget`; tilde-expansion is performed
-                // inside `resolveTarget` via `expandingTildeInPath`, so home-
-                // directory targets (which are typically outside the workspace)
+                // `cd -` is the only case where `tokens[1]` exists but does
+                // not represent a statically resolvable path (it is the shell
+                // special that switches to $OLDPWD). Bare `cd` (no argument)
+                // is handled separately below. All other forms — including
+                // `cd ~`, `cd ~/path`, absolute paths, and relative paths —
+                // are resolved by `resolveTarget`; tilde-expansion is
+                // performed inside `resolveTarget` via `expandingTildeInPath`,
+                // so home-directory targets (typically outside the workspace)
                 // will naturally fail the `pathIsInside` check and set
                 // `trackedCWD` to nil without any special-casing here.
                 if tokens.count >= 2, tokens[1] != "-" {
