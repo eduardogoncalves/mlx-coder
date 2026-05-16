@@ -310,10 +310,21 @@ public struct BashTool: Tool {
 
 // MARK: - Pipe drain helper
 
-/// Thread-safe collector used by `BashTool.executeSync` to drain stdout/stderr
-/// concurrently with the child process. Without concurrent draining a child
-/// that writes more than the pipe buffer (~16-64 KiB on macOS) blocks in the
-/// kernel and `waitUntilExit` never returns.
+/// Thread-safe collector used by `BashTool.executeSync`, `GitService.drainAndWait`,
+/// and `UpdateCommand.verifyPackageSignature` to drain stdout/stderr concurrently
+/// with the child process. Without concurrent draining, a child that writes
+/// more than the pipe buffer (~16-64 KiB on macOS) blocks in the kernel and
+/// `waitUntilExit` never returns.
+///
+/// All three call sites live in the same `MLXCoder` target (the only
+/// executable target in `Package.swift`), so this collector is shared at
+/// internal access level without needing public exposure.
+///
+/// `@unchecked Sendable` is intentional: the only mutable state is two `Data`
+/// buffers guarded by an `NSLock`. `NSLock` is a `Sendable`-compatible
+/// primitive on all supported platforms and is sufficient here — we don't
+/// need the lower overhead of `OSAllocatedUnfairLock` because the lock is
+/// taken at most a few times per `availableData` event.
 final class PipeOutputCollector: @unchecked Sendable {
     private let lock = NSLock()
     private var stdout = Data()

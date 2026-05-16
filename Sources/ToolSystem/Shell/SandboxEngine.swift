@@ -56,9 +56,16 @@ public struct SandboxEngine: Sendable {
         return !workspaceRoot.contains(where: { unsafeWorkspaceRootCharacters.contains($0) })
     }
 
-    /// Shared forbidden-character set used by both `isWorkspaceRootSandboxSafe`
-    /// and `BashTool.executeBackground`'s temp-path validator so the two
-    /// validation points cannot drift apart.
+    /// Shared forbidden-character set used by `isWorkspaceRootSandboxSafe`
+    /// to validate workspace paths before they are embedded in a Seatbelt
+    /// profile.
+    ///
+    /// Note: `BashTool.executeBackground` uses a deliberately *narrower*
+    /// validator (`'`, newline, CR, NUL) because it only interpolates the
+    /// path inside a single-quoted shell redirect, not inside an
+    /// S-expression. The two validators are intentionally not unified so
+    /// each context can stay as permissive as its quoting allows while
+    /// blocking the characters that can actually break out.
     public static let unsafeWorkspaceRootCharacters: Set<Character> = [
         "\"", "\\", "(", ")", "\n", "\r", ";", "'", "`", "$"
     ]

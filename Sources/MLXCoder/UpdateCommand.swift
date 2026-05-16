@@ -287,6 +287,10 @@ struct UpdateCommand: AsyncParsableCommand {
 /// URLSession delegate that refuses HTTP redirects whose host is not on the
 /// known GitHub release-asset trust set. Without this, a hijacked redirect
 /// could swap the downloaded `.pkg` payload before `sudo installer` runs it.
+///
+/// `@unchecked Sendable` is safe here: the delegate holds no mutable state —
+/// the only field is the static `allowedHosts: Set<String>` which is
+/// initialised once and only read.
 private final class GitHubRedirectGuard: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
     private static let allowedHosts: Set<String> = [
         // Public GitHub web + asset hosts. GitHub redirects release-asset
