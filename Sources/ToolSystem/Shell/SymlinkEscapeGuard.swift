@@ -28,9 +28,30 @@ public enum SymlinkEscapeGuard {
         let segments = splitIntoSegments(command)
         let normalizedRoot = canonicalize(workspaceRoot)
 
+        // Track the effective CWD across chained segments so that a command
+        // like `cd subdir && ln -s ../etc link` correctly evaluates `../etc`
+        // relative to `workspaceRoot/subdir` rather than `workspaceRoot`.
+        // `nil` means we saw a `cd` whose destination we couldn't statically
+        // determine (e.g. bare `cd`, `cd -`, or a path outside the workspace);
+        // in that case we skip the `ln` check and rely on the post-exec sweep.
+        var trackedCWD: String? = normalizedRoot
+
         for segment in segments {
             let tokens = tokenize(segment)
-            guard tokens.first == "ln" else { continue }
+            guard let first = tokens.first else { continue }
+
+            if first == "cd" {
+                if tokens.count >= 2, tokens[1] != "-" {
+                    let newDir = resolveTarget(tokens[1], workspaceRoot: trackedCWD ?? normalizedRoot)
+                    trackedCWD = pathIsInside(newDir, root: normalizedRoot) ? newDir : nil
+                } else {
+                    // bare `cd` or `cd -` — can't determine destination statically
+                    trackedCWD = nil
+                }
+                continue
+            }
+
+            guard first == "ln", let cwd = trackedCWD else { continue }
 
             // Parse `ln` flags + positional arguments. We only block when the
             // user explicitly requested a symlink with -s/--symbolic.
@@ -61,7 +82,7 @@ public enum SymlinkEscapeGuard {
             guard symbolic else { continue }
             guard let target = positional.first else { continue }
 
-            let resolvedTarget = resolveTarget(target, workspaceRoot: normalizedRoot)
+            let resolvedTarget = resolveTarget(target, workspaceRoot: cwd)
             if !pathIsInside(resolvedTarget, root: normalizedRoot) {
                 return """
                     Refused to create symlink: target '\(target)' resolves to \

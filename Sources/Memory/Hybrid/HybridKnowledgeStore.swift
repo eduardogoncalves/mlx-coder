@@ -538,8 +538,6 @@ public actor HybridKnowledgeStore {
                 try linkSupersede(winnerID: winner.id, loserID: loser.id)
                 supersededIDs.insert(loser.id)
                 merged += 1
-                // If `a` lost, stop comparing it further: its vector is now
-                // defunct and any further pair (a, k) would be invalid.
                 // This consolidation pass is intentionally single-pass: we do
                 // not continue from the winning `b` to compare `(b, k)` for
                 // later `k` here. Those comparisons are deferred until `b` is
