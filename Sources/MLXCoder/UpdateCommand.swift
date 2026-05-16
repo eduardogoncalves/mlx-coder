@@ -318,7 +318,10 @@ private final class GitHubRedirectGuard: NSObject, URLSessionTaskDelegate, @unch
         newRequest request: URLRequest,
         completionHandler: @escaping (URLRequest?) -> Void
     ) {
-        guard let host = request.url?.host?.lowercased() else {
+        // `URL.host(percentEncoded:)` is the non-deprecated accessor (the
+        // bare `.host` property was deprecated in macOS 13). We don't need
+        // percent-encoding to compare against the static allowlist.
+        guard let host = request.url?.host(percentEncoded: false)?.lowercased() else {
             fputs("update: refused redirect to URL with no host\n", stderr)
             completionHandler(nil)
             return

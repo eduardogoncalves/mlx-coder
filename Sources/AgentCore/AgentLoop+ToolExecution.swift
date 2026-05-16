@@ -134,10 +134,20 @@ extension AgentLoop {
             "-ok",
             "-okdir",
         ]
-        let quoteChars = CharacterSet(charactersIn: "'\"")
-        let tokens = lowered
+        let quoteChars: Set<Character> = ["'", "\""]
+        let tokens: [String] = lowered
             .split(whereSeparator: { $0.isWhitespace })
-            .map { String($0).trimmingCharacters(in: quoteChars) }
+            .map { rawToken in
+                // Only strip matching leading/trailing quotes so legitimate
+                // paths containing a single embedded quote (e.g.
+                // `some'file.txt`) are not silently normalised.
+                let s = String(rawToken)
+                guard let first = s.first, let last = s.last,
+                      s.count >= 2, first == last, quoteChars.contains(first) else {
+                    return s
+                }
+                return String(s.dropFirst().dropLast())
+            }
         if tokens.contains(where: { mutatingTokens.contains($0) }) {
             return false
         }
