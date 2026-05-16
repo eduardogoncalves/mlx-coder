@@ -80,37 +80,110 @@ public enum SymlinkEscapeGuard {
     /// Walk the workspace and remove any symlinks whose resolved target is
     /// outside `workspaceRoot`. This is best-effort defense in depth for cases
     /// where the symlink was created by a tool we can't statically inspect.
-    public static func removeEscapingSymlinks(in workspaceRoot: String) {
+    ///
+    /// When `command` is provided the sweep is limited to workspace directories
+    /// explicitly mentioned in that command, avoiding a full recursive walk on
+    /// every shell call. If no in-workspace directories can be extracted from
+    /// the command, the entire workspace is enumerated but known large
+    /// build/dependency trees (e.g. `node_modules`, `Pods`) are skipped.
+    public static func removeEscapingSymlinks(
+        in workspaceRoot: String,
+        command: String? = nil
+    ) {
         let fm = FileManager.default
         let normalizedRoot = canonicalize(workspaceRoot)
 
-        guard let enumerator = fm.enumerator(
-            at: URL(filePath: normalizedRoot),
-            includingPropertiesForKeys: [.isSymbolicLinkKey],
-            options: [.skipsHiddenFiles],
-            errorHandler: { _, _ in true }
-        ) else {
-            return
+        // Determine which directories to scan. Narrowing the sweep to paths the
+        // command explicitly touched prevents walking large trees like
+        // `node_modules` or `Pods` on every shell invocation.
+        let scanRoots: [URL]
+        if let command,
+           let touched = directoriesFromCommand(command, workspaceRoot: normalizedRoot),
+           !touched.isEmpty {
+            scanRoots = touched.map { URL(filePath: $0) }
+        } else {
+            scanRoots = [URL(filePath: normalizedRoot)]
         }
 
-        for case let url as URL in enumerator {
-            let values = try? url.resourceValues(forKeys: [.isSymbolicLinkKey])
-            guard values?.isSymbolicLink == true else { continue }
+        for scanRoot in scanRoots {
+            guard let enumerator = fm.enumerator(
+                at: scanRoot,
+                includingPropertiesForKeys: [.isSymbolicLinkKey],
+                options: [.skipsHiddenFiles],
+                errorHandler: { _, _ in true }
+            ) else {
+                continue
+            }
 
-            // Resolve the symlink one step (so we get the literal target).
-            guard let destination = try? fm.destinationOfSymbolicLink(
-                atPath: url.path
-            ) else { continue }
+            for case let url as URL in enumerator {
+                // Skip well-known large build/dependency directories to avoid
+                // per-command overhead on big workspaces. Symlinks inside these
+                // trees are managed by the package manager, not the agent.
+                if knownHeavyDirectories.contains(url.lastPathComponent) {
+                    enumerator.skipDescendants()
+                    continue
+                }
 
-            let resolved = resolveTarget(
-                destination,
-                workspaceRoot: url.deletingLastPathComponent().path
-            )
+                let values = try? url.resourceValues(forKeys: [.isSymbolicLinkKey])
+                guard values?.isSymbolicLink == true else { continue }
 
-            if !pathIsInside(resolved, root: normalizedRoot) {
-                try? fm.removeItem(at: url)
+                // Resolve the symlink one step (so we get the literal target).
+                guard let destination = try? fm.destinationOfSymbolicLink(
+                    atPath: url.path
+                ) else { continue }
+
+                let resolved = resolveTarget(
+                    destination,
+                    workspaceRoot: url.deletingLastPathComponent().path
+                )
+
+                if !pathIsInside(resolved, root: normalizedRoot) {
+                    try? fm.removeItem(at: url)
+                }
             }
         }
+    }
+
+    /// Well-known directories that are managed by external package managers and
+    /// are unlikely to contain agent-created symlinks. Skipping them avoids
+    /// significant per-command overhead on large workspaces.
+    private static let knownHeavyDirectories: Set<String> = [
+        "node_modules", "Pods", "DerivedData", "dist", "vendor",
+    ]
+
+    /// Extract unique workspace-relative directory paths explicitly referenced
+    /// in `command`. Returns `nil` when no in-workspace paths can be
+    /// identified, signalling the caller to fall back to a full workspace scan.
+    private static func directoriesFromCommand(
+        _ command: String,
+        workspaceRoot: String
+    ) -> [String]? {
+        let fm = FileManager.default
+        var seen: Set<String> = []
+        var dirs: [String] = []
+
+        for segment in splitIntoSegments(command) {
+            for token in tokenize(segment) {
+                // Skip option flags and bare words without path separators or
+                // tilde expansion — they are unlikely to be file-system paths.
+                guard !token.hasPrefix("-"),
+                      token.contains("/") || token.hasPrefix("~")
+                else { continue }
+
+                let resolved = resolveTarget(token, workspaceRoot: workspaceRoot)
+                guard pathIsInside(resolved, root: workspaceRoot) else { continue }
+
+                var isDir: ObjCBool = false
+                let exists = fm.fileExists(atPath: resolved, isDirectory: &isDir)
+                let dir = (exists && isDir.boolValue)
+                    ? resolved
+                    : (resolved as NSString).deletingLastPathComponent
+                guard dir.hasPrefix(workspaceRoot), seen.insert(dir).inserted else { continue }
+                dirs.append(dir)
+            }
+        }
+
+        return dirs.isEmpty ? nil : dirs
     }
 
     // MARK: - Helpers

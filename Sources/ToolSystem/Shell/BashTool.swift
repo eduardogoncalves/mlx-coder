@@ -78,9 +78,12 @@ public struct BashTool: Tool {
 
         // Post-execution sweep: remove any newly-created symlinks within the
         // workspace that point outside it (defense in depth against ln/symlink
-        // escapes via tools we can't statically parse).
+        // escapes via tools we can't statically parse). Passing the command
+        // allows the sweep to be scoped to directories the command touched,
+        // avoiding a full workspace walk on every shell call.
         SymlinkEscapeGuard.removeEscapingSymlinks(
-            in: permissions.effectiveWorkspaceRoot
+            in: permissions.effectiveWorkspaceRoot,
+            command: command
         )
 
         return result
