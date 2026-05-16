@@ -185,6 +185,93 @@ final class TodoToolTests: XCTestCase {
         XCTAssertEqual(result.content, "1. [ ] first")
     }
 
+    func testReadNormalizesOrderedMarkdownTodoFormat() async throws {
+        let workspace = try makeWorkspace()
+        defer { try? FileManager.default.removeItem(at: workspace) }
+
+        try "1. [ ] first".write(
+            to: workspace.appendingPathComponent(".mlx-coder-todo"),
+            atomically: true,
+            encoding: .utf8
+        )
+
+        let tool = TodoTool(workspaceRoot: workspace.path)
+        let result = try await tool.execute(arguments: ["action": "read"])
+
+        XCTAssertFalse(result.isError)
+        XCTAssertEqual(result.content, "1. [ ] first")
+    }
+
+    func testCompleteHandlesOrderedMarkdownTodoFormat() async throws {
+        let workspace = try makeWorkspace()
+        defer { try? FileManager.default.removeItem(at: workspace) }
+
+        let todoFile = workspace.appendingPathComponent(".mlx-coder-todo")
+        try "1. [ ] first".write(to: todoFile, atomically: true, encoding: .utf8)
+
+        let tool = TodoTool(workspaceRoot: workspace.path)
+        let result = try await tool.execute(arguments: ["action": "complete", "item": 1])
+
+        XCTAssertFalse(result.isError)
+        XCTAssertEqual(try String(contentsOf: todoFile, encoding: .utf8), "[x] first")
+    }
+
+    func testCompleteWarnsWhenPersistFails() async throws {
+        let workspace = try makeWorkspace()
+        defer { try? FileManager.default.removeItem(at: workspace) }
+
+        try "[ ] first".write(
+            to: workspace.appendingPathComponent(".native-agent-todo.md"),
+            atomically: true,
+            encoding: .utf8
+        )
+        // Force saveTodos to fail writes to the new file path while still
+        // allowing loadTodos to read the legacy fallback content above.
+        // Note: placing a *directory* at the `.mlx-coder-todo` path means every
+        // subsequent saveTodos call in this test will also fail — that is
+        // intentional: we want a persistently broken write path for the duration
+        // of the test. The workspace is torn down by the `defer` above, so this
+        // does not pollute other tests.
+        try FileManager.default.createDirectory(
+            at: workspace.appendingPathComponent(".mlx-coder-todo"),
+            withIntermediateDirectories: false
+        )
+
+        let tool = TodoTool(workspaceRoot: workspace.path)
+        let result = try await tool.execute(arguments: ["action": "complete", "item": 1])
+
+        XCTAssertFalse(result.isError)
+        XCTAssertTrue(result.content.contains("warning: failed to persist todo file changes"))
+    }
+
+    func testRemoveWarnsWhenPersistFails() async throws {
+        let workspace = try makeWorkspace()
+        defer { try? FileManager.default.removeItem(at: workspace) }
+
+        try "[ ] first".write(
+            to: workspace.appendingPathComponent(".native-agent-todo.md"),
+            atomically: true,
+            encoding: .utf8
+        )
+        // Force saveTodos to fail writes to the new file path while still
+        // allowing loadTodos to read the legacy fallback content above.
+        // Note: placing a *directory* at the `.mlx-coder-todo` path means every
+        // subsequent saveTodos call in this test will also fail — that is
+        // intentional: we want a persistently broken write path for the duration
+        // of the test. The workspace is torn down by the `defer` above, so this
+        // does not pollute other tests.
+        try FileManager.default.createDirectory(
+            at: workspace.appendingPathComponent(".mlx-coder-todo"),
+            withIntermediateDirectories: false
+        )
+
+        let tool = TodoTool(workspaceRoot: workspace.path)
+        let result = try await tool.execute(arguments: ["action": "remove", "item": 1])
+
+        XCTAssertFalse(result.isError)
+        XCTAssertTrue(result.content.contains("warning: failed to persist todo file changes"))
+    }
+
     private func makeWorkspace() throws -> URL {
         let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
             .appendingPathComponent(".build", isDirectory: true)

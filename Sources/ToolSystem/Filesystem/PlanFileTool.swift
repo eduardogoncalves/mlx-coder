@@ -2,13 +2,14 @@ import Foundation
 
 public struct PlanFileTool: Tool {
     static let planFileName = "PLAN.MD"
+    private static let validActions = ["write", "edit"]
 
     public let name = "plan_file"
-    public let description = "Create or update the workspace-root PLAN.MD without leaving plan mode. Use action 'write' to create or replace the full document, or 'edit' for an exact search/replace update."
+    public let description = "Create or update the workspace-root PLAN.MD without leaving plan mode. Valid actions: \(Self.validActionsDescription). Use 'write' to create or replace the full document, and 'edit' for an exact search/replace update."
     public let parameters = JSONSchema(
         type: "object",
         properties: [
-            "action": PropertySchema(type: "string", description: "Operation to perform on PLAN.MD", enumValues: ["write", "edit"]),
+            "action": PropertySchema(type: "string", description: "Operation to perform on PLAN.MD", enumValues: Self.validActions),
             "content": PropertySchema(type: "string", description: "Full PLAN.MD content to write when action is 'write'"),
             "old_text": PropertySchema(type: "string", description: "Exact text to replace when action is 'edit'"),
             "new_text": PropertySchema(type: "string", description: "Replacement text when action is 'edit'")
@@ -44,7 +45,14 @@ public struct PlanFileTool: Tool {
             return FileMutationSupport.editContent(in: Self.planFileName, oldText: oldText, newText: newText, permissions: permissions)
 
         default:
-            return .error("Unknown action: \(action). Use 'write' or 'edit'.")
+            return .error("Unknown action: \(action). Use \(Self.validActionsDescription).")
         }
+    }
+
+    private static var validActionsDescription: String {
+        let quoted = validActions.map { "'\($0)'" }
+        guard let last = quoted.last else { return "(none)" }
+        if quoted.count == 1 { return last }
+        return quoted.dropLast().joined(separator: ", ") + " or " + last
     }
 }

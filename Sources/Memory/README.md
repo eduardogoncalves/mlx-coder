@@ -199,6 +199,84 @@ swift test --filter MemoryTests
 4. **Export/import** — `/memory export memory-backup.json` for portability
 5. **Summarization** — Use LLM to condense verbose session_state entries
 
+## Hybrid Memory Stack (`Hybrid/`)
+
+The lexical-only `KnowledgeStore` above is the **stable v1**. A second-generation
+**hybrid retrieval + reflection** stack lives alongside it under
+`Sources/Memory/Hybrid/` and is intended to evolve mlx-coder into a
+self-improving agent without breaking existing tools.
+
+### Components
+
+| File | Role |
+|------|------|
+| `HybridSchema.swift` | DDL for `memory_documents`, `memory_metadata`, `memory_fts`, `memory_embeddings` (FTS5 + cosine over BLOBs) |
+| `HybridDocument.swift` | Data model: `MemoryType` (episodic / semantic / working), `KnowledgeKind`, `DocumentStatus`, `MemoryDocument`, `ScoredDocument`, `RetrievalScope` |
+| `EmbeddingProvider.swift` | `EmbeddingProvider` protocol + zero-dependency `HashEmbeddingProvider` (deterministic SHA-256 trigram hashing). Pluggable for an MLX-backed encoder later. `EmbeddingBlob` packs Float32 little-endian to stay compatible with `sqlite-vec`'s `vec0` format |
+| `RankFusion.swift` | Reciprocal Rank Fusion + weighted top-N over multiple ranked lists |
+| `Reranker.swift` | `Reranker` protocol + `LexicalReranker` (token Jaccard + entity overlap + freshness + confidence − length penalty), with a time-budget guard |
+| `HybridKnowledgeStore.swift` | `actor` orchestrating `write`, `retrieve`, `consolidate`, `prune`, `stats` |
+| `Reflector.swift` | Self-improvement loop: `ReflectionTrigger` (turn / cadence / failure / userFeedback / sessionEnd) → `CandidateExtractor` → `HybridKnowledgeStore.write` (append vs supersede) |
+
+### Retrieval pipeline
+
+```
+query
+  ├── FTS5 top-N        (BM25, scoped to project_root + memory_type + kind)
+  ├── vec cosine top-N  (in-process; sqlite-vec drop-in via the BLOB layout)
+  ├── RRF / weighted fusion
+  └── Reranker top-K (with time budget)
+```
+
+Tuning knobs live on `HybridKnowledgeStore.Config`
+(`weightLexical`, `weightSemantic`, `rrfK`, `rerankK`, `rerankBudget`,
+`nearDuplicateCosineThreshold`, `nearDuplicateTokenJaccardThreshold`).
+
+### Self-improvement loop
+
+`Reflector.reflect(_:)` is the entry point. The default `ReflectionCadence`
+mirrors Hermes' `memory.nudge_interval`:
+
+- `turnCompleted` is gated (no-op).
+- `cadence(everyN, currentCount)` fires when `currentCount % everyN == 0`.
+- `failure`, `userFeedback`, `sessionEnd` always fire.
+
+For each candidate, `HybridKnowledgeStore.write` decides:
+
+- **exact duplicate** (same `content_hash`) → no-op, refresh access counters,
+- **near-duplicate** (cosine ≥ 0.85 *and* Jaccard ≥ 0.7) and the new
+  candidate has *higher or equal* confidence → **supersede** (the older
+  doc's `status` becomes `superseded`, the new doc's `version` is bumped
+  and `supersedes_id` is linked),
+- otherwise → **append**.
+
+`sessionEnd` additionally runs a best-effort `consolidate` (cluster-level
+near-dup merge) and `prune` (working-memory TTL deletion + episodic
+archive).
+
+### Why no `sqlite-vec` SPM dep yet
+
+The plan calls out `sqlite-vec` as the canonical vector backend. The
+existing repo constraint is *zero new SPM dependencies*; pulling
+`sqlite-vec` requires either a runtime extension load or a vendored C
+build. The current implementation stores embeddings as Float32
+little-endian BLOBs in a regular SQLite table — exactly the layout
+`vec0` uses — so swapping the table type for `vec0` is a localized
+migration in `HybridSchema.swift` + the `vectorSearch` helper.
+
+### Tests
+
+`Tests/MemoryTests/Hybrid/` covers:
+
+- write / exact-dup / near-dup supersede paths,
+- FTS5 token escaping (so operator chars like `=` don't crash MATCH),
+- prune (working TTL) + consolidate (cluster merge),
+- RRF semantics + tiebreak determinism,
+- reranker token-overlap ordering + time-budget guard,
+- reflector cadence gating + always-on triggers + write-through.
+
+Run with `swift test --filter MemoryTests`.
+
 ## References
 
 - Inspired by [Momento](https://github.com/TheTom/momento)

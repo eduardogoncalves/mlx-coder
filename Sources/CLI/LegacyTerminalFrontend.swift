@@ -112,7 +112,7 @@ public final class LegacyTerminalFrontend: AgentFrontend, @unchecked Sendable {
                 renderer.printError("Failed to save checkpoint: \(reason)")
             case .factSaved(let subject, _):
                 renderer.printStatus("Memory: saved fact for subject '\(subject)'")
-            case .factsListed(_, let lines), .searchResults(_, let lines), .status(let lines):
+            case .factsListed(_, _, let lines), .searchResults(_, _, let lines), .status(_, let lines):
                 for line in lines { renderer.printStatus(line) }
             case .undone(let msg):
                 renderer.printStatus(msg)

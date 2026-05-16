@@ -49,6 +49,11 @@ public actor AgentLoop {
     let useShadowContextForToolResults: Bool
     let hooks: HookPipeline
     let memoryPromptSection: String?
+    /// Optional pluggable long-term memory backend. When non-nil, AgentLoop
+    /// fires a best-effort `reflect(.turnCompleted)` at the end of every
+    /// turn so the provider can mine the conversation for new memories.
+    /// Defaults to nil, which preserves legacy behaviour (no reflection).
+    let memoryProvider: (any MemoryProvider)?
     let customizationPromptSection: String?
     let skillsMetadata: [SkillMetadata]
     var promptSectionTokenEstimates: [PromptSection: Int]
@@ -119,6 +124,7 @@ public actor AgentLoop {
         dryRun: Bool = false,
         hooks: HookPipeline = HookPipeline(),
         memoryPromptSection: String? = nil,
+        memoryProvider: (any MemoryProvider)? = nil,
         customizationPromptSection: String? = nil,
         skillsMetadata: [SkillMetadata] = [],
         promptSectionTokenEstimates: [PromptSection: Int] = [:],
@@ -144,6 +150,7 @@ public actor AgentLoop {
         self.useShadowContextForToolResults = useShadowContextForToolResults
         self.hooks = hooks
         self.memoryPromptSection = memoryPromptSection
+        self.memoryProvider = memoryProvider
         self.customizationPromptSection = customizationPromptSection
         self.skillsMetadata = skillsMetadata
         self.promptSectionTokenEstimates = promptSectionTokenEstimates
@@ -334,7 +341,25 @@ public actor AgentLoop {
                         }
                     }
                 }
-                
+
+                // Best-effort end-of-turn reflection. Fires on a detached
+                // task so the user-visible turn has already returned by the
+                // time embedding / extraction work runs. Errors are
+                // swallowed inside the provider — never re-thrown here.
+                // TODO: also wire per-turn `recallForTurn` injection once
+                // ConversationHistory supports a mutable system-prompt slot.
+                if let provider = memoryProvider {
+                    let snapshot = ReflectionInput(
+                        trigger: .turnCompleted(turnIndex: history.messages.count),
+                        projectRoot: projectWorkspaceRoot,
+                        recentAssistantText: [response],
+                        recentUserText: history.latestUserMessage.map { [$0] } ?? []
+                    )
+                    Task.detached(priority: .utility) { [provider] in
+                        await provider.reflect(snapshot)
+                    }
+                }
+
                 return
             }
 
@@ -666,7 +691,14 @@ public actor AgentLoop {
         
         var result: ToolResult
 
-        let targetPath = call.name == "plan_file" ? PlanFileTool.planFileName : extractPolicyTargetPath(from: call.arguments)
+        let targetPath: String? = if call.name == "plan_file" {
+            URL(fileURLWithPath: permissions.workspaceRoot)
+                .appendingPathComponent(PlanFileTool.planFileName)
+                .standardizedFileURL
+                .path
+        } else {
+            extractPolicyTargetPath(from: call.arguments)
+        }
         let policyDecision = permissions.evaluateToolPolicy(toolName: call.name, targetPath: targetPath)
         if case .denied(let denyReason) = policyDecision {
             let deniedResult = ToolResult.error(denyReason)
@@ -695,8 +727,10 @@ public actor AgentLoop {
         let allowReadOnlyBashInPlanMode = mode == .plan && isReadOnlyBashCall(call)
         
         let approval: (approved: Bool, suggestion: String?)
-        if call.name == "plan_file" {
+        if call.name == "plan_file" && mode == .plan {
             approval = (true, nil)
+        } else if call.name == "plan_file" {
+            approval = await askForToolApproval(name: call.name, arguments: call.arguments, isPlanMode: false)
         } else if isDestructive {
             await hooks.emit(.permissionRequest(toolName: call.name, isPlanMode: mode == .plan && !allowReadOnlyBashInPlanMode))
             if mode == .plan && !allowReadOnlyBashInPlanMode {

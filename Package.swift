@@ -25,6 +25,7 @@ let package = Package(
                 .product(name: "MLXLLM",        package: "mlx-swift-lm"),
                 .product(name: "MLXVLM",        package: "mlx-swift-lm"),
                 .product(name: "MLXLMCommon",   package: "mlx-swift-lm"),
+                .product(name: "MLXEmbedders",  package: "mlx-swift-lm"),
                 .product(name: "Hub",           package: "swift-transformers"),
                 .product(name: "Tokenizers",    package: "swift-transformers"),
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
