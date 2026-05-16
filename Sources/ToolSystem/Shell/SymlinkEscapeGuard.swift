@@ -42,8 +42,13 @@ public enum SymlinkEscapeGuard {
 
             if first == "cd" {
                 if tokens.count >= 2, tokens[1] != "-" {
-                    let newDir = resolveTarget(tokens[1], workspaceRoot: trackedCWD ?? normalizedRoot)
-                    trackedCWD = pathIsInside(newDir, root: normalizedRoot) ? newDir : nil
+                    // Only advance CWD tracking when we know where we are.
+                    // If trackedCWD is already nil (prior indeterminate cd),
+                    // we cannot meaningfully resolve the new path, so leave it nil.
+                    if let base = trackedCWD {
+                        let newDir = resolveTarget(tokens[1], workspaceRoot: base)
+                        trackedCWD = pathIsInside(newDir, root: normalizedRoot) ? newDir : nil
+                    }
                 } else {
                     // bare `cd` or `cd -` — can't determine destination statically
                     trackedCWD = nil

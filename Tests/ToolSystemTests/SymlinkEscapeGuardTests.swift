@@ -46,7 +46,7 @@ final class SymlinkEscapeGuardTests: XCTestCase {
         )
         XCTAssertNil(
             error,
-            "ln -s ../etc after cd subdir resolves to /workspace/etc (inside) — must be allowed"
+            "ln -s ../etc after cd subdir resolves to /workspace/etc (inside) -- must be allowed"
         )
     }
 
