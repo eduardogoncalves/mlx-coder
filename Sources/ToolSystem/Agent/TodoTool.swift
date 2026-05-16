@@ -169,23 +169,23 @@ public struct TodoTool: Tool {
     }
 
     private func stripOrderedListPrefix(_ todo: String) -> String {
-        let trimmed = todo.trimmingCharacters(in: .whitespaces)
-        guard !trimmed.isEmpty else { return todo }
-        var idx = trimmed.startIndex
-        while idx < trimmed.endIndex, trimmed[idx].isNumber {
-            idx = trimmed.index(after: idx)
+        let trimmedLeading = todo.drop(while: { $0.isWhitespace })
+        guard !trimmedLeading.isEmpty else { return todo }
+        var idx = trimmedLeading.startIndex
+        while idx < trimmedLeading.endIndex, trimmedLeading[idx].isNumber {
+            idx = trimmedLeading.index(after: idx)
         }
-        guard idx > trimmed.startIndex,
-              idx < trimmed.endIndex,
-              trimmed[idx] == "." else {
+        guard idx > trimmedLeading.startIndex,
+              idx < trimmedLeading.endIndex,
+              trimmedLeading[idx] == "." || trimmedLeading[idx] == ")" else {
             return todo
         }
-        idx = trimmed.index(after: idx)
-        while idx < trimmed.endIndex, trimmed[idx].isWhitespace {
-            idx = trimmed.index(after: idx)
+        idx = trimmedLeading.index(after: idx)
+        while idx < trimmedLeading.endIndex, trimmedLeading[idx].isWhitespace {
+            idx = trimmedLeading.index(after: idx)
         }
-        guard idx < trimmed.endIndex else { return todo }
-        return String(trimmed[idx...])
+        guard idx < trimmedLeading.endIndex else { return todo }
+        return String(trimmedLeading[idx...])
     }
 
     private func markTodoCompleted(_ todo: String) -> String {
