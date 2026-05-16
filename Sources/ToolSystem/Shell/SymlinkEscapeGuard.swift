@@ -41,16 +41,30 @@ public enum SymlinkEscapeGuard {
             guard let first = tokens.first else { continue }
 
             if first == "cd" {
+                // `cd -` is the only case `tokens[1]` does not represent a
+                // resolvable path; bare `cd` (no argument) is handled by the
+                // outer condition below. All other forms — including `cd ~`,
+                // `cd ~/path`, absolute paths, and relative paths — are
+                // resolved by `resolveTarget`; tilde-expansion is performed
+                // inside `resolveTarget` via `expandingTildeInPath`, so home-
+                // directory targets (which are typically outside the workspace)
+                // will naturally fail the `pathIsInside` check and set
+                // `trackedCWD` to nil without any special-casing here.
                 if tokens.count >= 2, tokens[1] != "-" {
                     // Only advance CWD tracking when we know where we are.
                     // If trackedCWD is already nil (prior indeterminate cd),
                     // we cannot meaningfully resolve the new path, so leave it nil.
                     if let base = trackedCWD {
                         let newDir = resolveTarget(tokens[1], basePath: base)
+                        // If the `cd` target is outside the workspace we stop
+                        // tracking: we will not enforce `ln` semantics for a
+                        // CWD we cannot reason about, and the post-execution
+                        // sweep provides the second layer of defence.
                         trackedCWD = pathIsInside(newDir, root: normalizedRoot) ? newDir : nil
                     }
                 } else {
-                    // bare `cd` or `cd -` — can't determine destination statically
+                    // bare `cd` (returns to $HOME) or `cd -` (returns to
+                    // $OLDPWD) — destination is undeterminable at parse time.
                     trackedCWD = nil
                 }
                 continue
