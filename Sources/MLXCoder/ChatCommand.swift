@@ -270,6 +270,12 @@ struct ChatCommand: AsyncParsableCommand {
             if !modelConfigs.contains(where: { $0.id.caseInsensitiveCompare(selectedModel) == .orderedSame }) {
                 modelConfigs.insert(AppConfig.ModelConfig(id: selectedModel, label: selectedModel), at: 0)
             }
+            if args.vision {
+                modelConfigs = modelConfigs.map { config in
+                    guard !config.label.contains("👁") else { return config }
+                    return AppConfig.ModelConfig(id: config.id, label: "\(config.label) 👁")
+                }
+            }
             let defaultModelIndex = modelConfigs.firstIndex {
                 $0.id.caseInsensitiveCompare(selectedModel) == .orderedSame
             } ?? 0
@@ -287,7 +293,8 @@ struct ChatCommand: AsyncParsableCommand {
                 frontend: tuiFrontend,
                 skillMetadata: skillMetadata,
                 hooks: hooks,
-                initialSandboxEnabled: effectiveSandbox
+                initialSandboxEnabled: effectiveSandbox,
+                initialVisionEnabled: args.vision
             )
             await DotnetLSPService.shared.shutdown()
             print("\nGoodbye!")
@@ -427,6 +434,14 @@ struct ChatCommand: AsyncParsableCommand {
             if trimmed == "/sandbox" {
                 sandboxEnabled.toggle()
                 await agentLoop.setSandbox(sandboxEnabled)
+                continue
+            }
+            if trimmed == "/vision" || trimmed == "/vison" {
+                if args.vision {
+                    renderer.printStatus("👁 Vision is enabled for this session.")
+                } else {
+                    renderer.printStatus("👁 Vision is disabled for this session (restart with --vision to enable).")
+                }
                 continue
             }
             if trimmed == "/voice" {
@@ -804,6 +819,7 @@ func printREPLHelp() {
       \u{001B}[32m/merge-approval\u{001B}[0m Trigger the "Awaiting approval before merge" flow
       \u{001B}[32m/gittree\u{001B}[0m       List git worktrees and switch workspace/branch to one
       \u{001B}[32m/sandbox\u{001B}[0m       Toggle macOS Seatbelt sandbox for shell commands
+      \u{001B}[32m/vison\u{001B}[0m         Show vision-load status for this session (alias: /vision)
       \u{001B}[32m/voice, Ctrl+V\u{001B}[0m  Voice input (STT) — fills transcription into input box for editing
       \u{001B}[32m/voice-locale [id]\u{001B}[0m Set STT language (no arg = list all available locales)
       \u{001B}[32mCtrl+J, Option+Enter, \\+Enter\u{001B}[0m Insert newline in input box
