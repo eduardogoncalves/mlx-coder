@@ -41,7 +41,7 @@ public final class ModelLoader: Sendable {
         from path: String,
         memoryLimit: Int? = nil,
         cacheLimit: Int? = nil,
-        loadVisionWeights: Bool = true
+        loadVisionWeights: Bool = false
     ) async throws -> (container: ModelContainer, visionSkipped: Bool) {
         let expandedPath = NSString(string: path).expandingTildeInPath
         var modelURL = URL(filePath: expandedPath)
