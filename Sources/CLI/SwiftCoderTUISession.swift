@@ -325,7 +325,17 @@ public func runSwiftCoderTUISession(
             await renderer.renderFooter()
 
         case .ctrlV:
-            await startVoiceInput(renderer: renderer)
+            // Delegate to the renderer's built-in voice flow. It owns the
+            // "Listening…" spinner, calls our `MLXCoderVoiceInputProvider`
+            // (wired in `ChatCommand` when building the TUI AppConfig), and
+            // prefills the resulting transcription into the input buffer. The
+            // TUI's `InputHandler.keystrokes()` reader keeps owning stdin
+            // throughout, so dictation no longer races for keystrokes — the
+            // previous direct call to `VoiceInput.transcribe()` would hang
+            // because its `read(STDIN_FILENO, …)` poll never saw the user's
+            // Enter byte (the background reader consumed it first).
+            _ = await renderer.triggerVoiceInput()
+            await normalizeInputSoftWrap(renderer: renderer)
             await renderer.renderFooter()
 
         case .altEnter, .shiftEnter:
@@ -711,19 +721,6 @@ public func runSwiftCoderTUISession(
     await flushPendingTypedChunk(&pendingTypedChunk, renderer: renderer)
     await renderer.flushStreamLine()
     await renderer.teardownScreen()
-}
-
-@MainActor
-private func startVoiceInput(renderer: Renderer) async {
-    do {
-        let spoken = try await VoiceInput.transcribe()
-        if !spoken.isEmpty {
-            await renderer.insertText(spoken)
-            await normalizeInputSoftWrap(renderer: renderer)
-        }
-    } catch {
-        await renderer.printScrollLine("\(DesignSystem.brightRed)✗ Voice input failed: \(error.localizedDescription)\(DesignSystem.reset)")
-    }
 }
 
 private func normalizedCommandInput(from input: String) -> String {

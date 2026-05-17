@@ -266,11 +266,23 @@ struct ChatCommand: AsyncParsableCommand {
             let defaultModelIndex = modelConfigs.firstIndex {
                 $0.id.caseInsensitiveCompare(selectedModel) == .orderedSame
             } ?? 0
-            let tuiAppConfig = SwiftCoderTUIAppConfigBuilder.build(
-                version: MLXCoderCLI.configuration.version ?? "dev",
-                models: modelConfigs,
-                defaultModelIndex: defaultModelIndex
-            )
+            let tuiAppConfig: AppConfig = {
+                var cfg = SwiftCoderTUIAppConfigBuilder.build(
+                    version: MLXCoderCLI.configuration.version,
+                    models: modelConfigs,
+                    defaultModelIndex: defaultModelIndex
+                )
+                // Wire mlx-coder's Speech-framework-backed voice provider so the
+                // TUI handles Ctrl+V natively via `Renderer.triggerVoiceInput`,
+                // avoiding the stdin race between `VoiceInput.transcribe` and the
+                // TUI's background `InputHandler.keystrokes()` reader that
+                // previously caused the UI to freeze after dictation.
+                cfg.voiceInputProvider = MLXCoderVoiceInputProvider(
+                    silenceTimeout: args.voiceSilenceTimeout,
+                    locale: sessionVoiceLocale
+                )
+                return cfg
+            }()
             let tuiRenderer = Renderer(config: tuiAppConfig, terminal: ProcessTerminal())
             let tuiFrontend = SwiftCoderTUIFrontend(renderer: tuiRenderer, appConfig: tuiAppConfig)
             await agentLoop.swapFrontend(tuiFrontend)
