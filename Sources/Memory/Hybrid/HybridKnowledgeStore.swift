@@ -444,7 +444,7 @@ public actor HybridKnowledgeStore {
     /// Returns the number of rows affected.
     @discardableResult
     public func prune(now: Date = Date()) throws -> Int {
-        guard let db else { throw StoreError.databaseNotOpen }
+        guard db != nil else { throw StoreError.databaseNotOpen }
         let nowEpoch = Int64(now.timeIntervalSince1970)
 
         // Hard-delete working memory whose TTL has lapsed.

@@ -161,7 +161,7 @@ public actor ToolAuditLogger {
             // Best-effort single write. Short writes are accepted as no log
             // message exceeds PIPE_BUF on supported platforms; any error is
             // intentionally swallowed to keep logging non-fatal.
-            return write(fd, base, buffer.count)
+            return Darwin.write(fd, base, buffer.count)
         }
     }
 }
