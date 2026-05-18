@@ -111,6 +111,17 @@ public func runSwiftCoderTUISession(
     var pendingTypedChunk = ""
     var pendingTypedFlushTask: Task<Void, Never>? = nil
 
+    // Voice input session state. `voiceProvider` is the same instance wired
+    // into `AppConfig.voiceInputProvider` in `ChatCommand`, captured here so
+    // the keystroke loop can call `requestStop()` (e.g. on Enter) while the
+    // recording task is awaiting `renderer.triggerVoiceInput()` in the
+    // background. `voiceTask` tracks the in-flight recording task; while it
+    // is non-nil and not finished, Enter stops the recording instead of
+    // submitting the prompt.
+    let voiceProvider = frontend.appConfig.voiceInputProvider as? MLXCoderVoiceInputProvider
+    var voiceTask: Task<Void, Never>? = nil
+    var voiceSpinnerTask: Task<Void, Never>? = nil
+
     signal(SIGWINCH, SIG_IGN)
     let resizeSource = DispatchSource.makeSignalSource(signal: SIGWINCH, queue: .main)
     resizeSource.setEventHandler {
@@ -266,11 +277,16 @@ public func runSwiftCoderTUISession(
             }
 
         case .ctrlC:
+            if let provider = voiceProvider, voiceTask != nil {
+                provider.requestStop()
+            }
             activeStreamTask?.cancel()
             await frontend.abortGeneration()
 
         case .escape:
-            if await renderer.isAutocompleteActive() {
+            if let provider = voiceProvider, voiceTask != nil {
+                provider.requestStop()
+            } else if await renderer.isAutocompleteActive() {
                 await renderer.clearAutocomplete()
                 await renderer.renderFooter()
             } else if await renderer.getIsGenerating() {
@@ -325,23 +341,42 @@ public func runSwiftCoderTUISession(
             await renderer.renderFooter()
 
         case .ctrlV:
-            // Delegate to the renderer's built-in voice flow. It owns the
-            // "Listening…" spinner, calls our `MLXCoderVoiceInputProvider`
-            // (wired in `ChatCommand` when building the TUI AppConfig), and
-            // prefills the resulting transcription into the input buffer. The
-            // TUI's `InputHandler.keystrokes()` reader keeps owning stdin
-            // throughout, so dictation no longer races for keystrokes — the
-            // previous direct call to `VoiceInput.transcribe()` would hang
-            // because its `read(STDIN_FILENO, …)` poll never saw the user's
-            // Enter byte (the background reader consumed it first).
-            let triggered = await renderer.triggerVoiceInput()
-            if !triggered {
+            // Toggle voice recording. The renderer's `triggerVoiceInput()`
+            // owns the "Listening…" thinking-text + input-buffer prefill, but
+            // it does not animate the footer on its own (the spinner ticker
+            // in `SwiftCoderTUIFrontend` only runs for agent generation
+            // events), so we run our own 100 ms ticker while recording is
+            // active. The voice call runs in a sibling task so the keystroke
+            // loop stays responsive — Enter / Ctrl+V can then call
+            // `voiceProvider.requestStop()` to end recording immediately
+            // instead of waiting for the silence timeout.
+            guard let provider = voiceProvider else {
                 await renderer.printScrollLine(
                     "\(DesignSystem.brightRed)✗ Voice input is not configured in this session.\(DesignSystem.reset)"
                 )
+                await renderer.renderFooter()
+                break
             }
-            await normalizeInputSoftWrap(renderer: renderer)
-            await renderer.renderFooter()
+            if voiceTask != nil {
+                provider.requestStop()
+                break
+            }
+            voiceSpinnerTask?.cancel()
+            voiceSpinnerTask = Task { @MainActor in
+                while !Task.isCancelled {
+                    await renderer.advanceSpinner()
+                    await renderer.renderSpinnerTick()
+                    try? await Task.sleep(nanoseconds: 100_000_000)
+                }
+            }
+            voiceTask = Task { @MainActor in
+                _ = await renderer.triggerVoiceInput()
+                voiceSpinnerTask?.cancel()
+                voiceSpinnerTask = nil
+                await normalizeInputSoftWrap(renderer: renderer)
+                await renderer.renderFooter()
+                voiceTask = nil
+            }
 
         case .altEnter, .shiftEnter:
             await renderer.insertText("\n")
@@ -349,6 +384,13 @@ public func runSwiftCoderTUISession(
             await renderer.renderFooter()
 
         case .enter:
+            // While a voice recording is active, Enter stops the mic instead
+            // of submitting. The transcription lands in the input buffer so
+            // the user can review/edit it, then press Enter again to send.
+            if let provider = voiceProvider, voiceTask != nil {
+                provider.requestStop()
+                continue
+            }
             if await renderer.convertBackslashToNewline() {
                 await renderer.renderFooter()
                 continue
@@ -723,6 +765,13 @@ public func runSwiftCoderTUISession(
     sigwinchSource?.cancel()
     sigwinchSource = nil
     pendingTypedFlushTask?.cancel()
+    if let provider = voiceProvider, voiceTask != nil {
+        provider.requestStop()
+    }
+    voiceSpinnerTask?.cancel()
+    voiceSpinnerTask = nil
+    voiceTask?.cancel()
+    voiceTask = nil
     await flushPendingTypedChunk(&pendingTypedChunk, renderer: renderer)
     await renderer.flushStreamLine()
     await renderer.teardownScreen()

@@ -86,6 +86,10 @@ public enum VoiceInput {
     ///   - maxDuration: Hard cap on recording duration (seconds). Acts as a
     ///     safety net so the call always returns even when no speech is heard
     ///     and the silence-timeout heuristic never fires. Defaults to `60.0`.
+    ///   - stopRequested: Optional `@Sendable` closure polled from the recording
+    ///     loop. When it returns `true` the recording stops immediately and
+    ///     whatever has been transcribed so far is returned. Use this to let
+    ///     a host UI (e.g. a TUI) signal "user pressed Enter — stop now".
     /// - Returns: The final recognised string.
     /// - Throws: ``VoiceInputError`` when speech recognition is unavailable,
     ///   unauthorised, the audio engine fails, or no speech is detected.
@@ -93,7 +97,8 @@ public enum VoiceInput {
         silenceTimeout: TimeInterval = 2.0,
         locale: Locale? = nil,
         interactive: Bool = true,
-        maxDuration: TimeInterval = 60.0
+        maxDuration: TimeInterval = 60.0,
+        stopRequested: (@Sendable () -> Bool)? = nil
     ) async throws -> String {
         // Locale priority: explicit → device current → en-US fallback.
         let recognizer: SFSpeechRecognizer
@@ -201,6 +206,10 @@ public enum VoiceInput {
                         continue
                     }
                 }
+            }
+            if let stopHook = stopRequested, stopHook() {
+                shouldStop = true
+                continue
             }
             let snap = state.snapshot
             if !snap.text.isEmpty && snap.elapsed >= silenceTimeout {
