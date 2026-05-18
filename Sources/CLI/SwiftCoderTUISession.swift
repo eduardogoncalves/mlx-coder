@@ -361,18 +361,33 @@ public func runSwiftCoderTUISession(
                 provider.requestStop()
                 break
             }
+            // Show a static "🎤 Listening… press Enter to finish" label in the
+            // footer (no animated spinner) for the duration of the recording.
+            // We drive the provider directly rather than going through
+            // `renderer.triggerVoiceInput()` so we control the label text.
+            await renderer.setGenerating(true)
+            await renderer.setThinking("🎤 Listening… press Enter to finish")
+            await renderer.renderFooter()
             voiceSpinnerTask?.cancel()
-            voiceSpinnerTask = Task { @MainActor in
-                while !Task.isCancelled {
-                    await renderer.advanceSpinner()
-                    await renderer.renderSpinnerTick()
-                    try? await Task.sleep(nanoseconds: 100_000_000)
-                }
-            }
+            voiceSpinnerTask = nil
             voiceTask = Task { @MainActor in
-                _ = await renderer.triggerVoiceInput()
-                voiceSpinnerTask?.cancel()
-                voiceSpinnerTask = nil
+                let transcription: String
+                do {
+                    transcription = try await provider.transcribe()
+                } catch {
+                    await renderer.setGenerating(false)
+                    await renderer.printScrollLine(
+                        "\(DesignSystem.brightRed)🎤 Voice input failed: \(error.localizedDescription)\(DesignSystem.reset)"
+                    )
+                    await renderer.renderFooter()
+                    voiceTask = nil
+                    return
+                }
+                await renderer.setGenerating(false)
+                if !transcription.isEmpty {
+                    await renderer.setInputBuffer(transcription)
+                    await renderer.moveCursorToEnd()
+                }
                 await normalizeInputSoftWrap(renderer: renderer)
                 await renderer.renderFooter()
                 voiceTask = nil
