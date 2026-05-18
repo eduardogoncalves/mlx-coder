@@ -361,13 +361,14 @@ public func runSwiftCoderTUISession(
                 provider.requestStop()
                 break
             }
-            // Show a static "🎤 Listening… press Enter to finish" label in the
-            // footer (no animated spinner) for the duration of the recording.
-            // We drive the provider directly rather than going through
-            // `renderer.triggerVoiceInput()` so we control the label text.
-            await renderer.setGenerating(true)
-            await renderer.setThinking("🎤 Listening… press Enter to finish")
-            await renderer.renderFooter()
+            // Show a static "🎤 Listening…" notice as a scroll-area line.
+            // Going through `setThinking` / `setGenerating` would force the
+            // upstream renderer's spinner glyph and "(esc · 0s)" suffix,
+            // which the user doesn't want here. We drive the provider
+            // directly so the footer stays clean.
+            await renderer.printScrollLine(
+                "\(DesignSystem.brightYellow)🎤 Listening… press Enter to finish or ESC to cancel\(DesignSystem.reset)"
+            )
             voiceSpinnerTask?.cancel()
             voiceSpinnerTask = nil
             voiceTask = Task { @MainActor in
@@ -375,7 +376,6 @@ public func runSwiftCoderTUISession(
                 do {
                     transcription = try await provider.transcribe()
                 } catch {
-                    await renderer.setGenerating(false)
                     await renderer.printScrollLine(
                         "\(DesignSystem.brightRed)🎤 Voice input failed: \(error.localizedDescription)\(DesignSystem.reset)"
                     )
@@ -383,7 +383,6 @@ public func runSwiftCoderTUISession(
                     voiceTask = nil
                     return
                 }
-                await renderer.setGenerating(false)
                 if !transcription.isEmpty {
                     await renderer.setInputBuffer(transcription)
                     await renderer.moveCursorToEnd()
