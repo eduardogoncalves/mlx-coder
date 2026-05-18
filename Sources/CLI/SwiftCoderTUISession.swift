@@ -361,12 +361,13 @@ public func runSwiftCoderTUISession(
                 provider.requestStop()
                 break
             }
-            // Show a static "🎤 Listening…" notice as a scroll-area line.
-            // Going through `setThinking` / `setGenerating` would force the
-            // upstream renderer's spinner glyph and "(esc · 0s)" suffix,
-            // which the user doesn't want here. We drive the provider
-            // directly so the footer stays clean.
-            await renderer.printScrollLine(
+            // Show an ephemeral "🎤 Listening…" notice in the footer area
+            // via the upstream `setStatusNotice` API (added in swift-coder-tui
+            // commit eb0c5cd). Unlike `setThinking`/`setGenerating`, this
+            // renders as a plain caller-styled line with no spinner glyph
+            // and no "(esc · Ns)" suffix, and it disappears when cleared
+            // instead of persisting in the scroll transcript.
+            await renderer.setStatusNotice(
                 "\(DesignSystem.brightYellow)🎤 Listening… press Enter to finish or ESC to cancel\(DesignSystem.reset)"
             )
             voiceSpinnerTask?.cancel()
@@ -376,6 +377,7 @@ public func runSwiftCoderTUISession(
                 do {
                     transcription = try await provider.transcribe()
                 } catch {
+                    await renderer.setStatusNotice(nil)
                     await renderer.printScrollLine(
                         "\(DesignSystem.brightRed)🎤 Voice input failed: \(error.localizedDescription)\(DesignSystem.reset)"
                     )
@@ -383,6 +385,7 @@ public func runSwiftCoderTUISession(
                     voiceTask = nil
                     return
                 }
+                await renderer.setStatusNotice(nil)
                 if !transcription.isEmpty {
                     await renderer.setInputBuffer(transcription)
                     await renderer.moveCursorToEnd()
