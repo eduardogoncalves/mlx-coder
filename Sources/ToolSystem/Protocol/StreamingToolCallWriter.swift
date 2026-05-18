@@ -81,7 +81,18 @@ public final class StreamingToolCallWriter: @unchecked Sendable {
         self.toolCallOpen = toolCallOpen
         self.toolCallClose = toolCallClose
         self.onStatusChange = onStatusChange
-        try? FileManager.default.createDirectory(at: self.tmpDir, withIntermediateDirectories: true)
+        // 0700: streamed LLM content may contain secrets being written to the
+        // workspace. Other local users must not read or list the staging area.
+        try? FileManager.default.createDirectory(
+            at: self.tmpDir,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        // If the directory existed previously with looser perms, tighten it.
+        try? FileManager.default.setAttributes(
+            [.posixPermissions: 0o700],
+            ofItemAtPath: self.tmpDir.path
+        )
     }
 
     public func drainCompletedCalls() -> [StreamedToolCall] {
@@ -185,9 +196,15 @@ public final class StreamingToolCallWriter: @unchecked Sendable {
                     // Check if this is a content-heavy tool call we should stream
                     if let (key, _) = detectContentField(buffer) {
                         if let (path, toolName) = extractPathAndArgs(buffer, contentKey: key) {
-                            let safeName = path.replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: ".", with: "_")
-                            let tmpFile = tmpDir.appendingPathComponent(safeName + ".tmp")
-                            FileManager.default.createFile(atPath: tmpFile.path, contents: nil)
+                            // Per-call UUID-suffixed name with 0o700 dir +
+                            // 0o600 file defeats predictable-path symlink
+                            // overwrite. See `makeTmpFile(forPath:)`.
+                            let tmpFile = makeTmpFile(forPath: path)
+                            FileManager.default.createFile(
+                                atPath: tmpFile.path,
+                                contents: nil,
+                                attributes: [.posixPermissions: 0o600]
+                            )
                             onStatusChange?("\(Self.tmpFileStatusPrefix)\(tmpFile.path)")
                             if let fh = try? FileHandle(forWritingTo: tmpFile) {
                                 try? fh.truncate(atOffset: 0)
@@ -313,11 +330,17 @@ public final class StreamingToolCallWriter: @unchecked Sendable {
             // Content was streamed to tmp during generation, but we didn't catch it
             // This means the content was small enough to fit in the buffer before
             // we detected the closing tag. Parse it normally.
-            let safeName = path.replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: ".", with: "_")
-            let tmpFile = tmpDir.appendingPathComponent(safeName + ".tmp")
+            // UUID-suffixed name matches the streaming path for symmetry.
+            let tmpFile = makeTmpFile(forPath: path)
 
             if let content = arguments[contentKey] as? String {
                 try? content.write(to: tmpFile, atomically: true, encoding: .utf8)
+                // Tighten perms on the just-written file. `String.write(to:)`
+                // honours umask which may be 022 by default.
+                try? FileManager.default.setAttributes(
+                    [.posixPermissions: 0o600],
+                    ofItemAtPath: tmpFile.path
+                )
                 var otherArgs = arguments
                 otherArgs.removeValue(forKey: contentKey)
                 completedCalls.append(StreamedToolCall(
@@ -392,6 +415,20 @@ public final class StreamingToolCallWriter: @unchecked Sendable {
     }
 
     // MARK: - Helpers
+
+    /// Constructs a per-call temp-file URL under `tmpDir`.
+    ///
+    /// The filename mangles the user-supplied target `path` (so logs are
+    /// debuggable) but appends a fresh UUID and `.tmp` extension. Combined
+    /// with the 0o700 perms on `tmpDir` and the 0o600 perms callers set on
+    /// the file itself, this defeats predictable-path symlink-overwrite
+    /// attacks (CWE-377) by other local users on shared temp filesystems.
+    private func makeTmpFile(forPath path: String) -> URL {
+        let safeName = path
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: ".", with: "_")
+        return tmpDir.appendingPathComponent("\(safeName)-\(UUID().uuidString).tmp")
+    }
 
     private func trailingPossibleTagPrefix(in text: String, for tag: String) -> String {
         guard !text.isEmpty else { return "" }

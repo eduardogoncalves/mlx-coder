@@ -64,6 +64,13 @@ public struct BashTool: Tool {
 
         let finalCommand: String
         if useSandbox {
+            // Defence in depth: refuse to build a Seatbelt profile when the
+            // workspace path contains characters that could break out of the
+            // S-expression string literal (e.g. `"`, `)`, newline). Real
+            // workspace paths never contain these on macOS.
+            guard SandboxEngine.isWorkspaceRootSandboxSafe(permissions.effectiveWorkspaceRoot) else {
+                return .error("Refusing to sandbox: workspace path contains characters unsafe for Seatbelt profile generation")
+            }
             finalCommand = sandboxEngine.wrap(command: command, workspaceRoot: permissions.effectiveWorkspaceRoot)
         } else {
             finalCommand = command
@@ -103,23 +110,68 @@ public struct BashTool: Tool {
         process.standardOutput = stdoutPipe
         process.standardError = stderrPipe
 
+        // Drain pipes concurrently with the child to avoid the classic
+        // pipe-buffer deadlock: macOS pipe buffers are 16–64 KiB and a child
+        // that writes past that size will block in the kernel's `write(2)`,
+        // which then stalls `waitUntilExit` forever. The collector below
+        // serialises appends across the two readability handlers.
+        let collector = PipeOutputCollector()
+        stdoutPipe.fileHandleForReading.readabilityHandler = { handle in
+            let data = handle.availableData
+            if data.isEmpty {
+                handle.readabilityHandler = nil
+                return
+            }
+            collector.appendStdout(data)
+        }
+        stderrPipe.fileHandleForReading.readabilityHandler = { handle in
+            let data = handle.availableData
+            if data.isEmpty {
+                handle.readabilityHandler = nil
+                return
+            }
+            collector.appendStderr(data)
+        }
+
         // Set up timeout
         let timeoutTask = Task {
             try await Task.sleep(for: .seconds(timeout))
-            if process.isRunning {
-                process.terminate()
-            }
+            // `terminate()` is a no-op if the process has already exited.
+            process.terminate()
         }
 
         try process.run()
-        process.waitUntilExit()
+
+        // Wait on a background dispatch queue so the actor thread isn't
+        // blocked, and wire cooperative cancellation (ESC / Ctrl+C) to
+        // `process.terminate()` via withTaskCancellationHandler.
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+                DispatchQueue.global(qos: .userInitiated).async {
+                    process.waitUntilExit()
+                    cont.resume()
+                }
+            }
+        } onCancel: {
+            // Best-effort terminate on cancel. SIGTERM first; the child has
+            // until the timeoutTask (or natural exit) to clean up.
+            process.terminate()
+        }
+
         timeoutTask.cancel()
 
-        let stdoutData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
-        let stderrData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+        // Tear down readability handlers and drain any final bytes. After
+        // `waitUntilExit` returns the child has closed its ends; reading the
+        // remainder is non-blocking.
+        stdoutPipe.fileHandleForReading.readabilityHandler = nil
+        stderrPipe.fileHandleForReading.readabilityHandler = nil
+        let tailOut = stdoutPipe.fileHandleForReading.availableData
+        let tailErr = stderrPipe.fileHandleForReading.availableData
+        if !tailOut.isEmpty { collector.appendStdout(tailOut) }
+        if !tailErr.isEmpty { collector.appendStderr(tailErr) }
 
-        let stdout = String(data: stdoutData, encoding: .utf8) ?? ""
-        let stderr = String(data: stderrData, encoding: .utf8) ?? ""
+        let stdout = String(data: collector.stdoutSnapshot(), encoding: .utf8) ?? ""
+        let stderr = String(data: collector.stderrSnapshot(), encoding: .utf8) ?? ""
 
         let exitCode = process.terminationStatus
 
@@ -134,6 +186,23 @@ public struct BashTool: Tool {
         // on pipe I/O. We capture early output via a temp file.
         let outputFile = FileManager.default.temporaryDirectory
             .appendingPathComponent("mlx-coder-bg-\(UUID().uuidString).log")
+
+        // Defence in depth: the output-file path is interpolated into a
+        // single-quoted shell redirect below. A poisoned `TMPDIR` (which the
+        // parent inherits and is read by `FileManager.temporaryDirectory`)
+        // could otherwise inject shell metacharacters. We reject any path
+        // containing the single quote (which closes the redirect quoting),
+        // newline / CR (which start a new shell command), or NUL.
+        //
+        // This validator is intentionally narrower than
+        // `SandboxEngine.unsafeWorkspaceRootCharacters` — that one guards an
+        // S-expression literal (more metachars are dangerous), while here
+        // we're inside a single-quoted shell argument so only the quote and
+        // line terminators can break out.
+        let unsafeChars: Set<Character> = ["'", "\n", "\r", "\0"]
+        guard !outputFile.path.contains(where: { unsafeChars.contains($0) }) else {
+            return .error("Refusing to launch background job: temporary directory path is unsafe for shell quoting")
+        }
 
         // Use nohup + redirect to detach the process from the shell's pipes.
         // Capture output to a temp file for the initial_wait period.
@@ -244,3 +313,4 @@ public struct BashTool: Tool {
         return ToolResult(content: content, truncationMarker: truncationMarker)
     }
 }
+

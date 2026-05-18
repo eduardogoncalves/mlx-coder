@@ -201,7 +201,7 @@ public actor HybridMemoryProvider: MemoryProvider {
         pendingReflections.append(task)
         _ = Task {
             _ = await task.value
-            await removePendingReflection(task)
+            removePendingReflection(task)
         }
     }
 

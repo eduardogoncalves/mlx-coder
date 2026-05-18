@@ -55,14 +55,20 @@ public struct GrepTool: Tool {
         process.arguments = args
 
         let pipe = Pipe()
+        let errPipe = Pipe()
         process.standardOutput = pipe
-        process.standardError = Pipe()
+        process.standardError = errPipe
 
         try process.run()
-        process.waitUntilExit()
-
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        let output = String(data: data, encoding: .utf8) ?? ""
+        // Drain concurrently with the child — recursive `grep -rnI` against a
+        // large workspace can easily emit tens of MiB of matches, far past
+        // the kernel pipe buffer (~16-64 KiB). Without concurrent draining
+        // the child blocks in `write(2)` and `waitUntilExit` never returns.
+        let (output, _) = ProcessIO.drainAndWait(
+            process: process,
+            stdoutPipe: pipe,
+            stderrPipe: errPipe
+        )
 
         let lines = output
             .components(separatedBy: "\n")

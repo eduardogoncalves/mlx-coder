@@ -74,10 +74,32 @@ public enum VoiceInput {
     ///     automatically. Defaults to `2.0`.
     ///   - locale: The locale to use for speech recognition. When `nil` the
     ///     device's current locale is tried first, then `en-US` as a fallback.
+    ///   - interactive: When `true` (default) the function takes over the
+    ///     terminal in raw mode, prints a "Listening…" line plus live partial
+    ///     transcriptions, and stops on Enter / Ctrl-C / Ctrl-D. When `false`
+    ///     no terminal I/O is performed — the caller (e.g. a TUI host with its
+    ///     own stdin reader) is responsible for any UI, and recording stops on
+    ///     silence-timeout, ``maxDuration``, or Task cancellation only.
+    ///     Setting `interactive: false` is required inside a TUI to avoid
+    ///     racing the TUI's background keystroke reader for stdin bytes, which
+    ///     otherwise causes the recording to hang indefinitely.
+    ///   - maxDuration: Hard cap on recording duration (seconds). Acts as a
+    ///     safety net so the call always returns even when no speech is heard
+    ///     and the silence-timeout heuristic never fires. Defaults to `60.0`.
+    ///   - stopRequested: Optional `@Sendable` closure polled from the recording
+    ///     loop. When it returns `true` the recording stops immediately and
+    ///     whatever has been transcribed so far is returned. Use this to let
+    ///     a host UI (e.g. a TUI) signal "user pressed Enter — stop now".
     /// - Returns: The final recognised string.
     /// - Throws: ``VoiceInputError`` when speech recognition is unavailable,
     ///   unauthorised, the audio engine fails, or no speech is detected.
-    public static func transcribe(silenceTimeout: TimeInterval = 2.0, locale: Locale? = nil) async throws -> String {
+    public static func transcribe(
+        silenceTimeout: TimeInterval = 2.0,
+        locale: Locale? = nil,
+        interactive: Bool = true,
+        maxDuration: TimeInterval = 60.0,
+        stopRequested: (@Sendable () -> Bool)? = nil
+    ) async throws -> String {
         // Locale priority: explicit → device current → en-US fallback.
         let recognizer: SFSpeechRecognizer
         let localesToTry: [Locale] = locale.map { [$0, Locale.current, Locale(identifier: "en-US")] }
@@ -110,8 +132,13 @@ public enum VoiceInput {
             let text = result.bestTranscription.formattedString
             state.update(text: text)
             // Overwrite the current terminal line with the latest partial result.
-            print("\r\u{1B}[K  🎤 \u{1B}[36m\(text)\u{1B}[0m", terminator: "")
-            fflush(stdout)
+            // Only print in interactive mode — otherwise the host (e.g. a TUI)
+            // owns the terminal and we must not write to stdout from a
+            // background thread.
+            if interactive {
+                print("\r\u{1B}[K  🎤 \u{1B}[36m\(text)\u{1B}[0m", terminator: "")
+                fflush(stdout)
+            }
         }
 
         // Install microphone tap.
@@ -131,41 +158,65 @@ public enum VoiceInput {
         }
 
         // Switch terminal to raw non-blocking mode so we can detect Enter.
+        // Skip this entirely in non-interactive mode — the host (e.g. the TUI)
+        // already owns the terminal and its own raw-mode setup; touching
+        // termios from here would race the host and corrupt its state.
         var originalTerm = termios()
-        tcgetattr(STDIN_FILENO, &originalTerm)
-        var rawTerm = originalTerm
-        rawTerm.c_lflag &= ~tcflag_t(ECHO | ICANON | ISIG)
-        rawTerm.c_cc.16 = 0 // VMIN  = 0 → non-blocking reads
-        rawTerm.c_cc.17 = 0 // VTIME = 0
-        tcsetattr(STDIN_FILENO, TCSANOW, &rawTerm)
+        if interactive {
+            tcgetattr(STDIN_FILENO, &originalTerm)
+            var rawTerm = originalTerm
+            rawTerm.c_lflag &= ~tcflag_t(ECHO | ICANON | ISIG)
+            rawTerm.c_cc.16 = 0 // VMIN  = 0 → non-blocking reads
+            rawTerm.c_cc.17 = 0 // VTIME = 0
+            tcsetattr(STDIN_FILENO, TCSANOW, &rawTerm)
+        }
 
         // Ensure the terminal and audio engine are always cleaned up, even on
         // cancellation or error.
         defer {
-            tcsetattr(STDIN_FILENO, TCSANOW, &originalTerm)
+            if interactive {
+                tcsetattr(STDIN_FILENO, TCSANOW, &originalTerm)
+            }
             audioEngine.stop()
             inputNode.removeTap(onBus: 0)
             request.endAudio()
             recognitionTask.cancel()
-            print("\r\u{1B}[K\u{1B}[A\r\u{1B}[K", terminator: "") // clear partial transcription line, then the "Listening…" line above it
+            if interactive {
+                print("\r\u{1B}[K\u{1B}[A\r\u{1B}[K", terminator: "") // clear partial transcription line, then the "Listening…" line above it
+                fflush(stdout)
+            }
+        }
+
+        if interactive {
+            print("  🎤 \u{1B}[2mListening… press Enter to finish\u{1B}[0m")
             fflush(stdout)
         }
 
-        print("  🎤 \u{1B}[2mListening… press Enter to finish\u{1B}[0m")
-        fflush(stdout)
-
-        // Poll loop: stop on Enter / Ctrl-C / Ctrl-D, or after silence timeout.
+        // Poll loop: stop on Enter / Ctrl-C / Ctrl-D (interactive only), after
+        // the silence timeout once at least one partial result has arrived, or
+        // after the hard ``maxDuration`` safety cap regardless of state.
+        let recordingStart = Date()
         var shouldStop = false
         while !shouldStop {
-            var b: UInt8 = 0
-            if read(STDIN_FILENO, &b, 1) == 1 {
-                if b == 10 || b == 13 || b == 3 || b == 4 { // Enter / Ctrl-C / Ctrl-D
-                    shouldStop = true
-                    continue
+            if interactive {
+                var b: UInt8 = 0
+                if read(STDIN_FILENO, &b, 1) == 1 {
+                    if b == 10 || b == 13 || b == 3 || b == 4 { // Enter / Ctrl-C / Ctrl-D
+                        shouldStop = true
+                        continue
+                    }
                 }
+            }
+            if let stopHook = stopRequested, stopHook() {
+                shouldStop = true
+                continue
             }
             let snap = state.snapshot
             if !snap.text.isEmpty && snap.elapsed >= silenceTimeout {
+                shouldStop = true
+                continue
+            }
+            if -recordingStart.timeIntervalSinceNow >= maxDuration {
                 shouldStop = true
                 continue
             }

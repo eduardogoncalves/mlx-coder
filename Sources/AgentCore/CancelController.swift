@@ -123,6 +123,10 @@ public actor CancelController {
                             let handler = await self.printHandler
                             handler("\nInterrupted by Esc. Exiting...")
                             fflush(stdout)
+                            // `exit()` does not run `defer` blocks, so we must
+                            // restore terminal state here or the user is left
+                            // in a wedged raw-mode shell after Ctrl+C / ESC.
+                            tcsetattr(STDIN_FILENO, TCSAFLUSH, &originalTerm)
                             exit(130)
                         }
                         break
@@ -131,6 +135,8 @@ public actor CancelController {
                         let handler = await self.printHandler
                         handler("\nInterrupted by Ctrl+C. Exiting...")
                         fflush(stdout)
+                        // Restore terminal state before exit(); see note above.
+                        tcsetattr(STDIN_FILENO, TCSAFLUSH, &originalTerm)
                         exit(0)
                     }
                 }

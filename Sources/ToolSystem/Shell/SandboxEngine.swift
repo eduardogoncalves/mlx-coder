@@ -28,16 +28,47 @@ public struct SandboxEngine: Sendable {
     /// - Returns: A sandboxed command string.
     public func wrap(command: String, workspaceRoot: String) -> String {
         let profile = generateProfile(workspaceRoot: workspaceRoot)
-        
+
         // Escape the profile and command to be safe for inclusion in a shell command
         // Wrap both in single quotes and escape any single quotes inside.
         let escapedProfile = profile.replacingOccurrences(of: "'", with: "'\\''")
         let escapedCommand = command.replacingOccurrences(of: "'", with: "'\\''")
-        
+
         // Return the wrapped command. Use an explicit shell entrypoint so commands with
         // arguments/operators are executed correctly under sandbox-exec.
         return "sandbox-exec -p '\(escapedProfile)' /bin/zsh -c '\(escapedCommand)'"
     }
+
+    /// Returns `true` when `workspaceRoot` is safe to embed in a Seatbelt profile
+    /// string. Profiles are S-expressions; embedded `(`, `)`, `"`, `\`, `;` or
+    /// newline characters in the workspace path can break out of the
+    /// `(subpath "...")` literal and either neutralise the sandbox or inject
+    /// new rules. Callers that receive `false` should reject the request
+    /// rather than weakening the sandbox.
+    ///
+    /// The forbidden set also includes shell metacharacters (`'`, `` ` ``,
+    /// `$`). `wrap(command:workspaceRoot:)` does single-quote-escape its
+    /// inputs, but two consecutive injection points (the inner profile and
+    /// the outer `/bin/zsh -c '…'`) plus the historical pattern of callers
+    /// re-interpolating workspace paths into shell strings (see
+    /// `BashTool.executeBackground`) means we apply defence in depth here.
+    public static func isWorkspaceRootSandboxSafe(_ workspaceRoot: String) -> Bool {
+        return !workspaceRoot.contains(where: { unsafeWorkspaceRootCharacters.contains($0) })
+    }
+
+    /// Shared forbidden-character set used by `isWorkspaceRootSandboxSafe`
+    /// to validate workspace paths before they are embedded in a Seatbelt
+    /// profile.
+    ///
+    /// Note: `BashTool.executeBackground` uses a deliberately *narrower*
+    /// validator (`'`, newline, CR, NUL) because it only interpolates the
+    /// path inside a single-quoted shell redirect, not inside an
+    /// S-expression. The two validators are intentionally not unified so
+    /// each context can stay as permissive as its quoting allows while
+    /// blocking the characters that can actually break out.
+    public static let unsafeWorkspaceRootCharacters: Set<Character> = [
+        "\"", "\\", "(", ")", "\n", "\r", ";", "'", "`", "$"
+    ]
     
     /// Generates a Seatbelt profile string.
     private func generateProfile(workspaceRoot: String) -> String {

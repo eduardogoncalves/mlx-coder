@@ -111,6 +111,17 @@ public func runSwiftCoderTUISession(
     var pendingTypedChunk = ""
     var pendingTypedFlushTask: Task<Void, Never>? = nil
 
+    // Voice input session state. `voiceProvider` is the same instance wired
+    // into `AppConfig.voiceInputProvider` in `ChatCommand`, captured here so
+    // the keystroke loop can call `requestStop()` (e.g. on Enter) while the
+    // recording task is awaiting `renderer.triggerVoiceInput()` in the
+    // background. `voiceTask` tracks the in-flight recording task; while it
+    // is non-nil and not finished, Enter stops the recording instead of
+    // submitting the prompt.
+    let voiceProvider = frontend.appConfig.voiceInputProvider as? MLXCoderVoiceInputProvider
+    var voiceTask: Task<Void, Never>? = nil
+    var voiceSpinnerTask: Task<Void, Never>? = nil
+
     signal(SIGWINCH, SIG_IGN)
     let resizeSource = DispatchSource.makeSignalSource(signal: SIGWINCH, queue: .main)
     resizeSource.setEventHandler {
@@ -266,11 +277,16 @@ public func runSwiftCoderTUISession(
             }
 
         case .ctrlC:
+            if let provider = voiceProvider, voiceTask != nil {
+                provider.requestStop()
+            }
             activeStreamTask?.cancel()
             await frontend.abortGeneration()
 
         case .escape:
-            if await renderer.isAutocompleteActive() {
+            if let provider = voiceProvider, voiceTask != nil {
+                provider.requestStop()
+            } else if await renderer.isAutocompleteActive() {
                 await renderer.clearAutocomplete()
                 await renderer.renderFooter()
             } else if await renderer.getIsGenerating() {
@@ -325,8 +341,59 @@ public func runSwiftCoderTUISession(
             await renderer.renderFooter()
 
         case .ctrlV:
-            await startVoiceInput(renderer: renderer)
-            await renderer.renderFooter()
+            // Toggle voice recording. The renderer's `triggerVoiceInput()`
+            // owns the "Listening…" thinking-text + input-buffer prefill, but
+            // it does not animate the footer on its own (the spinner ticker
+            // in `SwiftCoderTUIFrontend` only runs for agent generation
+            // events), so we run our own 100 ms ticker while recording is
+            // active. The voice call runs in a sibling task so the keystroke
+            // loop stays responsive — Enter / Ctrl+V can then call
+            // `voiceProvider.requestStop()` to end recording immediately
+            // instead of waiting for the silence timeout.
+            guard let provider = voiceProvider else {
+                await renderer.printScrollLine(
+                    "\(DesignSystem.brightRed)✗ Voice input is not configured in this session.\(DesignSystem.reset)"
+                )
+                await renderer.renderFooter()
+                break
+            }
+            if voiceTask != nil {
+                provider.requestStop()
+                break
+            }
+            // Show an ephemeral "🎤 Listening…" notice in the footer area
+            // via the upstream `setStatusNotice` API (added in swift-coder-tui
+            // commit eb0c5cd). Unlike `setThinking`/`setGenerating`, this
+            // renders as a plain caller-styled line with no spinner glyph
+            // and no "(esc · Ns)" suffix, and it disappears when cleared
+            // instead of persisting in the scroll transcript.
+            await renderer.setStatusNotice(
+                "\(DesignSystem.brightYellow)🎤 Listening… press Enter to finish or ESC to cancel\(DesignSystem.reset)"
+            )
+            voiceSpinnerTask?.cancel()
+            voiceSpinnerTask = nil
+            voiceTask = Task { @MainActor in
+                let transcription: String
+                do {
+                    transcription = try await provider.transcribe()
+                } catch {
+                    await renderer.setStatusNotice(nil)
+                    await renderer.printScrollLine(
+                        "\(DesignSystem.brightRed)🎤 Voice input failed: \(error.localizedDescription)\(DesignSystem.reset)"
+                    )
+                    await renderer.renderFooter()
+                    voiceTask = nil
+                    return
+                }
+                await renderer.setStatusNotice(nil)
+                if !transcription.isEmpty {
+                    await renderer.setInputBuffer(transcription)
+                    await renderer.moveCursorToEnd()
+                }
+                await normalizeInputSoftWrap(renderer: renderer)
+                await renderer.renderFooter()
+                voiceTask = nil
+            }
 
         case .altEnter, .shiftEnter:
             await renderer.insertText("\n")
@@ -334,6 +401,13 @@ public func runSwiftCoderTUISession(
             await renderer.renderFooter()
 
         case .enter:
+            // While a voice recording is active, Enter stops the mic instead
+            // of submitting. The transcription lands in the input buffer so
+            // the user can review/edit it, then press Enter again to send.
+            if let provider = voiceProvider, voiceTask != nil {
+                provider.requestStop()
+                continue
+            }
             if await renderer.convertBackslashToNewline() {
                 await renderer.renderFooter()
                 continue
@@ -708,22 +782,16 @@ public func runSwiftCoderTUISession(
     sigwinchSource?.cancel()
     sigwinchSource = nil
     pendingTypedFlushTask?.cancel()
+    if let provider = voiceProvider, voiceTask != nil {
+        provider.requestStop()
+    }
+    voiceSpinnerTask?.cancel()
+    voiceSpinnerTask = nil
+    voiceTask?.cancel()
+    voiceTask = nil
     await flushPendingTypedChunk(&pendingTypedChunk, renderer: renderer)
     await renderer.flushStreamLine()
     await renderer.teardownScreen()
-}
-
-@MainActor
-private func startVoiceInput(renderer: Renderer) async {
-    do {
-        let spoken = try await VoiceInput.transcribe()
-        if !spoken.isEmpty {
-            await renderer.insertText(spoken)
-            await normalizeInputSoftWrap(renderer: renderer)
-        }
-    } catch {
-        await renderer.printScrollLine("\(DesignSystem.brightRed)✗ Voice input failed: \(error.localizedDescription)\(DesignSystem.reset)")
-    }
 }
 
 private func normalizedCommandInput(from input: String) -> String {

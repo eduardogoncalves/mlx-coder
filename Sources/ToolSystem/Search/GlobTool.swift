@@ -68,14 +68,19 @@ public struct GlobTool: Tool {
         process.arguments = findArgs
 
         let pipe = Pipe()
+        let errPipe = Pipe()
         process.standardOutput = pipe
-        process.standardError = Pipe()
+        process.standardError = errPipe
 
         try process.run()
-        process.waitUntilExit()
-
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        let output = String(data: data, encoding: .utf8) ?? ""
+        // Drain concurrently — `find` over a deep workspace can produce more
+        // than the kernel pipe buffer (~16-64 KiB) of paths, deadlocking the
+        // child if we wait for exit before reading.
+        let (output, _) = ProcessIO.drainAndWait(
+            process: process,
+            stdoutPipe: pipe,
+            stderrPipe: errPipe
+        )
 
         let files = output
             .components(separatedBy: "\n")

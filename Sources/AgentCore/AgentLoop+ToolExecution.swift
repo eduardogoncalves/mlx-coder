@@ -112,6 +112,46 @@ extension AgentLoop {
             return false
         }
 
+        // Reject command flags that mutate the filesystem even on otherwise
+        // read-only commands. Each token below either deletes (`-delete`),
+        // spawns another mutating command (`-exec`, `-execdir`, `-ok`,
+        // `-okdir`), or writes its results into an attacker-controlled file
+        // outside of any redirection check (`-fprint`, `-fprintf`, `-fls`
+        // take a destination filename argument). Tokens are checked whole
+        // word to avoid blocking innocent substrings (e.g. a file path
+        // called "delete-old"); we additionally strip surrounding shell
+        // quotes from each token so that `find . '-delete'` and
+        // `find . "-delete"` are also caught — without this, the naive
+        // whitespace-split would treat the quoted argument as a distinct
+        // token (`'-delete'`) and miss the match.
+        let mutatingTokens: Set<String> = [
+            "-delete",
+            "-exec",
+            "-execdir",
+            "-fprint",
+            "-fprintf",
+            "-fls",
+            "-ok",
+            "-okdir",
+        ]
+        let quoteChars: Set<Character> = ["'", "\""]
+        let tokens: [String] = lowered
+            .split(whereSeparator: { $0.isWhitespace })
+            .map { rawToken in
+                // Only strip matching leading/trailing quotes so legitimate
+                // paths containing a single embedded quote (e.g.
+                // `some'file.txt`) are not silently normalised.
+                let s = String(rawToken)
+                guard let first = s.first, let last = s.last,
+                      s.count >= 2, first == last, quoteChars.contains(first) else {
+                    return s
+                }
+                return String(s.dropFirst().dropLast())
+            }
+        if tokens.contains(where: { mutatingTokens.contains($0) }) {
+            return false
+        }
+
         let mutatingPrefixes = [
             "rm ", "mv ", "cp ", "touch ", "mkdir ", "rmdir ", "chmod ", "chown ",
             "ln ", "sed -i", "perl -i", "tee ", "dd ", "truncate ",
