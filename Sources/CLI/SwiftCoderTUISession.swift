@@ -334,7 +334,12 @@ public func runSwiftCoderTUISession(
             // previous direct call to `VoiceInput.transcribe()` would hang
             // because its `read(STDIN_FILENO, …)` poll never saw the user's
             // Enter byte (the background reader consumed it first).
-            _ = await renderer.triggerVoiceInput()
+            let triggered = await renderer.triggerVoiceInput()
+            if !triggered {
+                await renderer.printScrollLine(
+                    "\(DesignSystem.brightRed)✗ Voice input is not configured in this session.\(DesignSystem.reset)"
+                )
+            }
             await normalizeInputSoftWrap(renderer: renderer)
             await renderer.renderFooter()
 
