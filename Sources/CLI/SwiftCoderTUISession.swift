@@ -643,6 +643,30 @@ public func runSwiftCoderTUISession(
                 }
                 continue
             }
+            if TUIFeatureDevCommand.matches(commandInput) {
+                if await renderer.getIsGenerating() {
+                    await renderer.printScrollLine("\(DesignSystem.brightRed)✗ /feature-dev unavailable while generation is active. Press Esc first.\(DesignSystem.reset)")
+                    continue
+                }
+                let args = TUIFeatureDevCommand.arguments(from: commandInput)
+                let featurePrompt = TUIFeatureDevCommand.buildPrompt(arguments: args)
+                await renderer.printScrollLine("\(DesignSystem.dim)\(TUIFeatureDevCommand.statusLine(arguments: args))\(DesignSystem.reset)")
+                lastUserPrompt = featurePrompt
+                activeStreamTask = Task { @MainActor in
+                    defer { activeStreamTask = nil }
+                    do {
+                        try await agentLoop.processUserMessage(featurePrompt)
+                    } catch is CancellationError {
+                        // abortGeneration() already printed "· Aborted" and cleaned up the UI.
+                    } catch {
+                        await renderer.printScrollLine("\(DesignSystem.brightRed)✗ \(error.localizedDescription)\(DesignSystem.reset)")
+                    }
+                    await renderer.flushStreamLine()
+                    await renderer.setPendingCount(0)
+                    await renderer.renderFooter()
+                }
+                continue
+            }
             if commandInput.hasPrefix("/ask ") || commandInput == "/ask" {
                 let question: String
                 if commandInput == "/ask" {
@@ -1024,6 +1048,7 @@ private func helpLines() -> [String] {
         "  /steer [msg] queue/list steering messages",
         "  /followup [msg] queue/list follow-ups",
         "  /ask [question] ask a quick side question without changing main context",
+        "  /feature-dev [description] guided 7-phase feature-development workflow",
         "  /merge-approval run merge approval flow",
         "  /gittree run git tree flow",
         "  /quit    exit the TUI",
