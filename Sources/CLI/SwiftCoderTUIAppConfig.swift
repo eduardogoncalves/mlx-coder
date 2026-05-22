@@ -85,6 +85,7 @@ public enum SwiftCoderTUIAppConfigBuilder {
                 AppConfig.CommandConfig(name: "/steer",   description: "Set steering instructions"),
                 AppConfig.CommandConfig(name: "/followup", description: "Set follow-up prompts"),
                 AppConfig.CommandConfig(name: "/ask",     description: "Ask a side question without changing main context"),
+                AppConfig.CommandConfig(name: "/feature-dev", description: "Guided 7-phase feature-development workflow"),
                 AppConfig.CommandConfig(name: "/merge-approval", description: "Configure merge approvals"),
                 AppConfig.CommandConfig(name: "/gittree", description: "Inspect git tree/worktree"),
                 AppConfig.CommandConfig(name: "/memory",  description: "Memory subsystem (save/list/search/...)"),

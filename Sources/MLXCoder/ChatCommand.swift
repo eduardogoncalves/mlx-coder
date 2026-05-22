@@ -622,6 +622,26 @@ struct ChatCommand: AsyncParsableCommand {
                 continue
             }
 
+            if TUIFeatureDevCommand.matches(trimmed) {
+                let args = TUIFeatureDevCommand.arguments(from: trimmed)
+                let featurePrompt = TUIFeatureDevCommand.buildPrompt(arguments: args)
+                renderer.printStatus(TUIFeatureDevCommand.statusLine(arguments: args))
+                renderer.printStatus("[Key mode] Generation active. Press Esc to cancel.")
+                let task = Task {
+                    try await agentLoop.processUserMessage(featurePrompt)
+                }
+                await CancelController.shared.setTask(task)
+                do {
+                    try await task.value
+                } catch is CancellationError {
+                    renderer.printError("[feature-dev] Generation cancelled.")
+                } catch {
+                    renderer.printError(error.localizedDescription)
+                }
+                await CancelController.shared.setTask(nil)
+                continue
+            }
+
             // Memory commands
             if trimmed.hasPrefix("/memory") {
                 await handleMemoryCommand(
@@ -806,6 +826,7 @@ func printREPLHelp() {
       \u{001B}[32m/steer [msg]\u{001B}[0m   Queue a steering message injected between agent turns (no arg = list queue)
       \u{001B}[32m/followup [msg]\u{001B}[0m Queue a follow-up run after the current task (no arg = list queue)
       \u{001B}[32m/ask <question>\u{001B}[0m Ask a quick side question without affecting the main conversation
+      \u{001B}[32m/feature-dev [desc]\u{001B}[0m Guided 7-phase feature-development workflow (discovery → review)
       \u{001B}[32m/merge-approval\u{001B}[0m Trigger the "Awaiting approval before merge" flow
       \u{001B}[32m/gittree\u{001B}[0m       List git worktrees and switch workspace/branch to one
       \u{001B}[32m/sandbox\u{001B}[0m       Toggle macOS Seatbelt sandbox for shell commands
