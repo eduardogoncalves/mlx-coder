@@ -6,31 +6,84 @@ import Foundation
 public struct ToolPromptFilter: Sendable {
     public let modeHint: String
     public let taskTypeHint: String
-    public let maxTools: Int
-    public let maxMCPTools: Int
     public let includeMCPTools: Bool
+    public let selectedToolNames: [String]?
 
     public init(
         modeHint: String,
         taskTypeHint: String,
-        maxTools: Int,
-        maxMCPTools: Int,
-        includeMCPTools: Bool = true
+        includeMCPTools: Bool = true,
+        selectedToolNames: [String]? = nil
     ) {
         self.modeHint = modeHint
         self.taskTypeHint = taskTypeHint
-        self.maxTools = max(1, maxTools)
-        self.maxMCPTools = max(0, maxMCPTools)
         self.includeMCPTools = includeMCPTools
+        self.selectedToolNames = selectedToolNames
     }
 
     public static let unfiltered = ToolPromptFilter(
         modeHint: "agent",
         taskTypeHint: "general",
-        maxTools: Int.max,
-        maxMCPTools: Int.max,
-        includeMCPTools: true
+        includeMCPTools: true,
+        selectedToolNames: nil
     )
+}
+
+public enum ToolInjectionSelection {
+    public static let baseTools = [
+        "read_file", "read_many", "list_dir", "glob", "grep",
+        "write_file", "edit_file", "bash", "todo"
+    ]
+
+    // LSP and semantic search tools help the agent inspect symbols precisely before editing code.
+    public static let lspTools = [
+        "lsp_diagnostics", "lsp_definition", "lsp_references",
+        "lsp_rename", "lsp_hover", "lsp_completion",
+        "lsp_signature_help", "code_search"
+    ]
+
+    // Patch-oriented mutation tools support targeted edits without broad file rewrites.
+    public static let patchTools = [
+        "patch", "append_file"
+    ]
+
+    // Planning tools let the agent persist structured implementation plans when the task is exploratory.
+    public static let planningTools = [
+        "plan_file"
+    ]
+
+    // Agent tools enable orchestration by delegating bounded work to sub-agents.
+    public static let agentTools = [
+        "task"
+    ]
+
+    public static func toolNames(forTaskType taskType: String) -> [String] {
+        let ephemeralGroups: [[String]]
+
+        switch taskType.lowercased() {
+        case "code_edit":
+            ephemeralGroups = [lspTools, patchTools]
+        case "planning":
+            ephemeralGroups = [planningTools]
+        case "orchestration":
+            ephemeralGroups = [agentTools]
+        case "general":
+            ephemeralGroups = []
+        default:
+            ephemeralGroups = []
+        }
+
+        var selected: [String] = []
+        var seen = Set<String>()
+
+        for name in baseTools + ephemeralGroups.flatMap({ $0 }) {
+            if seen.insert(name).inserted {
+                selected.append(name)
+            }
+        }
+
+        return selected
+    }
 }
 
 /// Thread-safe registry of available tools.
@@ -59,6 +112,12 @@ public actor ToolRegistry {
     /// Number of registered tools.
     public var count: Int {
         tools.count
+    }
+
+    /// Return the tool instances that should be injected for the given task type.
+    /// Unknown task types fall back to the base tool set for backwards compatibility.
+    public func getToolsForTask(taskType: String) -> [any Tool] {
+        ToolInjectionSelection.toolNames(forTaskType: taskType).compactMap { tools[$0] }
     }
 
     /// Remove all registered tools.
@@ -104,81 +163,34 @@ public actor ToolRegistry {
     }
 
     private func filteredTools(for filter: ToolPromptFilter) -> [(String, any Tool)] {
-        if filter.maxTools == Int.max,
-           filter.maxMCPTools == Int.max,
-           filter.includeMCPTools {
-            return tools.sorted(by: { $0.key < $1.key })
-        }
+        var selected: [(String, any Tool)]
 
-        let task = filter.taskTypeHint.lowercased()
-        let mode = filter.modeHint.lowercased()
-        let includeMCP = filter.includeMCPTools
-
-        var ranked: [(String, any Tool, score: Int)] = []
-        ranked.reserveCapacity(tools.count)
-
-        for (name, tool) in tools {
-            if !includeMCP, name.hasPrefix("mcp_") {
-                continue
-            }
-            ranked.append((name, tool, relevanceScore(toolName: name, mode: mode, task: task)))
-        }
-
-        ranked.sort { lhs, rhs in
-            if lhs.score == rhs.score {
-                return lhs.0 < rhs.0
-            }
-            return lhs.score > rhs.score
-        }
-
-        let mcpCap = filter.maxMCPTools
-        var mcpCount = 0
-        var selected: [(String, any Tool)] = []
-        selected.reserveCapacity(min(filter.maxTools, ranked.count))
-
-        for candidate in ranked {
-            if selected.count >= filter.maxTools {
-                break
-            }
-
-            if candidate.0.hasPrefix("mcp_") {
-                if mcpCount >= mcpCap {
-                    continue
+        if let selectedToolNames = filter.selectedToolNames {
+            let selectedNameSet = Set(selectedToolNames)
+            selected = selectedToolNames.compactMap { name in
+                guard let tool = tools[name] else { return nil }
+                if !filter.includeMCPTools, name.hasPrefix("mcp_") {
+                    return nil
                 }
-                mcpCount += 1
+                return (name, tool)
             }
 
-            selected.append((candidate.0, candidate.1))
+            if filter.includeMCPTools {
+                let additionalMCPTools = tools
+                    .filter { name, _ in
+                        name.hasPrefix("mcp_") && !selectedNameSet.contains(name)
+                    }
+                    .sorted(by: { $0.key < $1.key })
+                selected.append(contentsOf: additionalMCPTools.map { ($0.key, $0.value) })
+            }
+        } else {
+            selected = tools
+                .filter { name, _ in
+                    filter.includeMCPTools || !name.hasPrefix("mcp_")
+                }
+                .sorted(by: { $0.key < $1.key })
         }
 
         return selected.sorted(by: { $0.0 < $1.0 })
-    }
-
-    private func relevanceScore(toolName name: String, mode: String, task: String) -> Int {
-        let isPlan = mode == "plan"
-
-        switch name {
-        case "read_file", "list_dir", "glob", "grep", "code_search", "read_many":
-            return task == "coding" ? 100 : 90
-        case "plan_file":
-            return isPlan ? 99 : 72
-        case "edit_file", "write_file", "append_file", "patch":
-            return isPlan ? 20 : (task == "coding" ? 95 : 70)
-        case "bash":
-            return isPlan ? 30 : (task == "coding" ? 94 : 75)
-        case "task", "todo":
-            return 88
-        case "build_check":
-            return task == "coding" ? 89 : 55
-        case "lsp_diagnostics", "lsp_hover", "lsp_references", "lsp_definition", "lsp_completion", "lsp_signature_help", "lsp_document_symbols", "lsp_rename":
-            return task == "coding" ? 93 : 25
-        case "web_fetch", "web_search":
-            return task == "general" ? 82 : 60
-        default:
-            if name.hasPrefix("mcp_") {
-                return task == "general" ? 50 : 35
-            }
-            return 40
-        }
     }
 }

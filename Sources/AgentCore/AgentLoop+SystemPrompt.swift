@@ -161,15 +161,25 @@ extension AgentLoop {
     }
 
     static func buildToolPromptFilter(mode: WorkingMode, taskType: TaskType) -> ToolPromptFilter {
-        switch (mode, taskType) {
-        case (.plan, _):
-            return ToolPromptFilter(modeHint: mode.rawValue, taskTypeHint: taskType.rawValue, maxTools: 14, maxMCPTools: 1)
-        case (.agent, .coding):
-            return ToolPromptFilter(modeHint: mode.rawValue, taskTypeHint: taskType.rawValue, maxTools: 22, maxMCPTools: 2)
-        case (.agent, .reasoning):
-            return ToolPromptFilter(modeHint: mode.rawValue, taskTypeHint: taskType.rawValue, maxTools: 16, maxMCPTools: 1)
-        case (.agent, .general):
-            return ToolPromptFilter(modeHint: mode.rawValue, taskTypeHint: taskType.rawValue, maxTools: 18, maxMCPTools: 2)
+        let systemPromptTaskType = toolTaskType(mode: mode, taskType: taskType)
+        return ToolPromptFilter(
+            modeHint: mode.rawValue,
+            taskTypeHint: systemPromptTaskType,
+            includeMCPTools: false,
+            selectedToolNames: ToolInjectionSelection.toolNames(forTaskType: systemPromptTaskType)
+        )
+    }
+
+    static func toolTaskType(mode: WorkingMode, taskType: TaskType) -> String {
+        if mode == .plan {
+            return "planning"
+        }
+
+        switch taskType {
+        case .coding:
+            return "code_edit"
+        case .general, .reasoning:
+            return "general"
         }
     }
 

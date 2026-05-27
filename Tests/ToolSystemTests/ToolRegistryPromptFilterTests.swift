@@ -30,75 +30,82 @@ final class ToolRegistryPromptFilterTests: XCTestCase {
         XCTAssertEqual(names, ["bash", "mcp_docs_search", "read_file"])
     }
 
-    func testGenerateToolsBlockCodingFilterPrioritizesCodingTools() async throws {
+    func testToolSelectionForCodeEditIncludesBaseAndEphemeralGroups() {
+        XCTAssertEqual(
+            ToolInjectionSelection.toolNames(forTaskType: "code_edit"),
+            [
+                "read_file", "read_many", "list_dir", "glob", "grep",
+                "write_file", "edit_file", "bash", "todo",
+                "lsp_diagnostics", "lsp_definition", "lsp_references",
+                "lsp_rename", "lsp_hover", "lsp_completion",
+                "lsp_signature_help", "code_search",
+                "patch", "append_file"
+            ]
+        )
+    }
+
+    func testToolSelectionForPlanningIncludesBaseAndPlanFile() {
+        XCTAssertEqual(
+            ToolInjectionSelection.toolNames(forTaskType: "planning"),
+            [
+                "read_file", "read_many", "list_dir", "glob", "grep",
+                "write_file", "edit_file", "bash", "todo",
+                "plan_file"
+            ]
+        )
+    }
+
+    func testToolSelectionForUnknownTaskFallsBackToBaseOnly() {
+        XCTAssertEqual(
+            ToolInjectionSelection.toolNames(forTaskType: "something_else"),
+            ToolInjectionSelection.baseTools
+        )
+    }
+
+    func testGetToolsForTaskReturnsOnlyRegisteredMatchingTools() async {
         let registry = ToolRegistry()
         await registry.register(MockTool(name: "read_file", description: "Read file"))
         await registry.register(MockTool(name: "bash", description: "Run shell"))
-        await registry.register(MockTool(name: "lsp_definition", description: "LSP defs"))
-        await registry.register(MockTool(name: "web_search", description: "Web search"))
+        await registry.register(MockTool(name: "plan_file", description: "Persist PLAN.MD"))
+        await registry.register(MockTool(name: "web_search", description: "Search web"))
 
-        let filter = ToolPromptFilter(modeHint: "agent", taskTypeHint: "coding", maxTools: 3, maxMCPTools: 0)
-        let block = try await registry.generateToolsBlock(filter: filter)
-        let names = try extractToolNames(fromToolsBlock: block)
+        let tools = await registry.getToolsForTask(taskType: "planning")
+        let names = tools.map(\.name).sorted()
 
-        XCTAssertEqual(Set(names), Set(["read_file", "bash", "lsp_definition"]))
+        XCTAssertEqual(names, ["bash", "plan_file", "read_file"])
         XCTAssertFalse(names.contains("web_search"))
     }
 
-    func testGenerateToolsBlockRespectsMCPToolCap() async throws {
-        let registry = ToolRegistry()
-        await registry.register(MockTool(name: "read_file", description: "Read file"))
-        await registry.register(MockTool(name: "mcp_docs_search", description: "Search docs"))
-        await registry.register(MockTool(name: "mcp_docs_fetch", description: "Fetch docs"))
-        await registry.register(MockTool(name: "mcp_git_open_pr", description: "Open PR"))
-
-        let filter = ToolPromptFilter(modeHint: "agent", taskTypeHint: "general", maxTools: 10, maxMCPTools: 1)
-        let block = try await registry.generateToolsBlock(filter: filter)
-        let names = try extractToolNames(fromToolsBlock: block)
-
-        let mcpNames = names.filter { $0.hasPrefix("mcp_") }
-        XCTAssertEqual(mcpNames.count, 1)
-    }
-
-    func testGenerateToolsBlockFilterReducesTokenFootprint() async throws {
+    func testGenerateToolsBlockWithSelectedToolNamesOnlyInjectsRelevantTools() async throws {
         let registry = ToolRegistry()
 
-        let names = [
-            "read_file", "list_dir", "glob", "grep", "code_search", "read_many",
-            "plan_file", "write_file", "edit_file", "append_file", "patch", "bash", "todo", "task",
-            "lsp_diagnostics", "lsp_definition", "lsp_references", "lsp_hover", "lsp_completion",
-            "web_fetch", "web_search", "build_check", "mcp_docs_search", "mcp_docs_fetch"
-        ]
-
-        for name in names {
+        for name in [
+            "read_file", "read_many", "list_dir", "glob", "grep",
+            "write_file", "edit_file", "bash", "todo",
+            "plan_file", "web_search", "mcp_docs_search"
+        ] {
             await registry.register(MockTool(name: name, description: "Tool \(name)"))
         }
 
-        let fullBlock = try await registry.generateToolsBlock()
-        let filteredBlock = try await registry.generateToolsBlock(
-            filter: ToolPromptFilter(modeHint: "plan", taskTypeHint: "general", maxTools: 14, maxMCPTools: 1)
-        )
-
-        let fullTokens = fullBlock.count / 4
-        let filteredTokens = filteredBlock.count / 4
-
-        XCTAssertLessThan(filteredTokens, fullTokens)
-        XCTAssertGreaterThan(fullTokens - filteredTokens, 50)
-    }
-
-    func testGenerateToolsBlockPlanFilterKeepsPlanFile() async throws {
-        let registry = ToolRegistry()
-        await registry.register(MockTool(name: "read_file", description: "Read file"))
-        await registry.register(MockTool(name: "plan_file", description: "Persist PLAN.MD"))
-        await registry.register(MockTool(name: "write_file", description: "Write file"))
-        await registry.register(MockTool(name: "bash", description: "Run shell"))
-
         let block = try await registry.generateToolsBlock(
-            filter: ToolPromptFilter(modeHint: "plan", taskTypeHint: "general", maxTools: 2, maxMCPTools: 0)
+            filter: ToolPromptFilter(
+                modeHint: "plan",
+                taskTypeHint: "planning",
+                includeMCPTools: false,
+                selectedToolNames: ToolInjectionSelection.toolNames(forTaskType: "planning")
+            )
         )
         let names = try extractToolNames(fromToolsBlock: block)
 
-        XCTAssertTrue(names.contains("plan_file"))
+        XCTAssertEqual(
+            names,
+            [
+                "bash", "edit_file", "glob", "grep", "list_dir",
+                "plan_file", "read_file", "read_many", "todo", "write_file"
+            ]
+        )
+        XCTAssertFalse(names.contains("web_search"))
+        XCTAssertFalse(names.contains("mcp_docs_search"))
     }
 
     private func extractToolNames(fromToolsBlock block: String) throws -> [String] {
