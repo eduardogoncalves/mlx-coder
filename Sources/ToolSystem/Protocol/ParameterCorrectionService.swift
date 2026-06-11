@@ -243,6 +243,19 @@ public struct ParameterCorrectionService: Sendable {
 
             // Try to find the best matching text in the file
             if let bestMatch = findBestMatch(for: oldText, in: fileContent) {
+                let normalizedBestMatch = normalizeEditText(bestMatch)
+                let normalizedNewText = normalizeEditText(newText)
+
+                // Never rewrite old_text into the replacement text. That produces
+                // misleading previews and can turn a search/replace into a no-op.
+                guard normalizedBestMatch != normalizedNewText else {
+                    return ParameterCorrectionResult(
+                        wasCorrected: !corrections.isEmpty,
+                        correctedArguments: corrected,
+                        corrections: corrections
+                    )
+                }
+
                 corrections.append("Auto-corrected old_text: '\(oldText.prefix(50))...' -> '\(bestMatch.prefix(50))...' (fuzzy match in file)")
                 corrected["old_text"] = bestMatch
                 corrected["new_text"] = newText
@@ -339,6 +352,14 @@ public struct ParameterCorrectionService: Sendable {
             bigrams.append(String(chars[i...i+1]))
         }
         return bigrams
+    }
+
+    private static func normalizeEditText(_ text: String) -> String {
+        text
+            .components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .joined(separator: "\n")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     // MARK: - Read File Tool

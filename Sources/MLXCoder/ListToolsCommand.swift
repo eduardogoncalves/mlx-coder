@@ -214,6 +214,7 @@ private func builtinToolCatalog(includeDotnetTools: Bool) -> [ToolCatalogEntry] 
         ToolCatalogEntry(name: "bash", category: "shell", description: "Execute shell commands with permission checks."),
         ToolCatalogEntry(name: "task", category: "agent", description: "Delegate a subtask to a sub-agent with specialist profiles and optional isolated execution."),
         ToolCatalogEntry(name: "todo", category: "agent", description: "Manage persistent todo items."),
+        ToolCatalogEntry(name: "read_skill", category: "agent", description: "Load a skill's full SKILL.md instructions by name, with pagination."),
         ToolCatalogEntry(name: "project_expert_lora", category: "agent", description: "Project LoRA expert tool (experimental)."),
         ToolCatalogEntry(name: "web_fetch", category: "web", description: "Fetch and summarize web content."),
         ToolCatalogEntry(name: "web_search", category: "web", description: "Search the web for recent information.")

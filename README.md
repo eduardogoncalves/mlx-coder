@@ -81,19 +81,17 @@ mlx-coder provides six subcommands: **chat** (interactive REPL), **run** (single
 
 ### Interactive Chat
 
-Start an interactive session:
+Start an interactive session (opens the SwiftCoderTUI interface by default):
 
 ```bash
 mlx-coder chat
 ```
 
-Experimental TUI mode is also available:
+The legacy line-based renderer is still available:
 
 ```bash
-mlx-coder chat --ui tui
+mlx-coder chat --ui legacy
 ```
-
-The TUI interface is still experimental and may change between releases.
 
 With custom options:
 
@@ -304,6 +302,24 @@ Example:
   ]
 }
 ```
+
+## Workspace Environment Variables
+
+Project-scoped environment variables can be declared in a dotenv-style file at the workspace root: `.mlx-coder.env`. They are loaded automatically every time the agent starts in the project, exported to the agent process, and injected into every `bash` tool subprocess.
+
+```bash
+# .mlx-coder.env
+DOTNET_CLI_HOME=.dotnet
+NUGET_PACKAGES=packages/nuget
+PATH=/Users/me/.dotnet/tools
+```
+
+Rules:
+
+- `KEY=VALUE` lines, `#` comments, optional `export ` prefix, and optional quotes around values.
+- Loader/shell-behavior variables (`DYLD_*`, `LD_*`, `IFS`, `PS4`, `ENV`, `BASH_ENV`, `ZDOTDIR`, `SHELLOPTS`, `PROMPT_COMMAND`) are ignored for safety.
+- `PATH` entries are appended after the secure base PATH, never replace it.
+- With the sandbox enabled, `DOTNET_CLI_HOME` defaults to `<workspace>/.dotnet` (the Seatbelt profile blocks dotnet's home-directory detection); set it in `.mlx-coder.env` to override.
 
 ## Runtime Config Hierarchy
 

@@ -646,6 +646,8 @@ public struct TaskTool: Tool {
             await registry.register(BashTool(permissions: permissions, useSandbox: useSandbox))
         case "todo":
             await registry.register(TodoTool(workspaceRoot: permissions.workspaceRoot))
+        case "read_skill":
+            await registry.register(ReadSkillTool(skills: SkillsRegistry(workspaceRoot: permissions.workspaceRoot)))
         case "project_expert_lora":
             await registry.register(ProjectExpertLoRATool(modelContainer: modelContainer, workspaceRoot: permissions.workspaceRoot, modelPath: modelPath, frontend: frontend))
         case "web_fetch":

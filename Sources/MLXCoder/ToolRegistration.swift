@@ -14,7 +14,8 @@ func registerAllTools(
     config: GenerationEngine.Config,
     renderer: StreamRenderer,
     frontend: any AgentFrontend,
-    mcpConfigs: [MCPClient.ServerConfig] = []
+    mcpConfigs: [MCPClient.ServerConfig] = [],
+    skillsRegistry: SkillsRegistry? = nil
 ) async {
     // Filesystem tools
     await registry.register(ReadFileTool(permissions: permissions))
@@ -46,6 +47,11 @@ func registerAllTools(
     ))
     await registry.register(TodoTool(workspaceRoot: permissions.workspaceRoot))
     await registry.register(ProjectExpertLoRATool(modelContainer: modelContainer, workspaceRoot: permissions.workspaceRoot, modelPath: modelPath, frontend: frontend))
+
+    // Skills
+    await registry.register(ReadSkillTool(
+        skills: skillsRegistry ?? SkillsRegistry(workspaceRoot: permissions.workspaceRoot)
+    ))
 
     // Web tools
     await registry.register(WebFetchTool(

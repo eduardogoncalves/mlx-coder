@@ -39,6 +39,9 @@ extension AgentLoop {
         await registry.register(TodoTool(workspaceRoot: permissions.workspaceRoot))
         await registry.register(ProjectExpertLoRATool(modelContainer: modelContainer, workspaceRoot: permissions.workspaceRoot, modelPath: modelPath, frontend: frontend))
 
+        // Skills
+        await registry.register(ReadSkillTool(skills: SkillsRegistry(workspaceRoot: permissions.workspaceRoot)))
+
         // Web tools
         await registry.register(WebFetchTool(
             modelContainer: modelContainer,
@@ -215,20 +218,39 @@ extension AgentLoop {
         let previewContent: String
         switch call.toolName {
         case "edit_file":
-            if let originalContent,
-               let oldText = (
-                (call.otherArgs["old_text"] as? String)
-                ?? (call.otherArgs["oldText"] as? String)
-                ?? (call.otherArgs["old"] as? String)
-                ?? (call.otherArgs["search_text"] as? String)
-                ?? (call.otherArgs["searchText"] as? String)
-               ),
-               !oldText.isEmpty,
-               let range = originalContent.range(of: oldText) {
-                previewContent = originalContent.replacingCharacters(in: range, with: tmpContent)
+            if let originalContent {
+                var previewArguments = call.otherArgs
+                previewArguments["path"] = call.path
+                previewArguments["new_text"] = tmpContent
+
+                let correctedPreviewArguments = await ParameterCorrectionService.correct(
+                    toolName: "edit_file",
+                    arguments: previewArguments,
+                    workspaceRoot: permissions.effectiveWorkspaceRoot
+                ).correctedArguments
+
+                let oldText = (
+                    correctedPreviewArguments["old_text"] as? String
+                ) ?? (
+                    correctedPreviewArguments["oldText"] as? String
+                ) ?? (
+                    correctedPreviewArguments["old"] as? String
+                ) ?? (
+                    correctedPreviewArguments["search_text"] as? String
+                ) ?? (
+                    correctedPreviewArguments["searchText"] as? String
+                )
+
+                if let oldText,
+                   !oldText.isEmpty,
+                   let range = originalContent.range(of: oldText) {
+                    previewContent = originalContent.replacingCharacters(in: range, with: tmpContent)
+                } else {
+                    // If preview-time matching fails, keep the original content so we do not
+                    // show a misleading full-file replacement diff for a localized edit.
+                    previewContent = originalContent
+                }
             } else {
-                // Fallback for malformed/partial arguments; execution-time correction
-                // still handles these cases before writing.
                 previewContent = tmpContent
             }
         case "append_file":

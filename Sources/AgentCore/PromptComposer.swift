@@ -58,7 +58,8 @@ public enum PromptComposer {
                     return "- \(skill.name): \(skill.description) (\(skill.filePath), tags: \(skill.tags.joined(separator: ", ")))"
                 }
                 .joined(separator: "\n")
-            layers.append((.skills, "Available skills metadata:\n\(skillsBody)"))
+            let skillsFooter = "To apply a skill, load its full instructions with the read_skill tool (arguments: {\"name\": \"<skill-name>\"}). Do not use read_file for SKILL.md files — read_skill paginates long skills and tells you how to continue reading."
+            layers.append((.skills, "Available skills metadata:\n\(skillsBody)\n\n\(skillsFooter)"))
         }
 
         layers.append((.tools, toolsBlock))

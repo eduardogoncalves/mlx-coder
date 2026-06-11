@@ -31,7 +31,7 @@ public struct ToolPromptFilter: Sendable {
 
 public enum ToolInjectionSelection {
     public static let baseTools = [
-        "read_file", "read_many", "list_dir", "glob", "grep",
+        "read_file", "read_many", "read_skill", "list_dir", "glob", "grep",
         "write_file", "edit_file", "bash", "todo"
     ]
 

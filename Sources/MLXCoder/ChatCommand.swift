@@ -85,6 +85,12 @@ struct ChatCommand: AsyncParsableCommand {
         // so that project_root values are consistent across sessions.
         let absWorkspace = URL(fileURLWithPath: rawWorkspace).standardized.path
         let runtimeConfig = RuntimeConfigLoader.loadMerged(workspaceRoot: absWorkspace)
+        // Auto-load project env vars from <workspace>/.mlx-coder.env so child
+        // processes (bash tool, LSP servers, …) inherit them every session.
+        let workspaceEnv = WorkspaceEnvironment.applyToCurrentProcess(workspaceRoot: absWorkspace)
+        if !workspaceEnv.isEmpty {
+            renderer.printStatus("Loaded \(workspaceEnv.count) workspace env var(s) from \(WorkspaceEnvironment.fileName)")
+        }
         let effectiveApprovalMode = resolvedApprovalMode(from: args.approvalMode, runtimeConfig: runtimeConfig)
         let effectivePolicyFile = args.policyFile ?? runtimeConfig.defaultPolicyFile
         let effectiveAuditLogPath = args.auditLogPath ?? runtimeConfig.defaultAuditLogPath
@@ -123,6 +129,7 @@ struct ChatCommand: AsyncParsableCommand {
             includeOverride: args.mcpInclude,
             excludeOverride: args.mcpExclude
         )
+        let skillsRegistry = SkillsRegistry(workspaceRoot: absWorkspace)
         await registerAllTools(
             registry: registry,
             permissions: permissions,
@@ -135,14 +142,14 @@ struct ChatCommand: AsyncParsableCommand {
             mcpConfigs: mergedMCPConfigs(
                 runtimeConfigs: runtimeMCPConfigs,
                 cliConfig: makeMCPServerConfig(from: args)
-            )
+            ),
+            skillsRegistry: skillsRegistry
         )
 
         let toolCount = await registry.count
         renderer.printStatus("Registered \(toolCount) tools")
 
         // Build layered system prompt with optional skills metadata and memory restoration.
-        let skillsRegistry = SkillsRegistry(workspaceRoot: absWorkspace)
         let skillMetadata = await skillsRegistry.listMetadata()
         let hooks = HookPipeline()
         await hooks.register(AuditHook(logger: auditLogger))

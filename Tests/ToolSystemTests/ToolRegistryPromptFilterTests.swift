@@ -34,7 +34,7 @@ final class ToolRegistryPromptFilterTests: XCTestCase {
         XCTAssertEqual(
             ToolInjectionSelection.toolNames(forTaskType: "code_edit"),
             [
-                "read_file", "read_many", "list_dir", "glob", "grep",
+                "read_file", "read_many", "read_skill", "list_dir", "glob", "grep",
                 "write_file", "edit_file", "bash", "todo",
                 "lsp_diagnostics", "lsp_definition", "lsp_references",
                 "lsp_rename", "lsp_hover", "lsp_completion",
@@ -48,7 +48,7 @@ final class ToolRegistryPromptFilterTests: XCTestCase {
         XCTAssertEqual(
             ToolInjectionSelection.toolNames(forTaskType: "planning"),
             [
-                "read_file", "read_many", "list_dir", "glob", "grep",
+                "read_file", "read_many", "read_skill", "list_dir", "glob", "grep",
                 "write_file", "edit_file", "bash", "todo",
                 "plan_file"
             ]

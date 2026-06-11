@@ -111,6 +111,14 @@ public func runSwiftCoderTUISession(
     var pendingTypedChunk = ""
     var pendingTypedFlushTask: Task<Void, Never>? = nil
 
+    // Deny-with-suggestion entry state. When the user picks "No, suggest
+    // changes" (or presses Esc) on an approval menu, the session switches the
+    // input box into a one-shot suggestion prompt instead of resolving the
+    // denial immediately. The previous input-box content is stashed and
+    // restored once the suggestion is submitted or cancelled.
+    var approvalSuggestionMode = false
+    var approvalStashedInput = ""
+
     // Voice input session state. `voiceProvider` is the same instance wired
     // into `AppConfig.voiceInputProvider` in `ChatCommand`, captured here so
     // the keystroke loop can call `requestStop()` (e.g. on Enter) while the
@@ -137,6 +145,17 @@ public func runSwiftCoderTUISession(
     sigwinchSource = resizeSource
 
     mainLoop: for await key in InputHandler.keystrokes() {
+        // If the approval was resolved externally (e.g. the generation task
+        // was cancelled) while the suggestion prompt was open, restore the
+        // normal input state before processing the key.
+        if approvalSuggestionMode && !frontend.hasPendingApproval {
+            approvalSuggestionMode = false
+            await renderer.setStatusNotice(nil)
+            await renderer.setInputBuffer(approvalStashedInput)
+            approvalStashedInput = ""
+            await renderer.renderFooter()
+        }
+
         // Approval intercept — when the agent has paused for a tool decision.
         // Must run before typed-character buffering so numeric choices (1-4)
         // are handled immediately instead of being swallowed into input.
@@ -144,30 +163,97 @@ public func runSwiftCoderTUISession(
             pendingTypedFlushTask?.cancel()
             pendingTypedFlushTask = nil
             pendingTypedChunk.removeAll(keepingCapacity: true)
+
+            // Suggestion entry: the user picked "No, suggest changes" and is
+            // typing feedback into the input box.
+            if approvalSuggestionMode {
+                switch key {
+                case .character(let ch):
+                    await renderer.appendChar(ch)
+                    await renderer.renderFooter()
+                case .backspace, .delete:
+                    await renderer.deleteChar()
+                    await renderer.renderFooter()
+                case .arrowLeft:
+                    await renderer.moveCursorLeft()
+                    await renderer.renderFooter()
+                case .arrowRight:
+                    await renderer.moveCursorRight()
+                    await renderer.renderFooter()
+                case .paste(let pasted):
+                    await renderer.insertText(pasted)
+                    await renderer.renderFooter()
+                case .enter:
+                    let suggestion = await renderer.getInputBuffer()
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    approvalSuggestionMode = false
+                    await renderer.setStatusNotice(nil)
+                    await renderer.setInputBuffer(approvalStashedInput)
+                    approvalStashedInput = ""
+                    await renderer.renderFooter()
+                    frontend.resolveApproval(.deny(suggestion: suggestion.isEmpty ? nil : suggestion))
+                case .escape:
+                    approvalSuggestionMode = false
+                    await renderer.setStatusNotice(nil)
+                    await renderer.setInputBuffer(approvalStashedInput)
+                    approvalStashedInput = ""
+                    await renderer.renderFooter()
+                    frontend.resolveApproval(.deny(suggestion: nil))
+                default:
+                    break
+                }
+                continue
+            }
+
             let isPlanMode = await renderer.getApprovalIsPlanMode()
             let optionCount = await renderer.getApprovalOptionCount()
+            // The deny option is always last ("No, suggest changes (esc)" /
+            // "Deny"). Picking it opens the suggestion prompt instead of
+            // resolving immediately.
+            let denyIndex = optionCount - 1
+            var startSuggestionEntry = false
+
             switch key {
             case .character(let ch):
                 if let digit = Int(String(ch)), (1...optionCount).contains(digit) {
-                    let decision = isPlanMode
-                        ? planModeDecisionForOption(digit - 1)
-                        : decisionForOption(digit - 1)
-                    frontend.resolveApproval(decision)
+                    if digit - 1 == denyIndex {
+                        startSuggestionEntry = true
+                    } else {
+                        let decision = isPlanMode
+                            ? planModeDecisionForOption(digit - 1)
+                            : decisionForOption(digit - 1)
+                        frontend.resolveApproval(decision)
+                    }
                 }
             case .enter:
                 let sel = await renderer.getApprovalSelection()
-                let decision = isPlanMode
-                    ? planModeDecisionForOption(sel)
-                    : decisionForOption(sel)
-                frontend.resolveApproval(decision)
+                if sel == nil || sel == denyIndex {
+                    startSuggestionEntry = true
+                } else {
+                    let decision = isPlanMode
+                        ? planModeDecisionForOption(sel)
+                        : decisionForOption(sel)
+                    frontend.resolveApproval(decision)
+                }
             case .escape:
-                frontend.resolveApproval(.deny(suggestion: nil))
+                startSuggestionEntry = true
             case .arrowUp:
                 await renderer.moveApprovalSelection(offset: -1)
             case .arrowDown:
                 await renderer.moveApprovalSelection(offset: 1)
             default:
                 break
+            }
+
+            if startSuggestionEntry {
+                approvalSuggestionMode = true
+                approvalStashedInput = await renderer.getInputBuffer()
+                await renderer.setInputBuffer("")
+                await renderer.clearApproval()
+                await renderer.setStatusNotice(
+                    "Denying tool call — type suggested changes and press Enter (empty = no comment, Esc = deny silently)"
+                )
+                await renderer.renderFooter()
             }
             continue
         }

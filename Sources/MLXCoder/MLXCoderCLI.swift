@@ -126,8 +126,8 @@ struct ModelArguments: ParsableArguments, Sendable {
     @Option(name: .long, help: "Initial working mode (agent or plan)")
     var mode: String = "plan"
 
-    @Option(name: .long, help: "Frontend to use: legacy (StreamRenderer) or tui (SwiftCoderTUI). Default: legacy.")
-    var ui: String = "legacy"
+    @Option(name: .long, help: "Frontend to use: tui (SwiftCoderTUI) or legacy (StreamRenderer). Default: tui.")
+    var ui: String = "tui"
 
     @Option(name: .long, help: "Seconds of silence before voice recording stops automatically (default: 2.0)")
     var voiceSilenceTimeout: Double = 2.0
