@@ -38,6 +38,7 @@ public final class StreamRenderer: @unchecked Sendable {
 
     /// Print a thinking block (only if verbose).
     public func printThinking(_ text: String) {
+        guard verbose else { return }
         print("\(Self.dim)+ \(text)\(Self.reset)")
     }
     
@@ -46,6 +47,7 @@ public final class StreamRenderer: @unchecked Sendable {
     }
     
     public func printThinkingChunk(_ text: String) {
+        guard verbose else { return }
         var output = ""
         for char in text {
             if needsPrefix {

@@ -37,8 +37,16 @@ public final class LegacyTerminalFrontend: AgentFrontend, @unchecked Sendable {
 
         case .thinkingActivity(let lifecycle):
             if lifecycle == .started {
+                // In non-verbose mode, thinking chunks are hidden. Keep a spinner
+                // visible so the user knows generation is still progressing.
+                if !renderer.verbose {
+                    startOrUpdateSpinner(message: "Thinking...")
+                }
                 renderer.startThinking()
             } else {
+                if !renderer.verbose {
+                    stopSpinner()
+                }
                 renderer.endThinking()
             }
 
@@ -46,13 +54,14 @@ public final class LegacyTerminalFrontend: AgentFrontend, @unchecked Sendable {
             if lifecycle == .started {
                 startOrUpdateSpinner(message: "Processing...")
             } else {
-                startOrUpdateSpinner(message: "Generating...")
+                // Stop the legacy spinner before token streaming begins.
+                // In non-TUI terminals, generation chunks share stdout with the
+                // spinner, and concurrent redraws can overwrite assistant text.
+                stopSpinner()
             }
 
         case .generationActivity(let lifecycle):
-            if lifecycle == .started {
-                startOrUpdateSpinner(message: "Generating...")
-            } else {
+            if lifecycle == .ended {
                 stopSpinner()
             }
 
