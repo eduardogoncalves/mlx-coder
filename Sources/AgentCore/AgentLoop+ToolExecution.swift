@@ -58,6 +58,10 @@ extension AgentLoop {
         await registry.register(LSPSignatureHelpTool(permissions: permissions))
         await registry.register(LSPDocumentSymbolsTool(permissions: permissions))
         await registry.register(LSPRenameTool(permissions: permissions))
+
+        // Memory tools
+        await registry.register(LogKnowledgeTool(workspaceRoot: permissions.workspaceRoot))
+        await registry.register(SearchKnowledgeTool(workspaceRoot: permissions.workspaceRoot))
     }
 
     func extractPolicyTargetPath(from arguments: [String: Any]) -> String? {
