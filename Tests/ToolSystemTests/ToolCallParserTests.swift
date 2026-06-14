@@ -50,13 +50,23 @@ final class ToolCallParserTests: XCTestCase {
     }
     
     func testMalformedJSONHandling() {
-        // Structural errors (missing closing brace) are not repairable → empty result
+        // Recover common truncation: missing trailing closing brace(s).
         let missingBraceText = """
         <tool_call>
         {"name": "test_tool", "arguments": {"key": "value"}
         </tool_call>
         """
-        XCTAssertTrue(ToolCallParser.parse(missingBraceText).isEmpty)
+        let recoveredCalls = ToolCallParser.parse(missingBraceText)
+        XCTAssertEqual(recoveredCalls.count, 1)
+        XCTAssertEqual(recoveredCalls[0].name, "test_tool")
+
+        // Invalid canonical JSON with non-quoted token should still fail.
+        let invalidTokenText = """
+        <tool_call>
+        {"name": "test_tool", "arguments": {"key": value}}
+        </tool_call>
+        """
+        XCTAssertTrue(ToolCallParser.parse(invalidTokenText).isEmpty)
 
         // Literal newlines inside JSON strings are sanitized and parsed successfully.
         // Models commonly emit multi-line content this way (e.g. log_knowledge).

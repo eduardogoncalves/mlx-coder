@@ -147,6 +147,12 @@ public struct ToolCallParser: Sendable {
             return call
         }
 
+        // Recover a common truncation: canonical tool-call JSON missing only
+        // trailing closing brace(s), e.g. {"name":...,"arguments":{...}
+        if let call = tryParseWithTrailingBraceRecovery(jsonString) {
+            return call
+        }
+
         // Models frequently emit multi-line content strings using literal newlines
         // instead of JSON-escaped \n sequences, making the JSON invalid.
         // Sanitize control characters within string values and retry.
@@ -156,6 +162,9 @@ public struct ToolCallParser: Sendable {
                 return call
             }
             if let call = tryParseWithFallbacks(sanitized) {
+                return call
+            }
+            if let call = tryParseWithTrailingBraceRecovery(sanitized) {
                 return call
             }
         }
@@ -228,6 +237,68 @@ public struct ToolCallParser: Sendable {
         }
 
         return tryParse(fixed)
+    }
+
+    private static func tryParseWithTrailingBraceRecovery(_ jsonString: String) -> ParsedToolCall? {
+        let trimmed = jsonString.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.contains("\"name\"") && trimmed.contains("\"arguments\"") else {
+            return nil
+        }
+
+        guard let repaired = appendMissingTrailingBracesIfSafe(trimmed), repaired != trimmed else {
+            return nil
+        }
+
+        if let call = tryParse(repaired) {
+            return call
+        }
+        return tryParseWithFallbacks(repaired)
+    }
+
+    private static func appendMissingTrailingBracesIfSafe(_ text: String) -> String? {
+        guard text.hasPrefix("{") else { return nil }
+
+        var openBraces = 0
+        var closeBraces = 0
+        var inString = false
+        var escaping = false
+
+        for char in text {
+            if escaping {
+                escaping = false
+                continue
+            }
+
+            if char == "\\" && inString {
+                escaping = true
+                continue
+            }
+
+            if char == "\"" {
+                inString.toggle()
+                continue
+            }
+
+            guard !inString else { continue }
+
+            if char == "{" {
+                openBraces += 1
+            } else if char == "}" {
+                closeBraces += 1
+                if closeBraces > openBraces {
+                    return nil
+                }
+            }
+        }
+
+        // If parsing ended inside a quoted string or escape sequence,
+        // the payload is too malformed for structural recovery.
+        guard !inString && !escaping else { return nil }
+
+        let missing = openBraces - closeBraces
+        guard missing > 0 && missing <= 2 else { return nil }
+
+        return text + String(repeating: "}", count: missing)
     }
 
     private static func extractLikelyJSONObject(_ text: String) -> String? {

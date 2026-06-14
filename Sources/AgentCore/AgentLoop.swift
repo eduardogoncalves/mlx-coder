@@ -323,6 +323,10 @@ public actor AgentLoop {
             if toolCalls.isEmpty && streamedCalls.isEmpty {
                 if hasMalformedToolCall {
                     history.addAssistant(response)
+                    frontend.emitStatus(
+                        "Malformed tool call detected; retrying with strict JSON tool-call format.",
+                        severity: .warning
+                    )
                     steeringQueue.append("Your previous tool call was malformed and could not be parsed. Re-emit only the tool call in valid JSON using the exact <tool_call>{\"name\":\"tool_name\",\"arguments\":{...}}</tool_call> format. Do not add explanation text.")
                     continue
                 }
