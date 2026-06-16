@@ -33,7 +33,8 @@ public enum ToolInjectionSelection {
     public static let baseTools = [
         "read_file", "read_many", "read_skill", "search_knowledge", "log_knowledge",
         "list_dir", "glob", "grep",
-        "write_file", "edit_file", "bash", "todo"
+        "write_file", "edit_file", "bash", "todo",
+        "web_fetch", "web_search"
     ]
 
     // LSP and semantic search tools help the agent inspect symbols precisely before editing code.
@@ -126,10 +127,15 @@ public actor ToolRegistry {
         tools.removeAll()
     }
 
-    /// Generate the <tools> XML block for the system prompt.
-    /// This follows the Qwen3 format: tools are defined inside <tools></tools>
-    /// using JSON Schema.
-    public func generateToolsBlock(filter: ToolPromptFilter = .unfiltered) throws -> String {
+    /// Generate the tools block for the system prompt.
+    ///
+    /// The wrapper differs by dialect:
+    /// - Qwen wraps the JSON array in `<tools>...</tools>`.
+    /// - LFM2 prepends `List of tools: ` to match its chat-template convention.
+    public func generateToolsBlock(
+        filter: ToolPromptFilter = .unfiltered,
+        dialect: ToolCallDialect = .qwen
+    ) throws -> String {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
 
@@ -160,7 +166,7 @@ public actor ToolRegistry {
         )
         let toolsString = String(data: toolsJSON, encoding: .utf8) ?? "[]"
 
-        return "\(ToolCallPattern.toolsOpen)\n\(toolsString)\n\(ToolCallPattern.toolsClose)"
+        return dialect.formatToolsBlock(toolsJSON: toolsString)
     }
 
     private func filteredTools(for filter: ToolPromptFilter) -> [(String, any Tool)] {

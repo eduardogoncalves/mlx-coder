@@ -7,6 +7,29 @@ final class StreamingToolCallWriterTests: XCTestCase {
         var messages: [String] = []
     }
 
+    func testLFM2DialectHidesToolCallBodyWithoutReportingFailure() throws {
+        let writer = StreamingToolCallWriter(
+            toolCallOpen: "<|tool_call_start|>",
+            toolCallClose: "<|tool_call_end|>",
+            parsesJSONBody: false
+        )
+
+        let payload = "prefix <|tool_call_start|>[list_dir(path='.')]<|tool_call_end|> suffix"
+        let result = writer.process(payload)
+
+        // The call body must not bleed into the live display.
+        XCTAssertFalse(result.displayText.contains("list_dir"))
+        XCTAssertTrue(result.displayText.contains("prefix"))
+        XCTAssertTrue(result.displayText.contains("suffix"))
+
+        // LFM2 dialect is parsed from the raw response text — the streaming
+        // writer must not flag it as a JSON parse failure.
+        XCTAssertTrue(writer.drainCompletedCalls().isEmpty)
+        XCTAssertTrue(writer.drainFailedCalls().isEmpty)
+
+        writer.cleanupAllTmpFiles()
+    }
+
     func testStreamsWriteFileWhenUsingFileContentAlias() throws {
         let writer = StreamingToolCallWriter(
             toolCallOpen: "<tool_call>",
@@ -103,6 +126,59 @@ final class StreamingToolCallWriterTests: XCTestCase {
         XCTAssertEqual(calls[0].toolName, "edit_file")
         XCTAssertEqual(calls[0].path, "hello-template.html")
         XCTAssertEqual(calls[0].otherArgs["old_text"] as? String, "Hello, I'm Eduardo")
+
+        writer.cleanupAllTmpFiles()
+    }
+
+    func testDrainTruncatedStreamRecoversPartialWriteFile() throws {
+        // Simulates the model emitting an opening tool call and partial content,
+        // then generation ending before the closing tag fires. The writer
+        // should expose the in-progress file so the agent loop can recover the
+        // bytes already streamed to disk.
+        let writer = StreamingToolCallWriter(
+            toolCallOpen: "<tool_call>",
+            toolCallClose: "</tool_call>"
+        )
+
+        // Real generation hands tokens to `process` incrementally. The state
+        // machine arms `inContentString` only when the opening quote of the
+        // content value lands inside the streaming case, so split the header
+        // before the colon-quote and feed the opening `"` plus body separately
+        // — matching how tokens actually arrive during inference.
+        let headerChunk = "<tool_call>{\"name\":\"write_file\",\"arguments\":{\"path\":\"big.html\",\"content\":"
+        let openQuoteAndBody = "\"<!doctype html>\\n<html><body>partial bytes"
+
+        _ = writer.process(headerChunk)
+        _ = writer.process(openQuoteAndBody)
+
+        XCTAssertTrue(writer.hasActiveStream, "Stream should still be active when no closing tag arrives")
+        XCTAssertTrue(writer.drainCompletedCalls().isEmpty)
+
+        let truncated = writer.drainTruncatedStream()
+        XCTAssertNotNil(truncated)
+        XCTAssertEqual(truncated?.toolName, "write_file")
+        XCTAssertEqual(truncated?.path, "big.html")
+        XCTAssertGreaterThan(truncated?.bytesWritten ?? 0, 0)
+
+        let savedContent = try String(contentsOf: truncated!.contentFile, encoding: .utf8)
+        XCTAssertTrue(savedContent.contains("<!doctype html>"))
+        XCTAssertTrue(savedContent.contains("partial bytes"))
+        XCTAssertFalse(writer.hasActiveStream, "Draining must reset state to idle")
+        XCTAssertNil(writer.drainTruncatedStream(), "Draining twice should yield nil")
+
+        writer.cleanupAllTmpFiles()
+    }
+
+    func testDrainTruncatedStreamIsNilWhenStreamCompletedCleanly() throws {
+        let writer = StreamingToolCallWriter(
+            toolCallOpen: "<tool_call>",
+            toolCallClose: "</tool_call>"
+        )
+
+        let payload = "<tool_call>{\"name\":\"write_file\",\"arguments\":{\"path\":\"ok.txt\",\"content\":\"all good\"}}</tool_call>"
+        _ = writer.process(payload)
+        XCTAssertEqual(writer.drainCompletedCalls().count, 1)
+        XCTAssertNil(writer.drainTruncatedStream())
 
         writer.cleanupAllTmpFiles()
     }

@@ -165,7 +165,8 @@ struct ChatCommand: AsyncParsableCommand {
             taskType: .general,
             workspaceRoot: absWorkspace,
             memorySection: memorySection,
-            skillsMetadata: skillMetadata
+            skillsMetadata: skillMetadata,
+            dialect: ToolCallDialect.detect(modelPath: selectedModel)
         )
 
         let agentLoop = AgentLoop(

@@ -499,7 +499,8 @@ public struct TaskTool: Tool {
             mode: .agent, // Sub-agents are usually agents
             thinkingLevel: .high, // Default to high for sub-agents
             taskType: .general,
-            baseInstructions: baseInstructions
+            baseInstructions: baseInstructions,
+            dialect: ToolCallDialect.detect(modelPath: modelPath)
         )
 
         // Instantiate a fresh AgentLoop with isolated history

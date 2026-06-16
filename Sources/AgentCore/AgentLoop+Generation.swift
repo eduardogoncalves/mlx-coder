@@ -10,8 +10,9 @@ import MLXVLM
 extension AgentLoop {
 
     /// Generate a response from the model using the current conversation history.
-    /// Returns the response text and the streaming writer (for streamed tool calls).
-    func generateResponse() async throws -> (text: String, writer: StreamingToolCallWriter) {
+    /// Returns the response text, the streaming writer (for streamed tool calls),
+    /// and whether the response began inside a pre-filled `<think>` block.
+    func generateResponse() async throws -> (text: String, writer: StreamingToolCallWriter, startedThinking: Bool) {
         // Apply context transforms (snapshot — does not mutate stored history)
         var transformedMessages = history.messages
         for (index, transform) in contextTransforms.enumerated() {
@@ -28,6 +29,7 @@ extension AgentLoop {
         pendingImages = []
 
         let isGemma4Model = modelPath.lowercased().contains("gemma-4")
+        let dialect = toolCallDialect
         // Use the model container to prepare input and generate.
         // Only image turns need the processor path; plain text stays on the direct ChatML path.
         let modelContainer = try requireLoadedModelContainer()
@@ -78,7 +80,7 @@ extension AgentLoop {
             )
         }
 
-        let result = try await modelContainer.perform { [currentGenerationConfig, frontend, chatML, imageURLs, vlmMessageData, vlmLastUserIndex, shouldUseProcessorPath, isVLM] context in
+        let result = try await modelContainer.perform { [currentGenerationConfig, frontend, chatML, imageURLs, vlmMessageData, vlmLastUserIndex, shouldUseProcessorPath, isVLM, dialect] context in
             if Task.isCancelled { throw CancellationError() }
             var hasTokenProcessingEnded = false
             var hasGenerationStarted = false
@@ -159,8 +161,9 @@ extension AgentLoop {
             try? FileManager.default.removeItem(at: tmpDir)
             // Streaming writer: streams tool call content to .tmp files during generation
             let writer = StreamingToolCallWriter(
-                toolCallOpen: ToolCallPattern.toolCallOpen,
-                toolCallClose: ToolCallPattern.toolCallClose,
+                toolCallOpen: dialect.toolCallOpen,
+                toolCallClose: dialect.toolCallClose,
+                parsesJSONBody: dialect.supportsStreamingJSONContent,
                 onStatusChange: { message in
                     let severity: StatusMessage.Severity = message.hasPrefix(StreamingToolCallWriter.tmpFileStatusPrefix)
                         ? .info
@@ -337,7 +340,7 @@ extension AgentLoop {
             rawResponseText = rawResponseText.replacingOccurrences(of: ToolCallPattern.eosToken, with: "")
             rawResponseText = rawResponseText.trimmingCharacters(in: .whitespacesAndNewlines)
             
-            return (text: rawResponseText, writer: writer)
+            return (text: rawResponseText, writer: writer, startedThinking: enableThinking)
         }
 
         return result

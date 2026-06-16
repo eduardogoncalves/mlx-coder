@@ -64,6 +64,7 @@ extension AgentLoop {
 
         frontend.emit(.modelLifecycle(.unloading("Unloading current model...")))
         modelPath = trimmed
+        toolCallDialect = ToolCallDialect.detect(modelPath: trimmed)
         pendingReload = false
         try await reloadModel()
     }
@@ -86,6 +87,7 @@ extension AgentLoop {
         }
 
         modelPath = trimmed
+        toolCallDialect = ToolCallDialect.detect(modelPath: trimmed)
         pendingReload = true
     }
 

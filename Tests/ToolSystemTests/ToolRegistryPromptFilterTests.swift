@@ -37,6 +37,7 @@ final class ToolRegistryPromptFilterTests: XCTestCase {
                 "read_file", "read_many", "read_skill", "search_knowledge", "log_knowledge",
                 "list_dir", "glob", "grep",
                 "write_file", "edit_file", "bash", "todo",
+                "web_fetch", "web_search",
                 "lsp_diagnostics", "lsp_definition", "lsp_references",
                 "lsp_rename", "lsp_hover", "lsp_completion",
                 "lsp_signature_help", "code_search",
@@ -52,6 +53,7 @@ final class ToolRegistryPromptFilterTests: XCTestCase {
                 "read_file", "read_many", "read_skill", "search_knowledge", "log_knowledge",
                 "list_dir", "glob", "grep",
                 "write_file", "edit_file", "bash", "todo",
+                "web_fetch", "web_search",
                 "plan_file"
             ]
         )
@@ -74,8 +76,7 @@ final class ToolRegistryPromptFilterTests: XCTestCase {
         let tools = await registry.getToolsForTask(taskType: "planning")
         let names = tools.map(\.name).sorted()
 
-        XCTAssertEqual(names, ["bash", "plan_file", "read_file"])
-        XCTAssertFalse(names.contains("web_search"))
+        XCTAssertEqual(names, ["bash", "plan_file", "read_file", "web_search"])
     }
 
     func testGenerateToolsBlockWithSelectedToolNamesOnlyInjectsRelevantTools() async throws {
@@ -103,10 +104,10 @@ final class ToolRegistryPromptFilterTests: XCTestCase {
             names,
             [
                 "bash", "edit_file", "glob", "grep", "list_dir",
-                "plan_file", "read_file", "read_many", "todo", "write_file"
+                "plan_file", "read_file", "read_many", "todo",
+                "web_search", "write_file"
             ]
         )
-        XCTAssertFalse(names.contains("web_search"))
         XCTAssertFalse(names.contains("mcp_docs_search"))
     }
 

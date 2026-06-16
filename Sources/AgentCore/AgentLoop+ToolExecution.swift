@@ -191,6 +191,91 @@ extension AgentLoop {
         return text
     }
 
+    // MARK: - Truncated Streamed Tool Call Recovery
+
+    /// Result of committing a partially-streamed write to disk: the user-visible
+    /// `ToolResult` plus the tail of the saved content so the agent can hint the
+    /// model about where to resume from.
+    struct TruncatedWriteCommit {
+        let result: ToolResult
+        let tail: String
+    }
+
+    /// Commits a partially-streamed write to its target path so the bytes already
+    /// produced by the model are not wasted. Only `write_file` and `append_file`
+    /// are recoverable this way: their semantics tolerate an incremental commit
+    /// + later append. Other tools (e.g. `edit_file`) need their full payload
+    /// before they can be applied and are not handled here.
+    func commitTruncatedStreamedWrite(_ call: TruncatedStreamedToolCall) async -> TruncatedWriteCommit {
+        let resolvedPath: String
+        do {
+            resolvedPath = try permissions.validatePath(call.path)
+        } catch {
+            try? FileManager.default.removeItem(at: call.contentFile)
+            return TruncatedWriteCommit(result: .error(error.localizedDescription), tail: "")
+        }
+
+        guard let tmpContent = try? String(contentsOf: call.contentFile, encoding: .utf8) else {
+            try? FileManager.default.removeItem(at: call.contentFile)
+            return TruncatedWriteCommit(result: .error("Failed to read truncated streamed content for \(call.path)"), tail: "")
+        }
+
+        let targetURL = URL(fileURLWithPath: resolvedPath)
+        let parentDir = targetURL.deletingLastPathComponent()
+        do {
+            try FileManager.default.createDirectory(at: parentDir, withIntermediateDirectories: true)
+        } catch {
+            try? FileManager.default.removeItem(at: call.contentFile)
+            return TruncatedWriteCommit(result: .error("Failed to prepare directory for \(call.path): \(error.localizedDescription)"), tail: "")
+        }
+
+        do {
+            switch call.toolName {
+            case "write_file":
+                if FileManager.default.fileExists(atPath: targetURL.path) {
+                    _ = try FileManager.default.replaceItemAt(targetURL, withItemAt: call.contentFile)
+                } else {
+                    try FileManager.default.moveItem(at: call.contentFile, to: targetURL)
+                }
+                let finalText = (try? String(contentsOf: targetURL, encoding: .utf8)) ?? tmpContent
+                let tail = String(finalText.suffix(200))
+                return TruncatedWriteCommit(
+                    result: .success("Recovered partial write_file to \(call.path) (\(tmpContent.count) bytes). Generation was truncated; use append_file to add the remaining content."),
+                    tail: tail
+                )
+
+            case "append_file":
+                if let fh = try? FileHandle(forWritingTo: targetURL) {
+                    defer { try? fh.close() }
+                    try fh.seekToEnd()
+                    try fh.write(contentsOf: Data(tmpContent.utf8))
+                } else {
+                    try tmpContent.write(toFile: resolvedPath, atomically: true, encoding: .utf8)
+                }
+                try? FileManager.default.removeItem(at: call.contentFile)
+                let finalText = (try? String(contentsOf: targetURL, encoding: .utf8)) ?? tmpContent
+                let tail = String(finalText.suffix(200))
+                return TruncatedWriteCommit(
+                    result: .success("Recovered partial append_file to \(call.path) (\(tmpContent.count) bytes). Generation was truncated; use append_file again to add the remaining content."),
+                    tail: tail
+                )
+
+            default:
+                try? FileManager.default.removeItem(at: call.contentFile)
+                return TruncatedWriteCommit(
+                    result: .error("Truncated streamed tool '\(call.toolName)' cannot be recovered automatically; the partial content was discarded."),
+                    tail: ""
+                )
+            }
+        } catch {
+            try? FileManager.default.removeItem(at: call.contentFile)
+            return TruncatedWriteCommit(
+                result: .error("Failed to recover partial \(call.toolName) for \(call.path): \(error.localizedDescription)"),
+                tail: ""
+            )
+        }
+    }
+
     // MARK: - Streamed Tool Call Handling
 
     /// Handles a tool call whose content was streamed to a .tmp file during generation.

@@ -16,7 +16,8 @@ extension AgentLoop {
         baseInstructions: String? = nil,
         memorySection: String? = nil,
         customizationSection: String? = nil,
-        skillsMetadata: [SkillMetadata] = []
+        skillsMetadata: [SkillMetadata] = [],
+        dialect: ToolCallDialect = .qwen
     ) async -> PromptComposition {
         let defaultInstructions = """
         You are an expert coding assistant that combines three complementary mindsets — \
@@ -126,25 +127,28 @@ extension AgentLoop {
         let currentWorkdir = workspaceRoot ?? FileManager.default.currentDirectoryPath
         
         let runtimeSection = """
+        ================================================================
+        WORKSPACE ROOT: \(currentWorkdir)
+        ================================================================
+        This is the ONLY directory you can read or write. Use it verbatim — do not abbreviate, truncate, or substitute a parent directory. When asked "what is the workspace" or "where am I", answer with this exact path.
+
         Current time: \(dateString)
-        Current workdir (workspace): \(currentWorkdir)
 
-        When you need to use a tool, respond with the tool call in this format:
-        \(ToolCallPattern.toolCallOpen)
-        {"name": "tool_name", "arguments": {"param": "value"}}
-        \(ToolCallPattern.toolCallClose)
+        PATHS: All `path` arguments to filesystem tools (read_file, list_dir, write_file, edit_file, append_file, patch, glob, grep) MUST be relative to the workspace root above. Do NOT include the workspace root prefix and do NOT pass absolute paths (no leading "/"). Use "." for the workspace root itself. Paths outside the workspace are rejected by the sandbox.
 
-        The object inside <tool_call> must be valid JSON with "name" and "arguments" keys.
-        Do not write pseudo-JSON like {"tool_name", "path": "."} or function-style wrappers.
+        \(dialect.promptCallFormatSection)
 
-        You can call multiple tools in a single response. After tool results are returned, continue your reasoning.
+        ================================================================
+        FINAL REMINDER — WORKSPACE ROOT: \(currentWorkdir)
+        Every filesystem tool call resolves relative to this path. Use "." for the root. Never invent a different absolute path.
+        ================================================================
         """
 
         let toolsBlock: String
 
         do {
             let promptFilter = buildToolPromptFilter(mode: mode, taskType: taskType)
-            toolsBlock = try await registry.generateToolsBlock(filter: promptFilter)
+            toolsBlock = try await registry.generateToolsBlock(filter: promptFilter, dialect: dialect)
         } catch {
             toolsBlock = "<!-- error generating tools block: \(error) -->"
         }
@@ -193,7 +197,8 @@ extension AgentLoop {
         baseInstructions: String? = nil,
         memorySection: String? = nil,
         customizationSection: String? = nil,
-        skillsMetadata: [SkillMetadata] = []
+        skillsMetadata: [SkillMetadata] = [],
+        dialect: ToolCallDialect = .qwen
     ) async -> String {
         let composition = await buildSystemPromptComposition(
             registry: registry,
@@ -205,7 +210,8 @@ extension AgentLoop {
             baseInstructions: baseInstructions,
             memorySection: memorySection,
             customizationSection: customizationSection,
-            skillsMetadata: skillsMetadata
+            skillsMetadata: skillsMetadata,
+            dialect: dialect
         )
         return composition.prompt
     }

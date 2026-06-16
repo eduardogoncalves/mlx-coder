@@ -172,7 +172,8 @@ struct RunCommand: AsyncParsableCommand {
             thinkingLevel: .low,
             taskType: .general,
             workspaceRoot: absWorkspace,
-            skillsMetadata: skillMetadata
+            skillsMetadata: skillMetadata,
+            dialect: ToolCallDialect.detect(modelPath: selectedModel)
         )
 
         let agentLoop = AgentLoop(

@@ -24,7 +24,8 @@ extension AgentLoop {
             workspaceRoot: permissions.effectiveWorkspaceRoot,
             memorySection: memoryPromptSection,
             customizationSection: customizationPromptSection,
-            skillsMetadata: skillsMetadata
+            skillsMetadata: skillsMetadata,
+            dialect: toolCallDialect
         )
         promptSectionTokenEstimates = composition.sectionTokenEstimates
         history.updateSystemPrompt(composition.prompt)
@@ -58,7 +59,8 @@ extension AgentLoop {
             workspaceRoot: permissions.effectiveWorkspaceRoot,
             memorySection: memoryPromptSection,
             customizationSection: customizationPromptSection,
-            skillsMetadata: skillsMetadata
+            skillsMetadata: skillsMetadata,
+            dialect: toolCallDialect
         )
         promptSectionTokenEstimates = composition.sectionTokenEstimates
         history.updateSystemPrompt(composition.prompt)
@@ -89,7 +91,8 @@ extension AgentLoop {
             workspaceRoot: permissions.effectiveWorkspaceRoot,
             memorySection: memoryPromptSection,
             customizationSection: customizationPromptSection,
-            skillsMetadata: skillsMetadata
+            skillsMetadata: skillsMetadata,
+            dialect: toolCallDialect
         )
         promptSectionTokenEstimates = composition.sectionTokenEstimates
         history.updateSystemPrompt(composition.prompt)
@@ -153,7 +156,8 @@ extension AgentLoop {
             workspaceRoot: permissions.effectiveWorkspaceRoot,
             memorySection: memoryPromptSection,
             customizationSection: customizationPromptSection,
-            skillsMetadata: skillsMetadata
+            skillsMetadata: skillsMetadata,
+            dialect: toolCallDialect
         )
         promptSectionTokenEstimates = composition.sectionTokenEstimates
         history.updateSystemPrompt(composition.prompt)

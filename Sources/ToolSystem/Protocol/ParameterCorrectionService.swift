@@ -24,6 +24,44 @@ public struct ParameterCorrectionResult: @unchecked Sendable {
     }
 }
 
+/// Rewrites a model-emitted absolute path so the workspace is the implicit root.
+///
+/// - If the path lives inside `workspaceRoot`, strip the prefix to make it
+///   relative — paths like `<workspaceRoot>/src/main.swift` become `src/main.swift`.
+/// - If the path is `~`-prefixed, expand it first and then re-apply the same
+///   inside/outside check.
+/// - If the absolute path is outside `workspaceRoot`, leave it untouched so
+///   `PermissionEngine.validatePath` raises `pathOutsideWorkspace` with a
+///   clear error pointing at the real workspace root. Returning a garbage
+///   relative path (the old `dropFirst()` trick) was worse because it
+///   silently rerouted the call to a non-existent subdirectory.
+enum WorkspacePathRewrite {
+    static func rewriteIfPossible(_ path: String, workspaceRoot: String) -> (newPath: String, message: String)? {
+        guard !path.isEmpty else { return nil }
+        let expanded = NSString(string: path).expandingTildeInPath
+        guard expanded.hasPrefix("/") else { return nil }
+
+        let normalizedInput = URL(filePath: expanded).standardized.path()
+        let normalizedRoot = URL(filePath: workspaceRoot).standardized.path()
+        let rootWithSlash = normalizedRoot.hasSuffix("/") ? normalizedRoot : normalizedRoot + "/"
+
+        if normalizedInput == normalizedRoot {
+            return (".", "Rewrote workspace-root absolute path '\(path)' to '.'")
+        }
+
+        if normalizedInput.hasPrefix(rootWithSlash) {
+            let relative = String(normalizedInput.dropFirst(rootWithSlash.count))
+            if !relative.isEmpty {
+                return (relative, "Rewrote absolute path '\(path)' to workspace-relative '\(relative)'")
+            }
+        }
+
+        // Path lives outside the workspace; do not corrupt it — let the
+        // permission engine surface a meaningful error.
+        return nil
+    }
+}
+
 /// Service that detects and fixes common tool call parameter errors.
 ///
 /// This service applies deterministic, safe corrections to fix formatting/syntactic issues
@@ -78,14 +116,13 @@ public struct ParameterCorrectionService: Sendable {
                 corrected["path"] = path
             }
 
-            // Ensure path is relative (strip leading slash if present)
-            if path.hasPrefix("/") {
-                let relativePath = String(path.dropFirst())
-                if !relativePath.isEmpty {
-                    corrections.append("Converted absolute path to relative: '\(path)' -> '\(relativePath)'")
-                    corrected["path"] = relativePath
-                    path = relativePath
-                }
+            // Rewrite absolute paths that point inside the workspace to be
+            // workspace-relative. Paths pointing outside the workspace are
+            // left alone so the permission engine returns a clear error.
+            if let rewrite = WorkspacePathRewrite.rewriteIfPossible(path, workspaceRoot: workspaceRoot) {
+                corrections.append(rewrite.message)
+                corrected["path"] = rewrite.newPath
+                path = rewrite.newPath
             }
 
             // Strip leading "./" for consistency
@@ -180,13 +217,10 @@ public struct ParameterCorrectionService: Sendable {
             corrected["path"] = path
         }
 
-        if path.hasPrefix("/") {
-            let relativePath = String(path.dropFirst())
-            if !relativePath.isEmpty {
-                corrections.append("Converted absolute path to relative: '\(path)' -> '\(relativePath)'")
-                corrected["path"] = relativePath
-                path = relativePath
-            }
+        if let rewrite = WorkspacePathRewrite.rewriteIfPossible(path, workspaceRoot: workspaceRoot) {
+            corrections.append(rewrite.message)
+            corrected["path"] = rewrite.newPath
+            path = rewrite.newPath
         }
 
         if path.hasPrefix("./") {
@@ -459,12 +493,10 @@ public struct ParameterCorrectionService: Sendable {
                 corrected["path"] = path
             }
 
-            if path.hasPrefix("/") {
-                let relativePath = String(path.dropFirst())
-                if !relativePath.isEmpty {
-                    corrections.append("Converted absolute path to relative: '\(path)' -> '\(relativePath)'")
-                    corrected["path"] = relativePath
-                }
+            if let rewrite = WorkspacePathRewrite.rewriteIfPossible(path, workspaceRoot: workspaceRoot) {
+                corrections.append(rewrite.message)
+                corrected["path"] = rewrite.newPath
+                path = rewrite.newPath
             }
 
             if path.hasPrefix("./") {
@@ -507,12 +539,10 @@ public struct ParameterCorrectionService: Sendable {
                 corrected["path"] = path
             }
 
-            if path.hasPrefix("/") {
-                let relativePath = String(path.dropFirst())
-                if !relativePath.isEmpty {
-                    corrections.append("Converted absolute path to relative: '\(path)' -> '\(relativePath)'")
-                    corrected["path"] = relativePath
-                }
+            if let rewrite = WorkspacePathRewrite.rewriteIfPossible(path, workspaceRoot: workspaceRoot) {
+                corrections.append(rewrite.message)
+                corrected["path"] = rewrite.newPath
+                path = rewrite.newPath
             }
 
             if path.hasPrefix("./") {

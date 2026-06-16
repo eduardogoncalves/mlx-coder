@@ -23,15 +23,37 @@ public struct ToolCallParser: Sendable {
         }
     }
 
-    public static func parse(_ text: String) -> [ParsedToolCall] {
+    public static func parse(
+        _ text: String,
+        dialect: ToolCallDialect = .qwen,
+        startsThinking: Bool = false
+    ) -> [ParsedToolCall] {
         var results: [ParsedToolCall] = []
         var searchRange = text.startIndex..<text.endIndex
+        let toolOpenToken = dialect.toolCallOpen
+        let toolCloseToken = dialect.toolCallClose
+
+        // Chat templates that pre-fill "<think>\n" leave the response without an
+        // explicit opening tag. Without this skip, tool_call tags emitted before
+        // the model closes </think> would be executed as real tool calls.
+        if startsThinking {
+            guard let thinkClose = text.range(of: ToolCallPattern.thinkClose) else {
+                return []
+            }
+            searchRange = thinkClose.upperBound..<text.endIndex
+        }
 
         while !searchRange.isEmpty {
             if let thinkOpen = text.range(of: ToolCallPattern.thinkOpen, range: searchRange) {
-                if let toolOpen = text.range(of: ToolCallPattern.toolCallOpen, range: searchRange),
+                if let toolOpen = text.range(of: toolOpenToken, range: searchRange),
                    toolOpen.lowerBound < thinkOpen.lowerBound {
-                    searchRange = parseToolCall(in: text, openRange: toolOpen, appendTo: &results)
+                    searchRange = parseToolCall(
+                        in: text,
+                        openRange: toolOpen,
+                        closeToken: toolCloseToken,
+                        dialect: dialect,
+                        appendTo: &results
+                    )
                     continue
                 }
 
@@ -44,11 +66,17 @@ public struct ToolCallParser: Sendable {
                 break
             }
 
-            guard let toolOpen = text.range(of: ToolCallPattern.toolCallOpen, range: searchRange) else {
+            guard let toolOpen = text.range(of: toolOpenToken, range: searchRange) else {
                 break
             }
 
-            searchRange = parseToolCall(in: text, openRange: toolOpen, appendTo: &results)
+            searchRange = parseToolCall(
+                in: text,
+                openRange: toolOpen,
+                closeToken: toolCloseToken,
+                dialect: dialect,
+                appendTo: &results
+            )
         }
 
         return results
@@ -58,13 +86,25 @@ public struct ToolCallParser: Sendable {
     /// Used to detect malformed tool call attempts that need re-prompting.
     /// Tool call tags that appear inside `<think>…</think>` (or an unclosed think block)
     /// are suppressed, matching the behaviour of `parse(_:)`.
-    public static func containsToolCall(_ text: String) -> Bool {
+    public static func containsToolCall(
+        _ text: String,
+        dialect: ToolCallDialect = .qwen,
+        startsThinking: Bool = false
+    ) -> Bool {
         var searchRange = text.startIndex..<text.endIndex
+        let toolOpenToken = dialect.toolCallOpen
+
+        if startsThinking {
+            guard let thinkClose = text.range(of: ToolCallPattern.thinkClose) else {
+                return false
+            }
+            searchRange = thinkClose.upperBound..<text.endIndex
+        }
 
         while !searchRange.isEmpty {
             if let thinkOpen = text.range(of: ToolCallPattern.thinkOpen, range: searchRange) {
                 // A tool call that starts before the think block counts.
-                if let toolOpen = text.range(of: ToolCallPattern.toolCallOpen, range: searchRange),
+                if let toolOpen = text.range(of: toolOpenToken, range: searchRange),
                    toolOpen.lowerBound < thinkOpen.lowerBound {
                     return true
                 }
@@ -78,7 +118,7 @@ public struct ToolCallParser: Sendable {
                 return false
             }
             // No think block — any tool call tag counts.
-            return text.range(of: ToolCallPattern.toolCallOpen, range: searchRange) != nil
+            return text.range(of: toolOpenToken, range: searchRange) != nil
         }
         return false
     }
@@ -86,34 +126,43 @@ public struct ToolCallParser: Sendable {
     private static func parseToolCall(
         in text: String,
         openRange: Range<String.Index>,
+        closeToken: String,
+        dialect: ToolCallDialect,
         appendTo results: inout [ParsedToolCall]
     ) -> Range<String.Index> {
-        let closeRange = text.range(of: ToolCallPattern.toolCallClose, range: openRange.upperBound..<text.endIndex)
+        let closeRange = text.range(of: closeToken, range: openRange.upperBound..<text.endIndex)
 
-        let jsonString: String
+        let bodyString: String
         let nextSearchIndex: String.Index
 
         if let closeRange {
-            jsonString = String(text[openRange.upperBound..<closeRange.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
+            bodyString = String(text[openRange.upperBound..<closeRange.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
             nextSearchIndex = closeRange.upperBound
         } else {
-            jsonString = String(text[openRange.upperBound..<text.endIndex]).trimmingCharacters(in: .whitespacesAndNewlines)
+            bodyString = String(text[openRange.upperBound..<text.endIndex]).trimmingCharacters(in: .whitespacesAndNewlines)
             nextSearchIndex = text.endIndex
         }
 
-        if let call = parseJSON(jsonString) {
-            results.append(call)
+        switch dialect {
+        case .qwen:
+            if let call = parseJSON(bodyString) {
+                results.append(call)
+            }
+        case .lfm2:
+            results.append(contentsOf: LFM2ToolCallBodyParser.parse(bodyString))
         }
 
         return nextSearchIndex..<text.endIndex
     }
 
-    public static func extractNonToolText(_ text: String) -> String {
+    public static func extractNonToolText(_ text: String, dialect: ToolCallDialect = .qwen) -> String {
         var result = text
         var searchRange = result.startIndex..<result.endIndex
+        let openToken = dialect.toolCallOpen
+        let closeToken = dialect.toolCallClose
 
-        while let openRange = result.range(of: ToolCallPattern.toolCallOpen, range: searchRange),
-              let closeRange = result.range(of: ToolCallPattern.toolCallClose, range: openRange.upperBound..<result.endIndex) {
+        while let openRange = result.range(of: openToken, range: searchRange),
+              let closeRange = result.range(of: closeToken, range: openRange.upperBound..<result.endIndex) {
             result.removeSubrange(openRange.lowerBound..<closeRange.upperBound)
             searchRange = result.startIndex..<result.endIndex
         }

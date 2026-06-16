@@ -64,6 +64,7 @@ public actor AgentLoop {
     var skipGitOrchestrationInitialization: Bool = false
     
     // Tracking parameters to avoid unnecessary reloads
+    var toolCallDialect: ToolCallDialect = .qwen
     var loadedModelPath: String?
     var loadedMemoryLimit: Int?
     var loadedCacheLimit: Int?
@@ -142,6 +143,7 @@ public actor AgentLoop {
         self.auditLogger = auditLogger
         self.maxToolIterations = maxToolIterations
         self.modelPath = modelPath
+        self.toolCallDialect = ToolCallDialect.detect(modelPath: modelPath)
         self.workspace = workspace
         self.projectWorkspaceRoot = permissions.workspaceRoot
         self.buildCheckManager = BuildCheckManager()
@@ -279,7 +281,7 @@ public actor AgentLoop {
             await applyDeterministicContextCompactionIfNeeded(reason: "before_generation")
 
             // Generate response
-            let generationResult: (text: String, writer: StreamingToolCallWriter)
+            let generationResult: (text: String, writer: StreamingToolCallWriter, startedThinking: Bool)
             do {
                 generationResult = try await generateResponse()
             } catch is CancellationError {
@@ -309,16 +311,56 @@ public actor AgentLoop {
 
             let response = generationResult.text
             let writer = generationResult.writer
+            let startedThinking = generationResult.startedThinking
 
             // Get streamed tool calls from the writer
             let streamedCalls = writer.drainCompletedCalls()
             let failedStreamedCalls = writer.drainFailedCalls()
+            // If generation ended while a content stream was in progress (model
+            // hit max_tokens mid-write), recover the partial bytes from the tmp
+            // file so we don't force a full regeneration.
+            let truncatedStream = writer.drainTruncatedStream()
 
             // Parse tool calls from text and remove ones already captured via streaming.
-            let parsedToolCalls = ToolCallParser.parse(response)
+            let parsedToolCalls = ToolCallParser.parse(
+                response,
+                dialect: toolCallDialect,
+                startsThinking: startedThinking
+            )
             let toolCalls = deduplicateToolCalls(parsed: parsedToolCalls, streamed: streamedCalls)
+
+            // Try to recover a truncated streamed write before we declare the
+            // tool call malformed. write_file and append_file tolerate an
+            // incremental commit, so we save what was streamed and instruct
+            // the model to finish the file with an append_file call instead
+            // of regenerating the whole thing.
+            if let truncated = truncatedStream,
+               truncated.bytesWritten > 0,
+               truncated.toolName == "write_file" || truncated.toolName == "append_file" {
+                await recoverTruncatedStreamedWrite(
+                    truncated: truncated,
+                    response: response,
+                    fileModificationToolsExecuted: &fileModificationToolsExecuted,
+                    modifiedFilePaths: &modifiedFilePaths
+                )
+                continue
+            } else if let truncated = truncatedStream {
+                // Not a recoverable tool — discard the partial tmp file so it
+                // doesn't accumulate, then fall through to the malformed path.
+                try? FileManager.default.removeItem(at: truncated.contentFile)
+            }
+
+            // Detect bare-JSON responses with no tool-call markers as malformed
+            // too. Smaller models (e.g. LFM2) sometimes reach for a free-form
+            // `{"todo":..., "commands":[...]}`-style blob instead of using our
+            // wire format. Accepting it silently would let the agent stall.
+            let responseLooksLikeBareJSONToolCall = toolCalls.isEmpty
+                && streamedCalls.isEmpty
+                && Self.responseIsBareJSON(response, startsThinking: startedThinking)
+
             let hasMalformedToolCall = !failedStreamedCalls.isEmpty ||
-                (toolCalls.isEmpty && streamedCalls.isEmpty && ToolCallParser.containsToolCall(response))
+                (toolCalls.isEmpty && streamedCalls.isEmpty && ToolCallParser.containsToolCall(response, dialect: toolCallDialect, startsThinking: startedThinking))
+                || responseLooksLikeBareJSONToolCall
 
             if toolCalls.isEmpty && streamedCalls.isEmpty {
                 if hasMalformedToolCall {
@@ -327,7 +369,17 @@ public actor AgentLoop {
                         "Malformed tool call detected; retrying with strict JSON tool-call format.",
                         severity: .warning
                     )
-                    steeringQueue.append("Your previous tool call was malformed and could not be parsed. Re-emit only the tool call in valid JSON using the exact <tool_call>{\"name\":\"tool_name\",\"arguments\":{...}}</tool_call> format. Do not add explanation text.")
+                    let example: String
+                    switch toolCallDialect {
+                    case .qwen:
+                        example = "<tool_call>{\"name\":\"tool_name\",\"arguments\":{...}}</tool_call>"
+                    case .lfm2:
+                        example = "<|tool_call_start|>[tool_name(param='value')]<|tool_call_end|>"
+                    }
+                    let bareJSONNote = responseLooksLikeBareJSONToolCall
+                        ? " Your last response was a bare JSON object — that is NOT a tool call and will never execute. Discard that shape entirely."
+                        : ""
+                    steeringQueue.append("Your previous tool call was malformed and could not be parsed.\(bareJSONNote) Re-emit only the tool call using the exact \(example) format. Use one of the tool names listed in the system prompt. Do not add explanation text, code fences, or any JSON outside the tool-call markers.")
                     continue
                 }
 
@@ -432,6 +484,57 @@ public actor AgentLoop {
     }
 
     // MARK: - Private Helpers (used only by processUserMessage)
+
+    /// Commits a partially-streamed write to its target path, records the
+    /// recovery as an assistant turn + tool response, and steers the model to
+    /// append the remainder instead of regenerating the entire content on the
+    /// next turn. Mutates the file-modification trackers on success.
+    private func recoverTruncatedStreamedWrite(
+        truncated: TruncatedStreamedToolCall,
+        response: String,
+        fileModificationToolsExecuted: inout Bool,
+        modifiedFilePaths: inout Set<String>
+    ) async {
+        history.addAssistant(response)
+        frontend.emitStatus(
+            "Generation truncated mid-write — recovering \(truncated.bytesWritten) bytes for \(truncated.path).",
+            severity: .warning
+        )
+
+        frontend.emit(.toolCallStarted(ToolCallSnapshot(
+            name: truncated.toolName,
+            arguments: stringifyArgs([
+                "path": truncated.path,
+                "content": "[streamed to tmp - truncated]"
+            ])
+        )))
+
+        let commit = await commitTruncatedStreamedWrite(truncated)
+        frontend.emit(.toolCallResult(makeDisplaySnapshot(toolName: truncated.toolName, result: commit.result)))
+
+        if !commit.result.isError {
+            fileModificationToolsExecuted = true
+            modifiedFilePaths.insert(truncated.path)
+        }
+
+        let userGoal = history.latestUserMessage ?? ""
+        if let toolResponse = try? await makeToolResponseForHistory(
+            toolName: truncated.toolName,
+            result: commit.result,
+            userGoal: userGoal
+        ) {
+            history.addToolResponse(toolResponse, toolCallId: truncated.toolName)
+        }
+
+        guard !commit.result.isError else { return }
+
+        let tailHint = commit.tail.isEmpty ? "" : "\n\nThe file currently ends with:\n```\n\(commit.tail)\n```"
+        let steeringMessage = "Your previous \(truncated.toolName) call to \(truncated.path) was cut off after \(truncated.bytesWritten) bytes because the token budget ran out mid-content. The partial content was already saved to disk — do NOT regenerate it. To finish the file, call append_file with path \"\(truncated.path)\" and only the REMAINING content needed to complete it.\(tailHint)"
+
+        frontend.emitStatus("↩️  Steering: \(steeringMessage)")
+        history.addUser(steeringMessage)
+        await hooks.emit(.steeringInjected(message: steeringMessage))
+    }
 
     /// Initializes git orchestration for coding tasks.
     private func initializeGitOrchestration(userMessage: String) async {
@@ -916,6 +1019,44 @@ extension AgentLoop {
     /// terminal adapter.
     public func swapFrontend(_ newFrontend: any AgentFrontend) {
         self.frontend = newFrontend
+    }
+
+    /// True when the assistant response (after stripping any think block) is
+    /// essentially just a JSON object or array — i.e. the model emitted
+    /// free-form structured output instead of an actual tool call. Used to
+    /// nudge weaker models back to the dialect's wire format on retry.
+    static func responseIsBareJSON(_ response: String, startsThinking: Bool) -> Bool {
+        var text = response
+        if startsThinking, let closeRange = text.range(of: ToolCallPattern.thinkClose) {
+            text = String(text[closeRange.upperBound...])
+        } else {
+            text = ToolCallParser.stripThinking(text)
+        }
+
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // Strip a single ```json … ``` fence so models that wrap their JSON
+        // in a code fence still get caught.
+        let candidate: String
+        if trimmed.hasPrefix("```") {
+            let lines = trimmed.split(separator: "\n", omittingEmptySubsequences: false)
+            guard lines.count >= 3, lines.last?.trimmingCharacters(in: .whitespaces) == "```" else {
+                return false
+            }
+            candidate = lines.dropFirst().dropLast().joined(separator: "\n")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        } else {
+            candidate = trimmed
+        }
+
+        guard let first = candidate.first, first == "{" || first == "[" else {
+            return false
+        }
+        guard let data = candidate.data(using: .utf8),
+              let _ = try? JSONSerialization.jsonObject(with: data) else {
+            return false
+        }
+        return true
     }
 }
 

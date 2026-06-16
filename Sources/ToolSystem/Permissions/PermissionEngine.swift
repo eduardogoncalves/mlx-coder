@@ -247,7 +247,7 @@ public enum PermissionError: LocalizedError {
     public var errorDescription: String? {
         switch self {
         case .pathOutsideWorkspace(let path, let root):
-            return "Path '\(path)' is outside workspace root '\(root)'"
+            return "Path '\(path)' is outside workspace root '\(root)'. Use a path relative to the workspace root (or omit the workspace prefix on absolute paths)."
         case .pathOutsideAllowedReadRoots(let path, let root, let extraRoot):
             return "Path '\(path)' is outside allowed read roots '\(root)' and '\(extraRoot)'"
         case .commandDenied(let command):
