@@ -30,6 +30,8 @@ public struct GenerationEngine: Sendable {
         /// keys; 3-bit codebook for values). Requires at least 32 prefill tokens before
         /// compression kicks in. Incompatible with standard `kvBits` quantization.
         public let turboQuantBits: Int?
+        /// Number of draft tokens proposed per speculative decoding round.
+        public let numDraftTokens: Int
 
         public init(
             maxTokens: Int = 4096,
@@ -47,7 +49,8 @@ public struct GenerationEngine: Sendable {
             kvGroupSize: Int = 64,
             quantizedKVStart: Int = 0,
             longContextThreshold: Int = 8192,
-            turboQuantBits: Int? = nil
+            turboQuantBits: Int? = nil,
+            numDraftTokens: Int = 2
         ) {
             self.maxTokens = maxTokens
             self.temperature = temperature
@@ -65,6 +68,7 @@ public struct GenerationEngine: Sendable {
             self.quantizedKVStart = quantizedKVStart
             self.longContextThreshold = longContextThreshold
             self.turboQuantBits = turboQuantBits
+            self.numDraftTokens = max(1, numDraftTokens)
         }
 
         /// Convert to MLXLMCommon's GenerateParameters

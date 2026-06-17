@@ -69,7 +69,13 @@ struct RunCommand: AsyncParsableCommand {
         MemoryGuard.configure(budget: budget)
 
         let selectedModel = args.model
-        if !localModelExists(selectedModel) && !looksLikeHubModelID(selectedModel) {
+        let selectedBackend = InferenceBackend(modelPath: selectedModel)
+        if let providerID = selectedBackend.providerID, !Credentials.isConfigured(providerID) {
+            renderer.printError("Online model selected but \(providerID) is not configured. Run /login \(providerID) <api-key> or set \(Credentials.envVarName(for: providerID)).")
+            return
+        }
+
+        if selectedBackend.isLocal && !localModelExists(selectedModel) && !looksLikeHubModelID(selectedModel) {
             renderer.printStatus("No local model found at \(selectedModel).")
             renderer.printStatus("Using Apple Foundation fallback for this single prompt.")
             if await runAppleFoundationSinglePromptFallback(prompt: effectivePrompt, renderer: renderer) {
@@ -80,21 +86,60 @@ struct RunCommand: AsyncParsableCommand {
             return
         }
 
-        // Load model
-        renderer.printStatus("Loading model...")
-        let modelContainer: ModelContainer
-        do {
-            modelContainer = try await loadModelWithCancellation(
-                from: selectedModel,
-                memoryLimit: budget.totalBytes,
-                cacheLimit: budget.cacheBytes,
-                renderer: renderer
-            )
-        } catch is CancellationError {
-            return
-        } catch {
-            renderer.printError("Failed to load model: \(error.localizedDescription)")
-            return
+        // Load local model only for local backends; online backends stream over HTTP.
+        let modelContainer: ModelContainer?
+        if selectedBackend.isOnline {
+            renderer.printStatus("Using online model \(selectedModel)")
+            modelContainer = nil
+        } else {
+            renderer.printStatus("Loading model...")
+            do {
+                modelContainer = try await loadModelWithCancellation(
+                    from: selectedModel,
+                    memoryLimit: budget.totalBytes,
+                    cacheLimit: budget.cacheBytes,
+                    renderer: renderer
+                )
+            } catch is CancellationError {
+                return
+            } catch {
+                renderer.printError("Failed to load model: \(error.localizedDescription)")
+                return
+            }
+        }
+
+        let draftModelPath = args.resolvedDraftModelPath(for: selectedModel)
+        let draftModel: AgentLoop.DraftModelHandle?
+        if let draftModelPath {
+            if selectedBackend.isOnline {
+                renderer.printStatus("Ignoring --draft-model for online backends.")
+                draftModel = nil
+            } else {
+                renderer.printStatus("Loading draft model...")
+                do {
+                    let draftContainer = try await loadModelWithCancellation(
+                        from: draftModelPath,
+                        memoryLimit: budget.totalBytes,
+                        cacheLimit: budget.cacheBytes,
+                        renderer: renderer
+                    )
+                    draftModel = await draftContainer.perform { context in
+                        AgentLoop.DraftModelHandle(model: context.model)
+                    }
+                    renderer.printStatus("Draft model loaded successfully")
+                } catch is CancellationError {
+                    return
+                } catch {
+                    if args.isDraftModelExplicitlyProvided {
+                        renderer.printError("Failed to load draft model: \(error.localizedDescription)")
+                        return
+                    }
+                    renderer.printStatus("Draft model unavailable (\(error.localizedDescription)). Continuing without speculative decoding.")
+                    draftModel = nil
+                }
+            }
+        } else {
+            draftModel = nil
         }
 
         // Run single prompt setup
@@ -107,7 +152,8 @@ struct RunCommand: AsyncParsableCommand {
             kvGroupSize: args.kvGroupSize ?? profile.kvGroupSize,
             quantizedKVStart: args.quantizedKVStart ?? profile.quantizedKVStart,
             longContextThreshold: profile.longContextThreshold,
-            turboQuantBits: args.turboQuantBits
+            turboQuantBits: args.turboQuantBits,
+            numDraftTokens: args.numDraftTokens
         )
         
         // Set up tools
@@ -194,7 +240,8 @@ struct RunCommand: AsyncParsableCommand {
             skillsMetadata: skillMetadata,
             promptSectionTokenEstimates: promptComposition.sectionTokenEstimates,
             memoryLimit: budget.totalBytes,
-            cacheLimit: budget.cacheBytes
+            cacheLimit: budget.cacheBytes,
+            draftModel: draftModel
         )
 
         let parsedPrompt = ImageAttachmentParser.parse(prompt: effectivePrompt)

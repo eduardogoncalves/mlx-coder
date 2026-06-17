@@ -324,7 +324,8 @@ extension AgentLoop {
             kvBits: current.kvBits,
             kvGroupSize: current.kvGroupSize,
             quantizedKVStart: current.quantizedKVStart,
-            longContextThreshold: current.longContextThreshold
+            longContextThreshold: current.longContextThreshold,
+            numDraftTokens: current.numDraftTokens
         )
     }
 }

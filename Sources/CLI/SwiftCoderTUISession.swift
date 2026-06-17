@@ -49,6 +49,11 @@ enum TUIShellCommandParser {
     }
 }
 
+private enum ModelFilterMode {
+    case all
+    case freeOnly
+}
+
 @MainActor
 public func runSwiftCoderTUISession(
     agentLoop: AgentLoop,
@@ -65,22 +70,32 @@ public func runSwiftCoderTUISession(
 
     let caffeinateManager = CaffeinateManager()
 
-    let dynamicCommandNames: Set<String> = ["/model", "/effort", "/caffeinate", "/memory"]
+    let dynamicCommandNames: Set<String> = ["/model", "/effort", "/caffeinate", "/memory", "/login", "/logout"]
     let staticItems = frontend.appConfig.commands
         .filter { !dynamicCommandNames.contains($0.name) }
         .map {
         AutocompleteItem(value: String($0.name.dropFirst()), label: $0.name, description: $0.description)
     }
-    let provider = CombinedAutocompleteProvider(
-        commands: [
-            TUIModelSlashCommand(models: frontend.appConfig.models),
-            TUIEffortSlashCommand(),
-            CaffeinateSlashCommand(),
-            TUIMemorySlashCommand(),
-        ],
-        staticCommands: staticItems
-    )
-    await renderer.setAutocompleteProvider(provider)
+    // Session-local model list. Starts from appConfig (built at startup) but is
+    // mutated when /login refreshes the OpenRouter catalog so the user sees
+    // fresh entries without relaunching. AppConfig.models is `let`, so we keep
+    // our own copy here and pass it into handleModelCommand explicitly.
+    var modelFilterMode: ModelFilterMode = .all
+    var sessionModels = frontend.appConfig.models
+    func makeAutocompleteProvider() -> CombinedAutocompleteProvider {
+        CombinedAutocompleteProvider(
+            commands: [
+                TUIModelSlashCommand(models: sessionModels),
+                TUIEffortSlashCommand(),
+                CaffeinateSlashCommand(),
+                TUIMemorySlashCommand(),
+                TUILoginSlashCommand(),
+                TUILogoutSlashCommand(),
+            ],
+            staticCommands: staticItems
+        )
+    }
+    await renderer.setAutocompleteProvider(makeAutocompleteProvider())
 
     await renderer.setupScreen()
     await renderer.setSandboxEnabled(initialSandboxEnabled)
@@ -405,7 +420,8 @@ public func runSwiftCoderTUISession(
 
         case .ctrlP:
             await cycleModelShortcut(
-                appConfig: frontend.appConfig,
+                models: sessionModels,
+                defaultIndex: frontend.appConfig.defaultModelIndex,
                 agentLoop: agentLoop,
                 renderer: renderer,
                 reverse: false,
@@ -414,7 +430,8 @@ public func runSwiftCoderTUISession(
 
         case .shiftCtrlP:
             await cycleModelShortcut(
-                appConfig: frontend.appConfig,
+                models: sessionModels,
+                defaultIndex: frontend.appConfig.defaultModelIndex,
                 agentLoop: agentLoop,
                 renderer: renderer,
                 reverse: true,
@@ -514,6 +531,7 @@ public func runSwiftCoderTUISession(
             let prompt = (await renderer.submitInput()) ?? ""
             let trimmed = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
             let commandInput = normalizedCommandInput(from: trimmed)
+            let commandInputLower = commandInput.lowercased()
             if trimmed.isEmpty {
                 await renderer.renderFooter()
                 continue
@@ -753,7 +771,7 @@ public func runSwiftCoderTUISession(
                 }
                 continue
             }
-            if commandInput.hasPrefix("/ask ") || commandInput == "/ask" {
+            if commandInputLower.hasPrefix("/ask ") || commandInputLower == "/ask" {
                 let question: String
                 if commandInput == "/ask" {
                     question = ""
@@ -768,6 +786,8 @@ public func runSwiftCoderTUISession(
                     await renderer.printScrollLine("\(DesignSystem.brightRed)✗ /ask unavailable while generation is active. Press Esc first.\(DesignSystem.reset)")
                     continue
                 }
+                let askUserEntry = SessionEntry(role: .user, content: question)
+                await renderer.printScrollLine(askUserEntry.render())
                 await renderer.printScrollLine("\(DesignSystem.dim)[ask] Side question (main context will be restored after).\(DesignSystem.reset)")
                 activeStreamTask = Task { @MainActor in
                     defer { activeStreamTask = nil }
@@ -785,8 +805,55 @@ public func runSwiftCoderTUISession(
                 }
                 continue
             }
-            if commandInput.hasPrefix("/model") {
-                await handleModelCommand(input: commandInput, appConfig: frontend.appConfig, agentLoop: agentLoop, renderer: renderer)
+            if commandInputLower.hasPrefix("/model") {
+                let modelArg = String(commandInput.dropFirst("/model".count))
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                    .lowercased()
+                if modelArg == "free" {
+                    modelFilterMode = .freeOnly
+                    sessionModels = rebuildSessionModels(base: frontend.appConfig.models, filterMode: modelFilterMode)
+                    await renderer.setAutocompleteProvider(makeAutocompleteProvider())
+                    await renderer.printScrollLine("  Model filter: free OpenRouter models only.")
+                    await renderer.renderFooter()
+                    continue
+                }
+                if modelArg == "all" || modelArg == "reset" {
+                    modelFilterMode = .all
+                    sessionModels = rebuildSessionModels(base: frontend.appConfig.models, filterMode: modelFilterMode)
+                    await renderer.setAutocompleteProvider(makeAutocompleteProvider())
+                    await renderer.printScrollLine("  Model filter: all models.")
+                    await renderer.renderFooter()
+                    continue
+                }
+                if modelArg == "openrouter"
+                    || modelArg == "openrouter • configured"
+                    || modelArg == "openrouter • unconfigured"
+                {
+                    let headlineID = "openrouter:\(OnlineModelCatalog.defaultOpenRouterModel)"
+                    let synthetic = AppConfig.ModelConfig(id: headlineID, label: "OpenRouter • configured")
+                    let index = sessionModels.firstIndex {
+                        $0.id.caseInsensitiveCompare(headlineID) == .orderedSame
+                    } ?? 0
+                    await switchToModel(model: synthetic, index: index, agentLoop: agentLoop, renderer: renderer)
+                    continue
+                }
+                await handleModelCommand(input: commandInput, models: sessionModels, agentLoop: agentLoop, renderer: renderer)
+                continue
+            }
+            if commandInput.hasPrefix("/login") || commandInput.hasPrefix("/logout") {
+                let beforeOpenRouterConfigured = Credentials.isConfigured("openrouter")
+                await handleLoginCommand(input: commandInput, renderer: renderer)
+                // If /login or /logout flipped credential state, refresh the
+                // remote catalog and rebuild the session model list so /model
+                // and autocomplete reflect the new entries immediately.
+                let afterOpenRouterConfigured = Credentials.isConfigured("openrouter")
+                if beforeOpenRouterConfigured != afterOpenRouterConfigured
+                    || OpenRouterModelCache.isStale()
+                {
+                    await refreshOpenRouterCatalog(renderer: renderer)
+                }
+                sessionModels = rebuildSessionModels(base: frontend.appConfig.models, filterMode: modelFilterMode)
+                await renderer.setAutocompleteProvider(makeAutocompleteProvider())
                 continue
             }
             if commandInput.hasPrefix("/effort") || commandInput.hasPrefix("/thinking") {
@@ -1121,7 +1188,11 @@ private func helpLines() -> [String] {
         "  /skills  list discovered skills",
         "  /hooks   list active hooks",
         "  /model   open model chooser; /model <name|id|number> to switch",
+        "  /model free  show only free OpenRouter models in /model picker",
+        "  /model all   clear model filter and show all models",
         "  /effort [level] set reasoning effort: off, minimal, low, medium, high",
+        "  /login [provider [key]] set BYOK API key for an online provider (e.g. openrouter)",
+        "  /logout <provider> clear a stored online provider API key",
         "  /transforms show context transforms; '/transforms clear' removes all",
         "  /save-history [path] save session transcript as markdown",
         "  /save-history-json [path] save session transcript as json",
@@ -1188,18 +1259,18 @@ private func effortDisplayLabel(for level: AgentLoop.ThinkingLevel) -> String {
 @MainActor
 private func handleModelCommand(
     input: String,
-    appConfig: AppConfig,
+    models: [AppConfig.ModelConfig],
     agentLoop: AgentLoop,
     renderer: Renderer
 ) async {
-    guard let intent = TUIModelCommandParser.resolve(input: input, models: appConfig.models) else {
+    guard let intent = TUIModelCommandParser.resolve(input: input, models: models) else {
         return
     }
 
     switch intent {
     case .openMenu:
         let currentModel = await renderer.getCurrentModelLabel()
-        let items = TUIModelCommandParser.menuItems(models: appConfig.models, currentModelLabel: currentModel)
+        let items = TUIModelCommandParser.menuItems(models: models, currentModelLabel: currentModel)
         guard !items.isEmpty else {
             await renderer.printScrollLine("  No models configured.")
             return
@@ -1207,14 +1278,102 @@ private func handleModelCommand(
         await renderer.openCommandPalette(commands: items)
         await renderer.renderFooter()
     case .selectModel(let index):
-        guard appConfig.models.indices.contains(index) else {
+        guard models.indices.contains(index) else {
             await renderer.printScrollLine("  Invalid model index \(index + 1).")
             return
         }
-        await switchToModel(model: appConfig.models[index], index: index, agentLoop: agentLoop, renderer: renderer)
+        await switchToModel(model: models[index], index: index, agentLoop: agentLoop, renderer: renderer)
     case .invalidModelName(let name):
-        let labels = appConfig.models.map(\.label).joined(separator: ", ")
-        await renderer.printScrollLine("  Unknown model '\(name)'. Available models: \(labels)")
+        // Allow `openrouter:<id>` to be typed directly even if not in the picker —
+        // the user may want a model the cache hasn't surfaced. AgentLoop will
+        // happily accept any modelPath; we just validate the carrier shape.
+        if InferenceBackend(modelPath: name).isOnline {
+            let synthetic = AppConfig.ModelConfig(id: name, label: name)
+            await switchToModel(model: synthetic, index: models.count, agentLoop: agentLoop, renderer: renderer)
+            return
+        }
+        let preview = models.prefix(8).map(\.label).joined(separator: ", ")
+        await renderer.printScrollLine("  Unknown model '\(name)'. Some available: \(preview)…")
+    }
+}
+
+@MainActor
+private func refreshOpenRouterCatalog(renderer: Renderer) async {
+    await renderer.printScrollLine("  Refreshing OpenRouter model list…")
+    do {
+        let models = try await OpenRouterModelCache.refresh()
+        await renderer.printScrollLine("  ✓ Loaded \(models.count) tool-capable OpenRouter models. Open /model to browse.")
+    } catch {
+        await renderer.printScrollLine(
+            "\(DesignSystem.brightRed)  Failed to refresh OpenRouter models: \(error.localizedDescription)\(DesignSystem.reset)"
+        )
+    }
+}
+
+/// Recombines the bootstrap model list (from `appConfig`) with the freshly
+/// regenerated online catalog entries. Stripping the previous online rows by
+/// `openrouter:` prefix keeps the result clean across repeated /login cycles.
+@MainActor
+private func rebuildSessionModels(
+    base: [AppConfig.ModelConfig],
+    filterMode: ModelFilterMode
+) -> [AppConfig.ModelConfig] {
+    let localOnly = base.filter { !InferenceBackend(modelPath: $0.id).isOnline }
+    let onlineFilter: OnlineModelCatalog.Filter = (filterMode == .freeOnly) ? .freeOnly : .all
+    return localOnly + OnlineModelCatalog.entries(filter: onlineFilter)
+}
+
+@MainActor
+private func handleLoginCommand(
+    input: String,
+    renderer: Renderer
+) async {
+    guard let intent = TUILoginCommandParser.resolve(input: input) else { return }
+
+    switch intent {
+    case .openMenu:
+        let items = TUILoginCommandParser.menuItems()
+        guard !items.isEmpty else {
+            await renderer.printScrollLine("  No online providers available.")
+            return
+        }
+        await renderer.openCommandPalette(commands: items)
+        await renderer.renderFooter()
+    case .showHelp(let provider):
+        let display = TUILoginCommandParser.displayName(provider)
+        let envVar = Credentials.envVarName(for: provider)
+        await renderer.printScrollLine("  \(display) login:")
+        await renderer.printScrollLine("    /login \(provider) <your-api-key>")
+        await renderer.printScrollLine("  Or export \(envVar) before launching mlx-coder.")
+        if Credentials.isConfigured(provider) {
+            await renderer.printScrollLine("  (\(display) is currently configured — re-running /login replaces the stored key.)")
+        }
+    case .saveKey(let provider, let key):
+        // Clear the input echo so the key isn't lingering on screen.
+        await renderer.setInputBuffer("")
+        await renderer.renderFooter()
+        do {
+            try Credentials.setAPIKey(key, for: provider)
+            let display = TUILoginCommandParser.displayName(provider)
+            await renderer.printScrollLine("  ✓ \(display) configured. Open /model to select an online model.")
+        } catch {
+            await renderer.printScrollLine(
+                "\(DesignSystem.brightRed)  Error saving credentials: \(error.localizedDescription)\(DesignSystem.reset)"
+            )
+        }
+    case .clearKey(let provider):
+        do {
+            try Credentials.clear(provider: provider)
+            let display = TUILoginCommandParser.displayName(provider)
+            await renderer.printScrollLine("  ✓ \(display) credentials cleared.")
+        } catch {
+            await renderer.printScrollLine(
+                "\(DesignSystem.brightRed)  Error clearing credentials: \(error.localizedDescription)\(DesignSystem.reset)"
+            )
+        }
+    case .unknownProvider(let name):
+        let known = TUILoginCommandParser.knownProviders.map(\.id).joined(separator: ", ")
+        await renderer.printScrollLine("  Unknown provider '\(name)'. Available: \(known)")
     }
 }
 
@@ -1251,18 +1410,41 @@ private func switchToModel(
     renderer: Renderer,
     deferReload: Bool = false
 ) async {
-    let modelPath = localModelExists(model.id) ? model.id : "~/models/\(model.id)"
-    if !deferReload {
+    // Online providers carry their identifier in `model.id` as `<provider>:<model>`.
+    // We don't probe the local model directory for those, and we refuse the switch
+    // when no credentials are stored — the AgentLoop generation path would just
+    // throw OpenRouterError.notConfigured at the first prompt otherwise.
+    let backend = InferenceBackend(modelPath: model.id)
+    if let providerID = backend.providerID, !Credentials.isConfigured(providerID) {
+        await renderer.printScrollLine(
+            "  \(model.label). Run /login \(providerID) <api-key> first, then re-select this model."
+        )
+        return
+    }
+
+    let modelPath: String
+    if backend.isOnline {
+        // Online identifiers are the carrier — pass them through unchanged.
+        modelPath = model.id
+    } else {
+        modelPath = localModelExists(model.id) ? model.id : "~/models/\(model.id)"
+    }
+    // Keep deferred reload for local-model cycling (fast Ctrl+P iteration), but
+    // switch immediately to online backends when idle so local weights are
+    // unloaded right away and RAM is reclaimed.
+    let isGenerating = await renderer.getIsGenerating()
+    let shouldDeferReload = deferReload && (!backend.isOnline || isGenerating)
+    if !shouldDeferReload {
         await renderer.printScrollLine("  Switching to \(model.label)…")
     }
     do {
-        if deferReload {
+        if shouldDeferReload {
             try await agentLoop.stageModelSwitch(to: modelPath)
         } else {
             try await agentLoop.switchModel(to: modelPath)
         }
         await renderer.setCurrentModelIndex(index)
-        if !deferReload {
+        if !shouldDeferReload {
             await renderer.printScrollLine("  Active model: \(model.label)")
         }
         await renderer.renderFooter()
@@ -1275,29 +1457,30 @@ private func switchToModel(
 
 @MainActor
 private func cycleModelShortcut(
-    appConfig: AppConfig,
+    models: [AppConfig.ModelConfig],
+    defaultIndex: Int,
     agentLoop: AgentLoop,
     renderer: Renderer,
     reverse: Bool,
     deferReload: Bool
 ) async {
-    guard !appConfig.models.isEmpty else {
+    guard !models.isEmpty else {
         await renderer.printScrollLine("  No models configured.")
         return
     }
 
     let currentLabel = await renderer.getCurrentModelLabel()
-    let fallbackIndex = max(0, min(appConfig.defaultModelIndex, appConfig.models.count - 1))
-    let currentIndex = appConfig.models.firstIndex {
+    let fallbackIndex = max(0, min(defaultIndex, models.count - 1))
+    let currentIndex = models.firstIndex {
         $0.label.caseInsensitiveCompare(currentLabel) == .orderedSame
     } ?? fallbackIndex
 
-    guard let targetIndex = cycledModelIndex(from: currentIndex, count: appConfig.models.count, reverse: reverse) else {
+    guard let targetIndex = cycledModelIndex(from: currentIndex, count: models.count, reverse: reverse) else {
         return
     }
 
     await switchToModel(
-        model: appConfig.models[targetIndex],
+        model: models[targetIndex],
         index: targetIndex,
         agentLoop: agentLoop,
         renderer: renderer,

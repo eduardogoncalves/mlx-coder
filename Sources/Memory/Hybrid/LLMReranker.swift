@@ -151,7 +151,8 @@ public struct LLMReranker: Reranker {
             kvBits: base.kvBits,
             kvGroupSize: base.kvGroupSize,
             quantizedKVStart: base.quantizedKVStart,
-            longContextThreshold: base.longContextThreshold
+            longContextThreshold: base.longContextThreshold,
+            numDraftTokens: base.numDraftTokens
         )
     }
 

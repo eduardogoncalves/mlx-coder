@@ -127,6 +127,39 @@ public actor ToolRegistry {
         tools.removeAll()
     }
 
+    /// Generate the OpenAI-format tool definitions array used by online providers
+    /// (OpenRouter, etc.) as a serialized JSON array. Each entry has the shape
+    /// `{ "type": "function", "function": { "name", "description", "parameters" } }`.
+    ///
+    /// Returns `Data` (rather than `[[String: Any]]`) because the result crosses
+    /// an actor boundary and `[String: Any]` is not Sendable.
+    public func generateOpenAIToolDefinitionsJSON(
+        filter: ToolPromptFilter = .unfiltered
+    ) throws -> Data {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+
+        var toolDefinitions: [[String: Any]] = []
+        let selectedTools = filteredTools(for: filter)
+
+        for (_, tool) in selectedTools {
+            let schemaData = try encoder.encode(tool.parameters)
+            guard let schemaDict = try JSONSerialization.jsonObject(with: schemaData) as? [String: Any] else {
+                continue
+            }
+            toolDefinitions.append([
+                "type": "function",
+                "function": [
+                    "name": tool.name,
+                    "description": tool.description,
+                    "parameters": schemaDict
+                ]
+            ])
+        }
+
+        return try JSONSerialization.data(withJSONObject: toolDefinitions, options: [.sortedKeys])
+    }
+
     /// Generate the tools block for the system prompt.
     ///
     /// The wrapper differs by dialect:

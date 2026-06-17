@@ -223,8 +223,8 @@ public final class SwiftCoderTUIFrontend: AgentFrontend, @unchecked Sendable {
         switch event {
         case .assistantTextChunk(let text):
             guard generationActive else { return }
-            // First visible assistant token: transition spinner label from
-            // "Processing…" to "Generating…" so the user sees inference output.
+            // Transition to "Generating…" only when assistant text outside the
+            // think block actually starts streaming.
             if isFirstContentToken {
                 isFirstContentToken = false
                 await renderer.setThinking("Generating…")
@@ -244,18 +244,18 @@ public final class SwiftCoderTUIFrontend: AgentFrontend, @unchecked Sendable {
             case .started:
                 thinkingActive = true
                 thinkingBuffer = ""
-                isFirstContentToken = false  // thinking IS first content
                 // Flush any partial assistant stream line before the think block.
                 await renderer.flushStreamLine()
                 await renderer.setThinking("Thinking…")
             case .ended:
                 guard thinkingActive else { break }
                 thinkingActive = false
-                // Flush any remaining partial think line to scroll and restore
-                // "Generating…" label.
+                // Flush any remaining partial think line to scroll and return
+                // to a neutral decoding state. "Generating…" only appears once
+                // assistant text outside <think> starts streaming.
                 await renderer.flushThinkLine()
                 thinkingBuffer = ""
-                await renderer.setThinking("Generating…")
+                await renderer.setThinking("Processing…")
                 if pendingGenerationEnd {
                     pendingGenerationEnd = false
                     await finalizeGenerationUI()
@@ -411,10 +411,10 @@ public final class SwiftCoderTUIFrontend: AgentFrontend, @unchecked Sendable {
                 startSpinnerTicker()
             case .ended:
                 tokenProcessingActive = false
-                if !generationActive {
-                    await renderer.setThinking("Generating…")
-                    await renderer.renderFooter()
-                }
+                // Keep the processing label through prompt decode / generation
+                // handoff. Downstream events (think or assistant text) select the
+                // specific active label.
+                await renderer.renderFooter()
             }
 
         case .generationActivity(let lifecycle):
@@ -424,7 +424,7 @@ public final class SwiftCoderTUIFrontend: AgentFrontend, @unchecked Sendable {
                 tokenProcessingActive = false
                 isFirstContentToken = true
                 markdownTableNormalizer.reset()
-                await renderer.setThinking("Generating…")
+                await renderer.setThinking("Processing…")
                 await renderer.renderFooter()
             case .ended:
                 let wasActive = tokenProcessingActive || generationActive || thinkingActive || pendingGenerationEnd

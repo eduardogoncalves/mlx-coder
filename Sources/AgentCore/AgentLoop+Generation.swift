@@ -13,6 +13,12 @@ extension AgentLoop {
     /// Returns the response text, the streaming writer (for streamed tool calls),
     /// and whether the response began inside a pre-filled `<think>` block.
     func generateResponse() async throws -> (text: String, writer: StreamingToolCallWriter, startedThinking: Bool) {
+        // Route online backends through their HTTP client — local MLX path below
+        // assumes a loaded ModelContainer, which online providers never produce.
+        if backend.isOnline {
+            return try await generateResponseViaOpenRouter()
+        }
+
         // Apply context transforms (snapshot — does not mutate stored history)
         var transformedMessages = history.messages
         for (index, transform) in contextTransforms.enumerated() {
@@ -80,7 +86,8 @@ extension AgentLoop {
             )
         }
 
-        let result = try await modelContainer.perform { [currentGenerationConfig, frontend, chatML, imageURLs, vlmMessageData, vlmLastUserIndex, shouldUseProcessorPath, isVLM, dialect] context in
+        let draftModel = self.draftModel
+        let result = try await modelContainer.perform { [currentGenerationConfig, frontend, chatML, imageURLs, vlmMessageData, vlmLastUserIndex, shouldUseProcessorPath, isVLM, dialect, draftModel] context in
             if Task.isCancelled { throw CancellationError() }
             var hasTokenProcessingEnded = false
             var hasGenerationStarted = false
@@ -229,12 +236,24 @@ extension AgentLoop {
             var segmentTokens = [Int]()
             var segment = ""
             
-            let tokenStream = try MLXLMCommon.generateTokens(
-                input: input,
-                cache: tqCache,
-                parameters: generationParameters,
-                context: context
-            )
+            let tokenStream: AsyncStream<TokenGeneration>
+            if let draftModel {
+                tokenStream = try MLXLMCommon.generateTokens(
+                    input: input,
+                    cache: tqCache,
+                    parameters: generationParameters,
+                    context: context,
+                    draftModel: draftModel.model,
+                    numDraftTokens: currentGenerationConfig.numDraftTokens
+                )
+            } else {
+                tokenStream = try MLXLMCommon.generateTokens(
+                    input: input,
+                    cache: tqCache,
+                    parameters: generationParameters,
+                    context: context
+                )
+            }
             for await item in tokenStream {
                 if Task.isCancelled {
                     throw CancellationError()

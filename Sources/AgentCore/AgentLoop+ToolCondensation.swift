@@ -150,7 +150,8 @@ extension AgentLoop {
             frequencyContextSize: currentGenerationConfig.frequencyContextSize,
             kvBits: currentGenerationConfig.kvBits,
             kvGroupSize: currentGenerationConfig.kvGroupSize,
-            quantizedKVStart: currentGenerationConfig.quantizedKVStart
+            quantizedKVStart: currentGenerationConfig.quantizedKVStart,
+            numDraftTokens: currentGenerationConfig.numDraftTokens
         )
 
         let chatML = """

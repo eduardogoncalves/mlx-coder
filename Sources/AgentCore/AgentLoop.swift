@@ -28,9 +28,17 @@ import Darwin
 /// - `LoopDetectionService.swift` — Pure loop detection utility
 public actor AgentLoop {
 
+    public struct DraftModelHandle: @unchecked Sendable {
+        public let model: any LanguageModel
+        public init(model: any LanguageModel) {
+            self.model = model
+        }
+    }
+
     // MARK: - Stored Properties
 
     var modelContainer: ModelContainer?
+    var draftModel: DraftModelHandle?
     let registry: ToolRegistry
     var permissions: PermissionEngine
     var frontend: any AgentFrontend
@@ -43,6 +51,11 @@ public actor AgentLoop {
     var sessionApprovedToolCommands: Set<String> = []
     var useSandbox: Bool
     var modelPath: String
+
+    /// Interpreted view of `modelPath`. `modelPath` is the carrier (it round-trips
+    /// through `InferenceBackend(modelPath:)`); strings prefixed with `<provider>:`
+    /// are online providers, everything else is a local MLX model path.
+    public var backend: InferenceBackend { InferenceBackend(modelPath: modelPath) }
     let memoryLimit: Int?
     let cacheLimit: Int?
     let dryRun: Bool
@@ -110,7 +123,7 @@ public actor AgentLoop {
     // MARK: - Initializer
 
     public init(
-        modelContainer: ModelContainer,
+        modelContainer: ModelContainer?,
         registry: ToolRegistry,
         permissions: PermissionEngine,
         generationConfig: GenerationEngine.Config,
@@ -131,9 +144,11 @@ public actor AgentLoop {
         promptSectionTokenEstimates: [PromptSection: Int] = [:],
         maxToolIterations: Int = 20,
         memoryLimit: Int? = nil,
-        cacheLimit: Int? = nil
+        cacheLimit: Int? = nil,
+        draftModel: DraftModelHandle? = nil
     ) {
         self.modelContainer = modelContainer
+        self.draftModel = draftModel
         self.registry = registry
         self.permissions = permissions
         self.currentGenerationConfig = generationConfig
@@ -416,6 +431,8 @@ public actor AgentLoop {
                     }
                 }
 
+                // Audible + visible completion cue for terminal users.
+                frontend.emitStatus("Turn complete.\u{0007}", severity: .success)
                 return
             }
 
@@ -718,7 +735,8 @@ public actor AgentLoop {
                 kvGroupSize: currentGenerationConfig.kvGroupSize,
                 quantizedKVStart: currentGenerationConfig.quantizedKVStart,
                 longContextThreshold: currentGenerationConfig.longContextThreshold,
-                turboQuantBits: currentGenerationConfig.turboQuantBits
+                turboQuantBits: currentGenerationConfig.turboQuantBits,
+                numDraftTokens: currentGenerationConfig.numDraftTokens
             )
             self.pendingReload = true
         }

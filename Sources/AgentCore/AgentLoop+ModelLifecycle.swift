@@ -18,16 +18,26 @@ extension AgentLoop {
 
         // Clear any unreferenced MLX buffers before loading replacement weights.
         MLX.Memory.clearCache()
-        
+
+        // Online backends have no local container to load — inference is done over
+        // HTTP by the per-backend client. Skip the MLX load path and just refresh
+        // the dialect + registry so tools the backend still needs are bound.
+        if backend.isOnline {
+            self.loadedModelPath = modelPath
+            await registerToolsInternal()
+            frontend.emit(.modelLifecycle(.reloaded("Online provider ready: \(modelPath)")))
+            return
+        }
+
         // Load fresh container
         let newContainer = try await ModelLoader.load(
             from: modelPath,
             memoryLimit: memoryLimit,
             cacheLimit: cacheLimit
         )
-        
+
         self.modelContainer = newContainer
-        
+
         // Update loaded tracking parameters
         self.loadedModelPath = modelPath
         self.loadedMemoryLimit = memoryLimit

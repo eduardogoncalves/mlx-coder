@@ -233,14 +233,27 @@ public final class StreamingToolCallWriter: @unchecked Sendable {
         while !remaining.isEmpty {
             switch state {
             case .idle:
-                if let openRange = remaining.range(of: toolCallOpen) {
-                    displayText += String(remaining[..<openRange.lowerBound])
-                    onStatusChange?("Generating tool call...")
-                    remaining = String(remaining[openRange.upperBound...])
-                    state = .accumulatingJSON(buffer: "")
+                if let nextTag = earliestTagOccurrence(in: remaining, tags: [toolCallOpen, toolCallClose]) {
+                    displayText += String(remaining[..<nextTag.range.lowerBound])
+                    remaining = String(remaining[nextTag.range.upperBound...])
+                    if nextTag.tag == toolCallOpen {
+                        onStatusChange?("Generating tool call...")
+                        state = .accumulatingJSON(buffer: "")
+                    }
+                    // Standalone closing tags are swallowed in idle mode.
                 } else {
-                    displayText += remaining
-                    remaining = ""
+                    // Keep possible partial tool tags buffered so split
+                    // boundaries (e.g. "... </t" + "ool_call>") never leak
+                    // fragments to the terminal.
+                    let keep = trailingPossibleTagPrefix(in: remaining, forAny: [toolCallOpen, toolCallClose])
+                    let emitCount = max(0, remaining.count - keep.count)
+                    if emitCount > 0 {
+                        let split = remaining.index(remaining.startIndex, offsetBy: emitCount)
+                        displayText += String(remaining[..<split])
+                        remaining = String(remaining[split...])
+                    } else {
+                        break
+                    }
                 }
 
             case .accumulatingJSON(var buffer):
@@ -513,6 +526,32 @@ public final class StreamingToolCallWriter: @unchecked Sendable {
         }
 
         return ""
+    }
+
+    private func trailingPossibleTagPrefix(in text: String, forAny tags: [String]) -> String {
+        var best = ""
+        for tag in tags {
+            let candidate = trailingPossibleTagPrefix(in: text, for: tag)
+            if candidate.count > best.count {
+                best = candidate
+            }
+        }
+        return best
+    }
+
+    private func earliestTagOccurrence(in text: String, tags: [String]) -> (tag: String, range: Range<String.Index>)? {
+        var best: (tag: String, range: Range<String.Index>)?
+        for tag in tags {
+            guard let range = text.range(of: tag) else { continue }
+            if let currentBest = best {
+                if range.lowerBound < currentBest.range.lowerBound {
+                    best = (tag, range)
+                }
+            } else {
+                best = (tag, range)
+            }
+        }
+        return best
     }
 
     private func detectContentField(_ buffer: String) -> (key: String, afterKey: String.Index)? {

@@ -6,7 +6,8 @@ import Foundation
 extension AgentLoop {
 
     func registerToolsInternal() async {
-        guard let modelContainer else { return }
+        // Tools that do NOT depend on a loaded local model container — these
+        // register on every backend, including online ones (OpenRouter etc.).
 
         // Filesystem tools
         await registry.register(ReadFileTool(permissions: permissions))
@@ -26,27 +27,13 @@ extension AgentLoop {
         // Shell
         await registry.register(BashTool(permissions: permissions, useSandbox: useSandbox))
 
-        // Agent tools
-        await registry.register(TaskTool(
-            modelContainer: modelContainer,
-            permissions: permissions,
-            generationConfig: currentGenerationConfig,
-            modelPath: modelPath,
-            useSandbox: useSandbox,
-            parentRegistry: registry,
-            frontend: frontend
-        ))
+        // Agent tools that don't need a model container
         await registry.register(TodoTool(workspaceRoot: permissions.workspaceRoot))
-        await registry.register(ProjectExpertLoRATool(modelContainer: modelContainer, workspaceRoot: permissions.workspaceRoot, modelPath: modelPath, frontend: frontend))
 
         // Skills
         await registry.register(ReadSkillTool(skills: SkillsRegistry(workspaceRoot: permissions.workspaceRoot)))
 
-        // Web tools
-        await registry.register(WebFetchTool(
-            modelContainer: modelContainer,
-            generationConfig: currentGenerationConfig
-        ))
+        // Web tools that don't need a model container
         await registry.register(WebSearchTool())
 
         // LSP tools (.NET/C#)
@@ -62,6 +49,28 @@ extension AgentLoop {
         // Memory tools
         await registry.register(LogKnowledgeTool(workspaceRoot: permissions.workspaceRoot))
         await registry.register(SearchKnowledgeTool(workspaceRoot: permissions.workspaceRoot))
+
+        // Tools that REQUIRE a loaded local MLX container (sub-agent spawning,
+        // local web summarization, LoRA-backed expert routing). Skipped on online
+        // backends — those flows would themselves need an HTTP-backed equivalent
+        // before they'd be useful, and TaskTool's parent registry crash would
+        // otherwise fire mid-turn.
+        if let modelContainer {
+            await registry.register(TaskTool(
+                modelContainer: modelContainer,
+                permissions: permissions,
+                generationConfig: currentGenerationConfig,
+                modelPath: modelPath,
+                useSandbox: useSandbox,
+                parentRegistry: registry,
+                frontend: frontend
+            ))
+            await registry.register(ProjectExpertLoRATool(modelContainer: modelContainer, workspaceRoot: permissions.workspaceRoot, modelPath: modelPath, frontend: frontend))
+            await registry.register(WebFetchTool(
+                modelContainer: modelContainer,
+                generationConfig: currentGenerationConfig
+            ))
+        }
     }
 
     func extractPolicyTargetPath(from arguments: [String: Any]) -> String? {

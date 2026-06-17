@@ -89,7 +89,8 @@ extension AgentLoop {
             kvBits: currentGenerationConfig.kvBits,
             kvGroupSize: currentGenerationConfig.kvGroupSize,
             quantizedKVStart: currentGenerationConfig.quantizedKVStart,
-            longContextThreshold: currentGenerationConfig.longContextThreshold
+            longContextThreshold: currentGenerationConfig.longContextThreshold,
+            numDraftTokens: currentGenerationConfig.numDraftTokens
         )
 
         guard let modelContainer else { return nil }

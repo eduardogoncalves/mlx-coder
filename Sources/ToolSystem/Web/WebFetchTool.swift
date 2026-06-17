@@ -297,7 +297,8 @@ extension WebFetchTool: ProgressReportingTool {
             frequencyContextSize: config.frequencyContextSize,
             kvBits: config.kvBits,
             kvGroupSize: config.kvGroupSize,
-            quantizedKVStart: config.quantizedKVStart
+            quantizedKVStart: config.quantizedKVStart,
+            numDraftTokens: config.numDraftTokens
         )
         let prompt = """
         [INSTRUCTION]

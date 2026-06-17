@@ -60,7 +60,22 @@ struct TUIModelSlashCommand: SlashCommand {
         let typed = prefix.trimmingCharacters(in: .whitespacesAndNewlines)
         let normalized = typed.lowercased()
 
-        return models
+        let filterItems: [AutocompleteItem] = [
+            AutocompleteItem(
+                value: "free",
+                label: "/model free",
+                description: "Show only free OpenRouter models"
+            ),
+            AutocompleteItem(
+                value: "all",
+                label: "/model all",
+                description: "Show all models"
+            )
+        ].filter { item in
+            normalized.isEmpty || item.value.hasPrefix(normalized)
+        }
+
+        let modelItems = models
             .enumerated()
             .filter { _, model in
                 guard !normalized.isEmpty else { return true }
@@ -77,5 +92,7 @@ struct TUIModelSlashCommand: SlashCommand {
                     description: desc
                 )
             }
+
+        return filterItems + modelItems
     }
 }

@@ -36,8 +36,13 @@ struct ChatCommand: AsyncParsableCommand {
         renderer.printStatus("Detected \(chipInfo.family.rawValue) with \(String(format: "%.0f", chipInfo.totalMemoryGB)) GB RAM")
         renderer.printStatus("Memory budget: \(budget.totalBytes / 1_000_000) MB")
 
+        if let providerID = InferenceBackend(modelPath: selectedModel).providerID, !Credentials.isConfigured(providerID) {
+            renderer.printError("Online model selected but \(providerID) is not configured. Run /login \(providerID) <api-key> or set \(Credentials.envVarName(for: providerID)).")
+            return
+        }
+
         // If no local model exists, ask whether to download a recommended MLX model.
-        if !localModelExists(selectedModel) && !looksLikeHubModelID(selectedModel) {
+        if InferenceBackend(modelPath: selectedModel).isLocal && !localModelExists(selectedModel) && !looksLikeHubModelID(selectedModel) {
             renderer.printStatus("No local model found at \(selectedModel).")
             if let chosenHubModel = promptForRecommendedModelDownload() {
                 selectedModel = chosenHubModel
@@ -52,23 +57,64 @@ struct ChatCommand: AsyncParsableCommand {
             }
         }
 
-        // Load model
-        renderer.printStatus("Loading model from \(selectedModel)...")
-        let modelContainer: ModelContainer
-        do {
-            modelContainer = try await loadModelWithCancellation(
-                from: selectedModel,
-                memoryLimit: budget.totalBytes,
-                cacheLimit: budget.cacheBytes,
-                renderer: renderer
-            )
-        } catch is CancellationError {
-            return
-        } catch {
-            renderer.printError("Failed to load model: \(error.localizedDescription)")
-            return
+        let selectedBackend = InferenceBackend(modelPath: selectedModel)
+
+        // Load local model only for local backends; online backends stream over HTTP.
+        let modelContainer: ModelContainer?
+        if selectedBackend.isOnline {
+            renderer.printStatus("Using online model \(selectedModel)")
+            modelContainer = nil
+        } else {
+            renderer.printStatus("Loading model from \(selectedModel)...")
+            do {
+                modelContainer = try await loadModelWithCancellation(
+                    from: selectedModel,
+                    memoryLimit: budget.totalBytes,
+                    cacheLimit: budget.cacheBytes,
+                    renderer: renderer
+                )
+            } catch is CancellationError {
+                return
+            } catch {
+                renderer.printError("Failed to load model: \(error.localizedDescription)")
+                return
+            }
+            renderer.printStatus("Model loaded successfully")
         }
-        renderer.printStatus("Model loaded successfully")
+
+        let draftModelPath = args.resolvedDraftModelPath(for: selectedModel)
+        let draftModel: AgentLoop.DraftModelHandle?
+        if let draftModelPath {
+            if selectedBackend.isOnline {
+                renderer.printStatus("Ignoring --draft-model for online backends.")
+                draftModel = nil
+            } else {
+                renderer.printStatus("Loading draft model from \(draftModelPath)...")
+                do {
+                    let draftContainer = try await loadModelWithCancellation(
+                        from: draftModelPath,
+                        memoryLimit: budget.totalBytes,
+                        cacheLimit: budget.cacheBytes,
+                        renderer: renderer
+                    )
+                    draftModel = await draftContainer.perform { context in
+                        AgentLoop.DraftModelHandle(model: context.model)
+                    }
+                    renderer.printStatus("Draft model loaded successfully")
+                } catch is CancellationError {
+                    return
+                } catch {
+                    if args.isDraftModelExplicitlyProvided {
+                        renderer.printError("Failed to load draft model: \(error.localizedDescription)")
+                        return
+                    }
+                    renderer.printStatus("Draft model unavailable (\(error.localizedDescription)). Continuing without speculative decoding.")
+                    draftModel = nil
+                }
+            }
+        } else {
+            draftModel = nil
+        }
 
         // Start update check in background so it runs in parallel with the rest of setup.
         // We'll collect the result right before the REPL header so the notice always
@@ -119,7 +165,8 @@ struct ChatCommand: AsyncParsableCommand {
             kvGroupSize: args.kvGroupSize ?? profile.kvGroupSize,
             quantizedKVStart: args.quantizedKVStart ?? profile.quantizedKVStart,
             longContextThreshold: profile.longContextThreshold,
-            turboQuantBits: args.turboQuantBits
+            turboQuantBits: args.turboQuantBits,
+            numDraftTokens: args.numDraftTokens
         )
 
         // Set up tool registry
@@ -187,7 +234,8 @@ struct ChatCommand: AsyncParsableCommand {
             skillsMetadata: skillMetadata,
             promptSectionTokenEstimates: promptComposition.sectionTokenEstimates,
             memoryLimit: budget.totalBytes,
-            cacheLimit: budget.cacheBytes
+            cacheLimit: budget.cacheBytes,
+            draftModel: draftModel
         )
 
         // Wire up raw-terminal approval UI for the legacy (non-TUI) path.
@@ -270,6 +318,20 @@ struct ChatCommand: AsyncParsableCommand {
             var modelConfigs = localModelIDs.map { AppConfig.ModelConfig(id: $0, label: $0) }
             if !modelConfigs.contains(where: { $0.id.caseInsensitiveCompare(selectedModel) == .orderedSame }) {
                 modelConfigs.insert(AppConfig.ModelConfig(id: selectedModel, label: selectedModel), at: 0)
+            }
+            // Append online-provider rows (e.g. "OpenRouter • unconfigured" / "OpenRouter • configured"
+            // and `<id> [openrouter]` per cached tool-capable model). Picking these routes
+            // generation through AgentLoop's online backend path.
+            modelConfigs.append(contentsOf: OnlineModelCatalog.entries())
+            // Kick off a background catalog refresh if the on-disk list is stale.
+            // The /models endpoint is public, so this runs even before /login.
+            // Result lands in the cache file; the picker reflects it after the
+            // next time the session model list is rebuilt (e.g. after /login,
+            // or on subsequent launches).
+            if OpenRouterModelCache.isStale() {
+                Task.detached {
+                    _ = try? await OpenRouterModelCache.refresh()
+                }
             }
             let defaultModelIndex = modelConfigs.firstIndex {
                 $0.id.caseInsensitiveCompare(selectedModel) == .orderedSame
