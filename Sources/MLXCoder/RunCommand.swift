@@ -114,27 +114,74 @@ struct RunCommand: AsyncParsableCommand {
             if selectedBackend.isOnline {
                 renderer.printStatus("Ignoring --draft-model for online backends.")
                 draftModel = nil
-            } else {
-                renderer.printStatus("Loading draft model...")
+            } else if let modelContainer,
+                Qwen3DFlashDraftOverride.isDFlashDraft(draftModelPath: draftModelPath) {
+                // EAGLE-style DFlash draft: build a custom runtime instead of loading
+                // a standard token-level draft model.
                 do {
-                    let draftContainer = try await loadModelWithCancellation(
-                        from: draftModelPath,
-                        memoryLimit: budget.totalBytes,
-                        cacheLimit: budget.cacheBytes,
+                    let runtime = try await Qwen3DFlashDraftOverride.buildRuntime(
+                        draftModelPath: draftModelPath,
+                        mainModelPath: selectedModel,
+                        mainModelContainer: modelContainer,
                         renderer: renderer
                     )
-                    draftModel = await draftContainer.perform { context in
-                        AgentLoop.DraftModelHandle(model: context.model)
-                    }
-                    renderer.printStatus("Draft model loaded successfully")
+                    draftModel = AgentLoop.DraftModelHandle(dflash: runtime)
                 } catch is CancellationError {
                     return
                 } catch {
                     if args.isDraftModelExplicitlyProvided {
-                        renderer.printError("Failed to load draft model: \(error.localizedDescription)")
+                        renderer.printError("Failed to build DFlash draft: \(error.localizedDescription)")
                         return
                     }
-                    renderer.printStatus("Draft model unavailable (\(error.localizedDescription)). Continuing without speculative decoding.")
+                    renderer.printStatus("DFlash draft unavailable (\(error.localizedDescription)). Continuing without speculative decoding.")
+                    draftModel = nil
+                }
+            } else {
+                let effectiveDraftPath: String?
+                do {
+                    if let modelContainer {
+                        effectiveDraftPath = try await Qwen35MTPDraftOverride.prepareIfNeeded(
+                            draftModelPath: draftModelPath,
+                            mainModelPath: selectedModel,
+                            mainModelContainer: modelContainer,
+                            renderer: renderer
+                        )
+                    } else {
+                        effectiveDraftPath = draftModelPath
+                    }
+                } catch {
+                    if args.isDraftModelExplicitlyProvided {
+                        renderer.printError("Failed to prepare draft model override: \(error.localizedDescription)")
+                        return
+                    }
+                    renderer.printStatus("Draft override unavailable (\(error.localizedDescription)). Continuing without speculative decoding.")
+                    effectiveDraftPath = nil
+                }
+
+                if let effectiveDraftPath {
+                    renderer.printStatus("Loading draft model from \(effectiveDraftPath)...")
+                    do {
+                        let draftContainer = try await loadModelWithCancellation(
+                            from: effectiveDraftPath,
+                            memoryLimit: budget.totalBytes,
+                            cacheLimit: budget.cacheBytes,
+                            renderer: renderer
+                        )
+                        draftModel = await draftContainer.perform { context in
+                            AgentLoop.DraftModelHandle(model: context.model)
+                        }
+                        renderer.printStatus("Draft model loaded successfully")
+                    } catch is CancellationError {
+                        return
+                    } catch {
+                        if args.isDraftModelExplicitlyProvided {
+                            renderer.printError("Failed to load draft model: \(error.localizedDescription)")
+                            return
+                        }
+                        renderer.printStatus("Draft model unavailable (\(error.localizedDescription)). Continuing without speculative decoding.")
+                        draftModel = nil
+                    }
+                } else {
                     draftModel = nil
                 }
             }

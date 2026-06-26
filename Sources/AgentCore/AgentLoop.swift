@@ -29,9 +29,20 @@ import Darwin
 public actor AgentLoop {
 
     public struct DraftModelHandle: @unchecked Sendable {
-        public let model: any LanguageModel
+        /// Standard token-level draft model (upstream speculative decoding). `nil`
+        /// when the draft is an EAGLE-style DFlash drafter (see `dflash`).
+        public let model: (any LanguageModel)?
+        /// EAGLE-style DFlash runtime, used by a custom block-verify decode loop.
+        public let dflash: DFlashRuntime?
+
         public init(model: any LanguageModel) {
             self.model = model
+            self.dflash = nil
+        }
+
+        public init(dflash: DFlashRuntime) {
+            self.model = nil
+            self.dflash = dflash
         }
     }
 

@@ -237,13 +237,26 @@ extension AgentLoop {
             var segment = ""
             
             let tokenStream: AsyncStream<TokenGeneration>
-            if let draftModel {
+            if let dflash = draftModel?.dflash, imageURLs.isEmpty {
+                // EAGLE-style DFlash speculative decoding (custom block-verify loop).
+                let promptTokens = input.text.tokens.asArray(Int.self)
+                var extraEOS = Set<Int>()
+                if let eos = tokenizer.eosTokenId { extraEOS.insert(eos) }
+                tokenStream = DFlashSpeculativeDecoder.stream(
+                    runtime: dflash,
+                    promptTokens: promptTokens,
+                    maxTokens: generationParameters.maxTokens ?? 2048,
+                    temperature: generationParameters.temperature,
+                    topP: generationParameters.topP,
+                    extraEOS: extraEOS
+                )
+            } else if let draftLM = draftModel?.model {
                 tokenStream = try MLXLMCommon.generateTokens(
                     input: input,
                     cache: tqCache,
                     parameters: generationParameters,
                     context: context,
-                    draftModel: draftModel.model,
+                    draftModel: draftLM,
                     numDraftTokens: currentGenerationConfig.numDraftTokens
                 )
             } else {
