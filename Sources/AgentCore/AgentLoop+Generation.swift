@@ -236,23 +236,34 @@ extension AgentLoop {
             var segmentTokens = [Int]()
             var segment = ""
             
-            let tokenStream: AsyncStream<TokenGeneration>
-            if let draftModel {
-                tokenStream = try MLXLMCommon.generateTokens(
-                    input: input,
-                    cache: tqCache,
-                    parameters: generationParameters,
-                    context: context,
-                    draftModel: draftModel.model,
-                    numDraftTokens: currentGenerationConfig.numDraftTokens
-                )
-            } else {
-                tokenStream = try MLXLMCommon.generateTokens(
-                    input: input,
-                    cache: tqCache,
-                    parameters: generationParameters,
-                    context: context
-                )
+            // Build the token stream inside `withError` so a C++ MLX failure
+            // (e.g. the "[reshape] Cannot infer the shape of an empty array"
+            // assertion that fires while loading the prompt into the penalty
+            // ring during TokenIterator construction) surfaces as a thrown Swift
+            // `MLXError` instead of the library's default `fatalError`, which
+            // would kill the whole process. The streaming child task that
+            // `generateTokens` spawns is created within this scope and inherits
+            // the task-local handler, so per-token MLX failures are likewise
+            // prevented from aborting the process. Surfaced errors flow up to the
+            // caller's retry/compaction loop for graceful recovery.
+            let tokenStream: AsyncStream<TokenGeneration> = try await withError {
+                if let draftModel {
+                    return try MLXLMCommon.generateTokens(
+                        input: input,
+                        cache: tqCache,
+                        parameters: generationParameters,
+                        context: context,
+                        draftModel: draftModel.model,
+                        numDraftTokens: currentGenerationConfig.numDraftTokens
+                    )
+                } else {
+                    return try MLXLMCommon.generateTokens(
+                        input: input,
+                        cache: tqCache,
+                        parameters: generationParameters,
+                        context: context
+                    )
+                }
             }
             for await item in tokenStream {
                 if Task.isCancelled {

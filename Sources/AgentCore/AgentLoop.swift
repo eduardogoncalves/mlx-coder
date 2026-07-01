@@ -449,6 +449,13 @@ public actor AgentLoop {
                 if !streamResult.isError {
                     fileModificationToolsExecuted = true
                     modifiedFilePaths.insert(streamedCall.path)
+                    // A streamed write/edit changed a file on disk, so a follow-up
+                    // read_file of the same path is a legitimate re-read of new
+                    // content — not a loop. Streamed calls bypass executeToolCall,
+                    // which is where read-loop state is normally reset, so clear it
+                    // here to avoid a false "Detected repeated read loop".
+                    lastReadFileSignature = nil
+                    sameReadFileStreak = 0
                 }
                 
                 let userGoal = history.latestUserMessage ?? ""
