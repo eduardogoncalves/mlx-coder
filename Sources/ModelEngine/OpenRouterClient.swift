@@ -96,7 +96,8 @@ public struct OpenRouterClient: Sendable {
         messages: [OpenRouterMessage],
         tools: [OpenRouterToolSpec] = [],
         temperature: Double? = nil,
-        maxTokens: Int? = nil
+        maxTokens: Int? = nil,
+        sessionId: String? = nil
     ) -> AsyncThrowingStream<OpenRouterStreamEvent, Error> {
         AsyncThrowingStream { continuation in
             let task = Task {
@@ -107,6 +108,7 @@ public struct OpenRouterClient: Sendable {
                         tools: tools,
                         temperature: temperature,
                         maxTokens: maxTokens,
+                        sessionId: sessionId,
                         continuation: continuation
                     )
                     continuation.finish()
@@ -124,6 +126,7 @@ public struct OpenRouterClient: Sendable {
         tools: [OpenRouterToolSpec],
         temperature: Double?,
         maxTokens: Int?,
+        sessionId: String?,
         continuation: AsyncThrowingStream<OpenRouterStreamEvent, Error>.Continuation
     ) async throws {
         var request = URLRequest(url: baseURL.appendingPathComponent("chat/completions"))
@@ -144,6 +147,9 @@ public struct OpenRouterClient: Sendable {
         }
         if let temperature { body["temperature"] = temperature }
         if let maxTokens { body["max_tokens"] = maxTokens }
+        // Groups all generations from one conversation under a single OpenRouter
+        // session so multi-step agent runs can be followed and debugged together.
+        if let sessionId, !sessionId.isEmpty { body["session_id"] = sessionId }
 
         request.httpBody = try JSONSerialization.data(withJSONObject: body, options: [])
 

@@ -40,6 +40,10 @@ public actor AgentLoop {
     var modelContainer: ModelContainer?
     var draftModel: DraftModelHandle?
     let registry: ToolRegistry
+    /// Stable identifier for this conversation, sent as `session_id` on remote
+    /// (OpenRouter) requests so all generations in one run are grouped together
+    /// for tracing multi-step agent chains.
+    let sessionId: String = UUID().uuidString
     var permissions: PermissionEngine
     var frontend: any AgentFrontend
     /// When true, AgentCore emits debug-level status events.
