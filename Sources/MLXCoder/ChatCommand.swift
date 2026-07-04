@@ -60,7 +60,11 @@ struct ChatCommand: AsyncParsableCommand {
         let selectedBackend = InferenceBackend(modelPath: selectedModel)
 
         // Load local model only for local backends; online backends stream over HTTP.
-        let modelContainer: ModelContainer?
+        // `var` (not `let`) so we can drop this frame's strong reference once the
+        // AgentLoop actor owns the container — see the `modelContainer = nil`
+        // below. run() lives for the whole session, so a lingering reference here
+        // would pin the initial model's weights forever and double RAM on /model.
+        var modelContainer: ModelContainer?
         if selectedBackend.isOnline {
             renderer.printStatus("Using online model \(selectedModel)")
             modelContainer = nil
@@ -238,6 +242,11 @@ struct ChatCommand: AsyncParsableCommand {
             cacheLimit: budget.cacheBytes,
             draftModel: draftModel
         )
+
+        // The AgentLoop actor now holds the container. Release this frame's copy
+        // so that a later /model switch (which unloads AgentLoop's reference and
+        // clears the tool registry) can fully reclaim the old model's weights.
+        modelContainer = nil
 
         // Wire up raw-terminal approval UI for the legacy (non-TUI) path.
         // The TUI path (SwiftCoderTUIFrontend) handles approvals via renderer.requestApproval.

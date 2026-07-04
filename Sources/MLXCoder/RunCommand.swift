@@ -87,7 +87,10 @@ struct RunCommand: AsyncParsableCommand {
         }
 
         // Load local model only for local backends; online backends stream over HTTP.
-        let modelContainer: ModelContainer?
+        // `var` (not `let`) so we can drop this frame's strong reference once the
+        // AgentLoop actor owns the container (see `modelContainer = nil` below) and
+        // a later /model switch can fully reclaim the old model's weights.
+        var modelContainer: ModelContainer?
         if selectedBackend.isOnline {
             renderer.printStatus("Using online model \(selectedModel)")
             modelContainer = nil
@@ -243,6 +246,10 @@ struct RunCommand: AsyncParsableCommand {
             cacheLimit: budget.cacheBytes,
             draftModel: draftModel
         )
+
+        // The AgentLoop actor now holds the container. Release this frame's copy
+        // so that a later /model switch can fully reclaim the old model's weights.
+        modelContainer = nil
 
         let parsedPrompt = ImageAttachmentParser.parse(prompt: effectivePrompt)
         if !parsedPrompt.imageURLs.isEmpty {
