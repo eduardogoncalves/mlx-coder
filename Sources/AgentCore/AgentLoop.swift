@@ -116,8 +116,15 @@ public actor AgentLoop {
     /// Number of most-recent conversation turns to always keep verbatim during compaction.
     let contextKeepRecentTurns: Int = 6
 
+    /// A steering message queued for injection between turns, tagged with its origin so the
+    /// drain knows whether to inject it as a human user turn or an agent-authored control notice.
+    struct QueuedSteering: Sendable {
+        let message: String
+        let origin: Message.Origin
+    }
+
     /// Messages injected between turns during the current run (checked before each generation step).
-    var steeringQueue: [String] = []
+    var steeringQueue: [QueuedSteering] = []
     /// Messages queued for automatic processing after the current run finishes.
     var followUpQueue: [String] = []
 
@@ -335,6 +342,10 @@ public actor AgentLoop {
                         && (error as NSError).code == 9
                     if isContextOverflow {
                         frontend.emitStatus("⚠️  Context too large — forcing compaction before retry.")
+                        // Abandon in-flight recovery artifacts so the emergency
+                        // compaction is unblocked (it skips while transient messages
+                        // exist) and so malformed attempts never enter a summary.
+                        history.purgeTransient()
                         await applyDeterministicContextCompactionIfNeeded(reason: "context_overflow_recovery")
                     }
                     pendingImages = images
@@ -403,7 +414,10 @@ public actor AgentLoop {
 
             if toolCalls.isEmpty && streamedCalls.isEmpty {
                 if hasMalformedToolCall {
-                    history.addAssistant(response)
+                    // Rejected generation attempt — kept in context so the model can
+                    // recover on the retry, but marked transient so it is purged from
+                    // persistent history once the turn produces a valid path.
+                    history.addAssistant(response, transient: true)
                     frontend.emitStatus(
                         "Malformed tool call detected; retrying with strict JSON tool-call format.",
                         severity: .warning
@@ -418,13 +432,18 @@ public actor AgentLoop {
                     let bareJSONNote = responseLooksLikeBareJSONToolCall
                         ? " Your last response was a bare JSON object — that is NOT a tool call and will never execute. Discard that shape entirely."
                         : ""
-                    steeringQueue.append("Your previous tool call was malformed and could not be parsed.\(bareJSONNote) Re-emit only the tool call using the exact \(example) format. Use one of the tool names listed in the system prompt. Do not add explanation text, code fences, or any JSON outside the tool-call markers.")
+                    steeringQueue.append(.init(message: "Your previous tool call was malformed and could not be parsed.\(bareJSONNote) Re-emit only the tool call using the exact \(example) format. Use one of the tool names listed in the system prompt. Do not add explanation text, code fences, or any JSON outside the tool-call markers.", origin: .automated))
                     continue
                 }
 
                 // No tool calls — this is the final response
                 history.addAssistant(response)
-                
+
+                // Turn completed successfully: drop the ephemeral recovery artifacts
+                // (malformed attempts, automated steering) accumulated during it, so
+                // only the successful execution path persists.
+                history.purgeTransient()
+
                 // Check builds if write/edit tools were executed in agent/coding mode
                 if fileModificationToolsExecuted && mode == .agent && taskType == .coding {
                     await performBuildCheckIfNeeded(modifiedPaths: modifiedFilePaths)
@@ -520,14 +539,20 @@ public actor AgentLoop {
             if !steeringQueue.isEmpty {
                 let pending = steeringQueue
                 steeringQueue.removeAll()
-                for msg in pending {
-                    frontend.emitStatus("↩️  Steering: \(msg)")
-                    history.addUser(msg)
-                    await hooks.emit(.steeringInjected(message: msg))
+                for item in pending {
+                    frontend.emitStatus("↩️  Steering: \(item.message)")
+                    switch item.origin {
+                    case .human:     history.addUser(item.message)
+                    case .automated: history.addAutomated(item.message)
+                    }
+                    await hooks.emit(.steeringInjected(message: item.message))
                 }
             }
         }
 
+        // Turn is ending (iteration cap reached); still drop transient recovery
+        // artifacts so they don't leak into persistent history.
+        history.purgeTransient()
         frontend.emitError("Exceeded maximum tool iterations (\(maxToolIterations))")
     }
 
@@ -580,7 +605,7 @@ public actor AgentLoop {
         let steeringMessage = "Your previous \(truncated.toolName) call to \(truncated.path) was cut off after \(truncated.bytesWritten) bytes because the token budget ran out mid-content. The partial content was already saved to disk — do NOT regenerate it. To finish the file, call append_file with path \"\(truncated.path)\" and only the REMAINING content needed to complete it.\(tailHint)"
 
         frontend.emitStatus("↩️  Steering: \(steeringMessage)")
-        history.addUser(steeringMessage)
+        history.addAutomated(steeringMessage)
         await hooks.emit(.steeringInjected(message: steeringMessage))
     }
 
@@ -909,13 +934,13 @@ public actor AgentLoop {
                 if let normalizedPath = blockedRepeatedReadNormalizedPath,
                    !readLoopSteeredPaths.contains(normalizedPath) {
                     readLoopSteeredPaths.insert(normalizedPath)
-                    steeringQueue.append("You are repeatedly calling read_file for '\(blockedPath)'. Reuse prior read output from history, or read a different file/line range only if needed.")
+                    steeringQueue.append(.init(message: "You are repeatedly calling read_file for '\(blockedPath)'. Reuse prior read output from history, or read a different file/line range only if needed.", origin: .automated))
                 }
             } else if let blockedSignature = blockedRepeatedReadOnlySignature {
                 result = .error("Detected repeated \(call.name) loop with the same arguments. Reuse prior tool output in history and continue without re-running it.")
                 if !readOnlyLoopSteeredSignatures.contains(blockedSignature) {
                     readOnlyLoopSteeredSignatures.insert(blockedSignature)
-                    steeringQueue.append("You are repeatedly calling \(call.name) with identical arguments. Reuse the existing tool output and move to the final answer.")
+                    steeringQueue.append(.init(message: "You are repeatedly calling \(call.name) with identical arguments. Reuse the existing tool output and move to the final answer.", origin: .automated))
                 }
             } else {
                 // Apply automatic parameter correction before execution
@@ -946,7 +971,7 @@ public actor AgentLoop {
                 if !missingRequiredArgs.isEmpty {
                     let joined = missingRequiredArgs.joined(separator: ", ")
                     result = .error("Missing required argument(s) for \(call.name): \(joined)")
-                    steeringQueue.append("Your last \(call.name) call was invalid. Include required argument(s): \(joined).")
+                    steeringQueue.append(.init(message: "Your last \(call.name) call was invalid. Include required argument(s): \(joined).", origin: .automated))
                 } else if isDestructive && dryRun {
                     result = .success("Dry-run mode: skipped execution of destructive tool '\(call.name)'. Arguments: \(correctionResult.correctedArguments)")
                 } else if let tool = resolvedTool {

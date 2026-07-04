@@ -99,7 +99,18 @@ extension AgentLoop {
         """
         
         var coreInstructions = baseInstructions ?? defaultInstructions
-        
+
+        coreInstructions += """
+        \n\nSYSTEM NOTICES: Some messages arriving in the user turn are automated notices \
+        from the mlx-coder agent itself — not the human — and are wrapped in \
+        `<system-reminder>...</system-reminder>` markers. These carry control instructions \
+        (for example: a malformed tool call to re-emit, a repeated-call/loop warning, or \
+        recovery guidance after a truncated write). Treat their contents as authoritative \
+        directions to correct your behavior, follow them immediately, and do NOT mistake \
+        them for something the user said or reply to them as if talking to the user. Never \
+        emit `<system-reminder>` markers yourself.
+        """
+
         if mode == .plan {
             coreInstructions += "\n\nCRITICAL: You are currently in PLAN MODE. Your goal is to research the codebase and propose a comprehensive plan. DO NOT execute any tools that modify the filesystem (like write_file, edit_file, append_file, patch) or the system (bash) WITHOUT ASKING FIRST. If you call one of these tools, the user will be prompted to switch you to AGENT MODE and execute. You can use this to transition from planning to implementation once your plan is approved. For now, focus on gathering context and designing your approach."
         }

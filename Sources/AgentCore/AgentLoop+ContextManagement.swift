@@ -11,12 +11,15 @@ extension AgentLoop {
     /// current run. Steering messages let you redirect the agent mid-run — they are consumed
     /// between tool-execution rounds, before the model generates its next response.
     public func steer(_ message: String) {
-        steeringQueue.append(message)
+        // The public steering API is user-facing (`/steer`, mid-run prompts), so these are
+        // genuine human turns. Agent-internal redirects append to the queue directly with
+        // `.automated` origin.
+        steeringQueue.append(.init(message: message, origin: .human))
     }
 
     /// Returns the pending steering messages without consuming them.
     public func pendingSteeringMessages() -> [String] {
-        steeringQueue
+        steeringQueue.map(\.message)
     }
 
     /// Clears all pending steering messages.
@@ -102,6 +105,15 @@ extension AgentLoop {
     // MARK: - Deterministic Context Compaction
 
     func applyDeterministicContextCompactionIfNeeded(reason: String) async {
+        // Never compact mid-recovery. While a turn is in flight, transient artifacts
+        // (malformed tool-call attempts, automated steering) are still in history so
+        // the model can recover; they are purged when the turn completes. Skipping
+        // here guarantees compaction only ever snapshots the durable, committed
+        // conversation — malformed attempts never leak into a summary. The emergency
+        // overflow path purges transient first (see processUserMessage), so it still
+        // runs when genuinely needed.
+        guard !history.messages.contains(where: { $0.transient }) else { return }
+
         let threshold = max(currentGenerationConfig.longContextThreshold, contextReserveTokens + 1)
         let target = max(256, threshold - contextReserveTokens)
 

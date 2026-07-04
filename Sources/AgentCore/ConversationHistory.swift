@@ -12,18 +12,66 @@ public struct Message: Sendable {
         case tool
     }
 
+    /// Where a message came from.
+    ///
+    /// - `.human`: typed or queued by the actual user (including `/steer`).
+    /// - `.automated`: injected by mlx-coder itself to redirect the model — malformed
+    ///   tool-call retries, loop-breaks, truncation recovery, etc. These ride the `user`
+    ///   role on the wire (every backend accepts a user turn anywhere), but are wrapped in
+    ///   a `<system-reminder>` marker so the model reads them as system control notices
+    ///   rather than the human speaking, and are excluded from user-intent heuristics.
+    public enum Origin: String, Sendable, Codable {
+        case human
+        case automated
+    }
+
     public let role: Role
     public let content: String
     public let toolCallId: String?
+    public let origin: Origin
 
-    public init(role: Role, content: String, toolCallId: String? = nil) {
+    /// Ephemeral turn artifact that must not survive into persistent history:
+    /// malformed/rejected tool-call attempts and automated steering/recovery
+    /// prompts. Kept in the working context during a turn so the model can recover,
+    /// then removed by `ConversationHistory.purgeTransient()` when the turn completes.
+    /// Runtime-only — never serialized (transient messages are purged before any
+    /// transcript is written), so it stays out of `CodingKeys`.
+    public let transient: Bool
+
+    public init(role: Role, content: String, toolCallId: String? = nil, origin: Origin = .human, transient: Bool = false) {
         self.role = role
         self.content = content
         self.toolCallId = toolCallId
+        self.origin = origin
+        self.transient = transient
+    }
+
+    /// Content as it should appear on the wire. Automated (agent-injected) messages are
+    /// wrapped so the model reads them as system control notices, not human input. Applies
+    /// to both the local ChatML path and the OpenRouter/OpenAI path.
+    public var wireContent: String {
+        guard origin == .automated else { return content }
+        return "<system-reminder>\n\(content)\n</system-reminder>"
     }
 }
 
-extension Message: Codable {}
+extension Message: Codable {
+    enum CodingKeys: String, CodingKey {
+        case role, content, toolCallId, origin
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        role = try container.decode(Role.self, forKey: .role)
+        content = try container.decode(String.self, forKey: .content)
+        toolCallId = try container.decodeIfPresent(String.self, forKey: .toolCallId)
+        // Older transcripts predate `origin`; default them to human-authored.
+        origin = try container.decodeIfPresent(Origin.self, forKey: .origin) ?? .human
+        // `transient` is never persisted (purged before serialization), so any
+        // decoded/restored message is durable by definition.
+        transient = false
+    }
+}
 
 /// Manages the conversation history and formats it for the model.
 public struct ConversationHistory: Sendable {
@@ -39,31 +87,30 @@ public struct ConversationHistory: Sendable {
         messages.append(Message(role: .system, content: systemPrompt))
     }
 
-    /// Add a user message.
+    /// Add a user message (human-authored).
     public mutating func addUser(_ content: String) {
         messages.append(Message(role: .user, content: content))
     }
 
+    /// Add an agent-injected control message (steering, loop-break, recovery). Rides the
+    /// `user` role on the wire but is marked `.automated` so it's rendered inside a
+    /// `<system-reminder>` marker and skipped by user-intent heuristics.
+    ///
+    /// Marked `transient` by default: recovery/steering is ephemeral execution
+    /// mechanics, not conversation, so it is purged once the turn completes.
+    public mutating func addAutomated(_ content: String, transient: Bool = true) {
+        messages.append(Message(role: .user, content: content, origin: .automated, transient: transient))
+    }
+
     /// Add an assistant message.
-    public mutating func addAssistant(_ content: String, stripThinking: Bool = true) {
-        var finalContent = content
-        if stripThinking {
-            // 1. Full block: <think>...</think>
-            while let thinkOpenRange = finalContent.range(of: "<think>"),
-                  let thinkCloseRange = finalContent.range(of: "</think>", range: thinkOpenRange.upperBound..<finalContent.endIndex) {
-                 let before = finalContent[..<thinkOpenRange.lowerBound]
-                 let after = finalContent[thinkCloseRange.upperBound...]
-                 finalContent = (String(before) + String(after)).trimmingCharacters(in: .whitespacesAndNewlines)
-            }
-            
-            // 2. Partial block: If thinking was force-started in the prompt, 
-            // the response might start with reasoning and end with </think>.
-            if let thinkCloseRange = finalContent.range(of: "</think>") {
-                let after = finalContent[thinkCloseRange.upperBound...]
-                finalContent = String(after).trimmingCharacters(in: .whitespacesAndNewlines)
-            }
-        }
-        messages.append(Message(role: .assistant, content: finalContent))
+    ///
+    /// This is the single "never append raw model output" seam: reasoning blocks
+    /// (`<think>`/`<reasoning>`/`<analysis>`/…) are removed via `ReasoningStripper`
+    /// so only the visible response is stored. Pass `transient: true` for a rejected
+    /// attempt (e.g. a malformed tool call) that must not survive the turn.
+    public mutating func addAssistant(_ content: String, stripThinking: Bool = true, transient: Bool = false) {
+        let finalContent = stripThinking ? ReasoningStripper.strip(content) : content
+        messages.append(Message(role: .assistant, content: finalContent, transient: transient))
     }
 
     /// Add a tool response.
@@ -71,9 +118,22 @@ public struct ConversationHistory: Sendable {
         messages.append(Message(role: .tool, content: content, toolCallId: toolCallId))
     }
 
-    /// Most recent user message, used to keep extraction prompts task-relevant.
+    /// Most recent human-authored user message, used to keep extraction prompts
+    /// task-relevant. Excludes agent-injected steering so control text never masquerades
+    /// as the user's intent.
     public var latestUserMessage: String? {
-        messages.last(where: { $0.role == .user })?.content
+        messages.last(where: { $0.role == .user && $0.origin == .human })?.content
+    }
+
+    /// Remove ephemeral turn artifacts so only the successful execution path persists.
+    ///
+    /// Drops every `transient` message — malformed/rejected tool-call attempts and
+    /// automated steering/recovery prompts — leaving the durable
+    /// user → assistant → tool → assistant sequence intact and in order. Called when a
+    /// turn completes; during the turn these messages stay in context so the model can
+    /// recover.
+    public mutating func purgeTransient() {
+        messages.removeAll { $0.transient }
     }
 
     /// Clears the history, retaining only the initial system prompt.
@@ -95,7 +155,7 @@ public struct ConversationHistory: Sendable {
     /// Reverts the conversation to the state before the last user message.
     /// Returns true if a turn was successfully reverted.
     public mutating func revertLastTurn() -> Bool {
-        if let lastUserIndex = messages.lastIndex(where: { $0.role == .user }) {
+        if let lastUserIndex = messages.lastIndex(where: { $0.role == .user && $0.origin == .human }) {
             messages.removeSubrange(lastUserIndex...)
             return true
         }
@@ -123,7 +183,7 @@ public struct ConversationHistory: Sendable {
         var result = ""
         for message in messagesOverride {
             result += "\(ToolCallPattern.imStart)\(message.role.rawValue)\n"
-            result += sanitizedChatMLContent(message.content)
+            result += sanitizedChatMLContent(message.wireContent)
             result += "\n\(ToolCallPattern.imEnd)\n"
         }
         // Add the opening for the assistant's next turn
@@ -201,7 +261,9 @@ public struct ConversationHistory: Sendable {
         var currentFollowers: [Message] = []
 
         for message in messages where message.role != .system {
-            if message.role == .user {
+            // Only human user messages open a new turn; agent-injected steering rides
+            // along as a follower of the turn it was responding to.
+            if message.role == .user && message.origin == .human {
                 if let user = currentUserMsg {
                     result.append(Turn(userMessage: user, assistantAndToolMessages: currentFollowers))
                 }
