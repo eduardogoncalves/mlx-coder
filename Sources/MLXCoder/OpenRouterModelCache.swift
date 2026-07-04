@@ -1,7 +1,7 @@
 // Sources/MLXCoder/OpenRouterModelCache.swift
 // Persists a remote provider's `/models` response under ~/.mlx-coder so the
 // picker has entries on launch without hitting the network. Refreshed lazily
-// when stale and eagerly after `/login <provider> <key>`.
+// when stale and eagerly on demand via `/model remote <provider> refresh`.
 //
 // The cache is keyed per provider under ~/.mlx-coder/remote-models/<id>.json.
 // `OpenRouterModelCache` is kept as a thin back-compat wrapper over
@@ -62,10 +62,10 @@ enum RemoteModelCache {
                 userInfo: [NSLocalizedDescriptionKey: "Unknown remote provider '\(providerID)'. Configure it in ~/.mlx-coder/config.json."]
             )
         }
-        // The /models endpoint is typically public — no API key needed — so we
-        // can populate the cache before the user runs /login.
+        // The /models endpoint is typically public, but we still pass the
+        // configured key when present so authenticated gateways work too.
         let base = provider.baseURLValue ?? URL(string: "https://openrouter.ai/api/v1")!
-        let key = Credentials.apiKey(for: providerID) ?? ""
+        let key = RemoteProviderRegistry.apiKey(for: providerID) ?? ""
         let client = OpenRouterClient(apiKey: key, baseURL: base)
         let models = try await client.listToolCapableModels()
         try save(models, providerID: providerID)

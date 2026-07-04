@@ -28,7 +28,7 @@ public enum OpenRouterError: Error, LocalizedError, Sendable {
     public var errorDescription: String? {
         switch self {
         case .notConfigured:
-            return "OpenRouter is not configured. Run /login openrouter to set your API key."
+            return "Remote provider is not configured. Add it to ~/.mlx-coder/config.json with a name, baseURL, and apiKey."
         case .http(let status, let body):
             let truncated = body.count > 400 ? String(body.prefix(400)) + "…" : body
             return "OpenRouter HTTP \(status): \(truncated)"
@@ -285,8 +285,8 @@ public struct OpenRouterClient: Sendable {
 
     /// Fetch all models from OpenRouter and return only the tool-capable ones
     /// (`supported_parameters` contains `"tools"`). The `/models` endpoint is
-    /// public — no API key is required — so this works before /login too,
-    /// letting us pre-populate the picker on first launch.
+    /// public — no API key is required — so this works even when the configured
+    /// provider omits an apiKey, letting us pre-populate the picker on first launch.
     public func listToolCapableModels() async throws -> [ModelInfo] {
         var request = URLRequest(url: baseURL.appendingPathComponent("models"))
         request.httpMethod = "GET"

@@ -1,67 +1,104 @@
-// Tests for provider-agnostic remote inference: RemoteProvider env-var derivation,
-// the built-in provider registry, case-insensitive lookup, and InferenceBackend's
-// generic `remote:` round-trip (plus legacy `openrouter:` back-compat).
+// Tests for provider-agnostic remote inference: RemoteProvider id derivation,
+// lenient config decoding, and InferenceBackend's `<provider>:<model>` carrier
+// round-trip.
 //
-// Note: file-touching registry behaviors (addOrUpdate/remove) are intentionally
-// NOT tested here to avoid writing to the user's real ~/.mlx-coder.
+// Note: registry lookups that touch the real ~/.mlx-coder/config.json are
+// intentionally NOT tested here; decoding is exercised against in-memory JSON.
 
 import XCTest
 @testable import MLXCoder
 
 final class RemoteProviderTests: XCTestCase {
-    func testEnvVarNameDefaults() {
-        let openrouter = RemoteProvider(id: "openrouter", name: "OpenRouter", baseURL: "https://openrouter.ai/api/v1", requiresAuth: true, apiKeyEnv: nil)
-        XCTAssertEqual(openrouter.envVarName, "OPENROUTER_API_KEY")
-
-        let mlxlm = RemoteProvider(id: "mlx-lm", name: "mlx-lm.server", baseURL: "http://localhost:8080/v1", requiresAuth: false, apiKeyEnv: nil)
-        XCTAssertEqual(mlxlm.envVarName, "MLX_LM_API_KEY")
+    func testSlugDerivation() {
+        XCTAssertEqual(RemoteProvider(name: "OpenRouter", baseURL: "x").id, "openrouter")
+        XCTAssertEqual(RemoteProvider(name: "LM Studio", baseURL: "x").id, "lm-studio")
+        XCTAssertEqual(RemoteProvider(name: "mlx-lm.server", baseURL: "x").id, "mlx-lm-server")
+        XCTAssertEqual(RemoteProvider(name: "My  Gateway!!", baseURL: "x").id, "my-gateway")
     }
 
-    func testEnvVarNameOverride() {
-        let custom = RemoteProvider(id: "openrouter", name: "OpenRouter", baseURL: "https://openrouter.ai/api/v1", requiresAuth: true, apiKeyEnv: "MY_CUSTOM_KEY")
-        XCTAssertEqual(custom.envVarName, "MY_CUSTOM_KEY")
+    func testHasAPIKey() {
+        XCTAssertTrue(RemoteProvider(name: "A", baseURL: "x", apiKey: "sk-1").hasAPIKey)
+        XCTAssertFalse(RemoteProvider(name: "A", baseURL: "x", apiKey: "").hasAPIKey)
+        XCTAssertFalse(RemoteProvider(name: "A", baseURL: "x", apiKey: nil).hasAPIKey)
     }
 
-    func testBuiltInsContainExpectedProviders() {
-        let builtIns = RemoteProviderRegistry.builtIns
-        let byID = Dictionary(uniqueKeysWithValues: builtIns.map { ($0.id, $0) })
-
-        XCTAssertEqual(byID["openrouter"]?.baseURL, "https://openrouter.ai/api/v1")
-        XCTAssertEqual(byID["openrouter"]?.requiresAuth, true)
-
-        XCTAssertEqual(byID["lmstudio"]?.baseURL, "http://localhost:1234/v1")
-        XCTAssertEqual(byID["lmstudio"]?.requiresAuth, false)
-
-        XCTAssertEqual(byID["vllm"]?.baseURL, "http://localhost:8000/v1")
-        XCTAssertEqual(byID["vllm"]?.requiresAuth, false)
-
-        XCTAssertEqual(byID["mlx-lm"]?.baseURL, "http://localhost:8080/v1")
-        XCTAssertEqual(byID["mlx-lm"]?.requiresAuth, false)
+    func testDecodesCanonicalKeys() throws {
+        let json = """
+        { "name": "OpenRouter", "baseURL": "https://openrouter.ai/api/v1", "apiKey": "sk-or-abc" }
+        """.data(using: .utf8)!
+        let provider = try JSONDecoder().decode(RemoteProvider.self, from: json)
+        XCTAssertEqual(provider.id, "openrouter")
+        XCTAssertEqual(provider.baseURL, "https://openrouter.ai/api/v1")
+        XCTAssertEqual(provider.apiKey, "sk-or-abc")
     }
 
-    func testProviderLookupIsCaseInsensitive() {
-        XCTAssertEqual(RemoteProviderRegistry.provider(id: "OpenRouter")?.id, "openrouter")
-        XCTAssertEqual(RemoteProviderRegistry.provider(id: "LMSTUDIO")?.id, "lmstudio")
-        XCTAssertNil(RemoteProviderRegistry.provider(id: "does-not-exist"))
+    func testDecodesLenientKeyCasing() throws {
+        let json = """
+        { "name": "LM Studio", "baseurl": "http://localhost:1234/v1", "api_key": "" }
+        """.data(using: .utf8)!
+        let provider = try JSONDecoder().decode(RemoteProvider.self, from: json)
+        XCTAssertEqual(provider.id, "lm-studio")
+        XCTAssertEqual(provider.baseURL, "http://localhost:1234/v1")
+        XCTAssertEqual(provider.apiKey, "")
     }
 
-    func testGenericRemoteRoundTrip() {
-        let backend = InferenceBackend(modelPath: "remote:lmstudio:qwen2.5-coder")
-        XCTAssertTrue(backend.isOnline)
-        XCTAssertEqual(backend.providerID, "lmstudio")
-        XCTAssertEqual(backend.remoteModelID, "qwen2.5-coder")
-        XCTAssertEqual(backend.modelPath, "remote:lmstudio:qwen2.5-coder")
+    func testConfigFileDecodesProvidersKey() throws {
+        let json = """
+        { "providers": [ { "name": "OpenRouter", "baseURL": "https://openrouter.ai/api/v1", "apiKey": "sk" } ] }
+        """.data(using: .utf8)!
+        let config = try JSONDecoder().decode(RemoteProviderRegistry.ConfigFile.self, from: json)
+        XCTAssertEqual(config.providers.map(\.id), ["openrouter"])
     }
 
-    func testLegacyOpenRouterMapsToRemote() {
-        let backend = InferenceBackend(modelPath: "openrouter:foo/bar")
+    func testConfigFileDecodesLegacyRemoteProvidersKey() throws {
+        let json = """
+        { "remoteProviders": [ { "name": "vLLM", "baseURL": "http://localhost:8000/v1" } ] }
+        """.data(using: .utf8)!
+        let config = try JSONDecoder().decode(RemoteProviderRegistry.ConfigFile.self, from: json)
+        XCTAssertEqual(config.providers.map(\.id), ["vllm"])
+    }
+
+    func testStripJSONCommentsPreservesURLsInStrings() {
+        let input = """
+        {
+          // a line comment
+          "providers": [
+            { "name": "OpenRouter", /* inline */ "baseURL": "https://openrouter.ai/api/v1" }
+          ]
+        }
+        """
+        let cleaned = RemoteProviderRegistry.stripJSONComments(input)
+        XCTAssertTrue(cleaned.contains("https://openrouter.ai/api/v1"))
+        XCTAssertFalse(cleaned.contains("a line comment"))
+        XCTAssertFalse(cleaned.contains("inline"))
+        // Still valid JSON after stripping.
+        let data = cleaned.data(using: .utf8)!
+        let config = try! JSONDecoder().decode(RemoteProviderRegistry.ConfigFile.self, from: data)
+        XCTAssertEqual(config.providers.map(\.id), ["openrouter"])
+    }
+
+    func testSampleTemplateParsesToNoProviders() {
+        // The auto-generated template has its sample commented out, so nothing
+        // is parsed until the user edits it.
+        let cleaned = RemoteProviderRegistry.stripJSONComments(RemoteProviderRegistry.sampleConfigTemplate)
+        let data = cleaned.data(using: .utf8)!
+        let config = try! JSONDecoder().decode(RemoteProviderRegistry.ConfigFile.self, from: data)
+        XCTAssertTrue(config.providers.isEmpty)
+    }
+
+    func testProviderCarrierRoundTrip() {
+        // Prefix-less `<provider>:<model>` is the canonical carrier.
+        let backend = InferenceBackend(modelPath: "openrouter:qwen/qwen3-235b-a22b")
         XCTAssertTrue(backend.isOnline)
         XCTAssertEqual(backend.providerID, "openrouter")
-        XCTAssertEqual(backend.remoteModelID, "foo/bar")
-        guard case .remote(let providerID, let modelID) = backend else {
-            return XCTFail("expected .remote case")
+        XCTAssertEqual(backend.remoteModelID, "qwen/qwen3-235b-a22b")
+        XCTAssertEqual(backend.modelPath, "openrouter:qwen/qwen3-235b-a22b")
+    }
+
+    func testLocalIdentifiersAreNotMistakenForRemote() {
+        // Hub ids and filesystem paths have no bare `token:` prefix.
+        for path in ["mlx-community/Qwen3.5-9B-5bit", "/Users/me/models/foo", "~/models/bar"] {
+            XCTAssertTrue(InferenceBackend(modelPath: path).isLocal, "\(path) should be local")
         }
-        XCTAssertEqual(providerID, "openrouter")
-        XCTAssertEqual(modelID, "foo/bar")
     }
 }

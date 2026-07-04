@@ -72,8 +72,6 @@ public enum SwiftCoderTUIAppConfigBuilder {
                 AppConfig.CommandConfig(name: "/clear",   description: "Clear the conversation"),
                 AppConfig.CommandConfig(name: "/context", description: "Show context-window usage"),
                 AppConfig.CommandConfig(name: "/skills",  description: "List available skills"),
-                AppConfig.CommandConfig(name: "/hooks",   description: "Manage hooks"),
-                AppConfig.CommandConfig(name: "/transforms", description: "Manage prompt transforms"),
                 AppConfig.CommandConfig(name: "/save-history", description: "Save chat history"),
                 AppConfig.CommandConfig(name: "/save-history-json", description: "Save chat history as JSON"),
                 AppConfig.CommandConfig(name: "/load-history-json", description: "Load chat history from JSON"),

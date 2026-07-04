@@ -19,6 +19,9 @@ struct ChatCommand: AsyncParsableCommand {
 
     mutating func run() async throws {
         guard !args.testAbsorber.isTestInvocation else { return }
+        if RemoteProviderRegistry.ensureConfigFileExists() {
+            print("Created \(RemoteProviderRegistry.filePath) with a commented sample provider. Edit it to add remote models.")
+        }
         let renderer = StreamRenderer(verbose: args.verbose)
         let interactiveInput = InteractiveInput()
         interactiveInput.voiceSilenceTimeout = args.voiceSilenceTimeout
@@ -36,8 +39,8 @@ struct ChatCommand: AsyncParsableCommand {
         renderer.printStatus("Detected \(chipInfo.family.rawValue) with \(String(format: "%.0f", chipInfo.totalMemoryGB)) GB RAM")
         renderer.printStatus("Memory budget: \(budget.totalBytes / 1_000_000) MB")
 
-        if let providerID = InferenceBackend(modelPath: selectedModel).providerID, !Credentials.isConfigured(providerID) {
-            renderer.printError("Online model selected but \(providerID) is not configured. Run /login \(providerID) <api-key> or set \(Credentials.envVarName(for: providerID)).")
+        if let providerID = InferenceBackend(modelPath: selectedModel).providerID, !RemoteProviderRegistry.isConfigured(providerID) {
+            renderer.printError("Online model selected but provider '\(providerID)' is not configured. Add it to ~/.mlx-coder/config.json.")
             return
         }
 
@@ -333,11 +336,10 @@ struct ChatCommand: AsyncParsableCommand {
             // tool-capable model, across every configured provider). Picking
             // these routes generation through AgentLoop's remote backend path.
             modelConfigs.append(contentsOf: OnlineModelCatalog.entries())
-            // Kick off a background catalog refresh for each provider whose
-            // on-disk cache is stale. The /models endpoint is public, so this
-            // runs even before /login. Results land in each provider's cache
+            // Kick off a background catalog refresh for each configured provider
+            // whose on-disk cache is stale. Results land in each provider's cache
             // file; the picker reflects them after the session model list is
-            // next rebuilt (e.g. after /login, or on subsequent launches).
+            // next rebuilt (e.g. on subsequent launches).
             for provider in RemoteProviderRegistry.providers() where RemoteModelCache.isStale(providerID: provider.id) {
                 let providerID = provider.id
                 Task.detached {

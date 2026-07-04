@@ -27,6 +27,7 @@ struct RunCommand: AsyncParsableCommand {
 
     mutating func run() async throws {
         guard !args.testAbsorber.isTestInvocation else { return }
+        RemoteProviderRegistry.ensureConfigFileExists()
         let renderer = StreamRenderer(verbose: args.verbose)
         let interactiveInput = InteractiveInput()
         let frontend = LegacyTerminalFrontend(renderer: renderer, interactiveInput: interactiveInput)
@@ -70,8 +71,8 @@ struct RunCommand: AsyncParsableCommand {
 
         let selectedModel = args.model
         let selectedBackend = InferenceBackend(modelPath: selectedModel)
-        if let providerID = selectedBackend.providerID, !Credentials.isConfigured(providerID) {
-            renderer.printError("Online model selected but \(providerID) is not configured. Run /login \(providerID) <api-key> or set \(Credentials.envVarName(for: providerID)).")
+        if let providerID = selectedBackend.providerID, !RemoteProviderRegistry.isConfigured(providerID) {
+            renderer.printError("Online model selected but provider '\(providerID)' is not configured. Add it to ~/.mlx-coder/config.json.")
             return
         }
 

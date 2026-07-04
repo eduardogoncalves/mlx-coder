@@ -70,14 +70,14 @@ public func runSwiftCoderTUISession(
 
     let caffeinateManager = CaffeinateManager()
 
-    let dynamicCommandNames: Set<String> = ["/model", "/effort", "/caffeinate", "/memory", "/login", "/logout"]
+    let dynamicCommandNames: Set<String> = ["/model", "/effort", "/caffeinate", "/memory"]
     let staticItems = frontend.appConfig.commands
         .filter { !dynamicCommandNames.contains($0.name) }
         .map {
         AutocompleteItem(value: String($0.name.dropFirst()), label: $0.name, description: $0.description)
     }
     // Session-local model list. Starts from appConfig (built at startup) but is
-    // mutated when /login refreshes the OpenRouter catalog so the user sees
+    // mutated when a remote provider's catalog is refreshed so the user sees
     // fresh entries without relaunching. AppConfig.models is `let`, so we keep
     // our own copy here and pass it into handleModelCommand explicitly.
     var modelFilterMode: ModelFilterMode = .all
@@ -89,8 +89,6 @@ public func runSwiftCoderTUISession(
                 TUIEffortSlashCommand(),
                 CaffeinateSlashCommand(),
                 TUIMemorySlashCommand(),
-                TUILoginSlashCommand(),
-                TUILogoutSlashCommand(),
             ],
             staticCommands: staticItems
         )
@@ -828,22 +826,6 @@ public func runSwiftCoderTUISession(
                 await handleModelCommand(input: commandInput, models: sessionModels, agentLoop: agentLoop, renderer: renderer)
                 continue
             }
-            if commandInput.hasPrefix("/login") || commandInput.hasPrefix("/logout") {
-                // Snapshot credential state per provider so we can detect which
-                // one flipped and refresh only that provider's catalog.
-                let providerIDs = RemoteProviderRegistry.providers().map(\.id)
-                let before = Dictionary(uniqueKeysWithValues: providerIDs.map { ($0, Credentials.isConfigured($0)) })
-                await handleLoginCommand(input: commandInput, renderer: renderer)
-                // If /login or /logout flipped credential state, refresh the
-                // affected provider's catalog and rebuild the session model list
-                // so /model and autocomplete reflect the new entries immediately.
-                for providerID in providerIDs where before[providerID] != Credentials.isConfigured(providerID) {
-                    await refreshRemoteCatalog(providerID: providerID, renderer: renderer)
-                }
-                sessionModels = rebuildSessionModels(base: frontend.appConfig.models, filterMode: modelFilterMode)
-                await renderer.setAutocompleteProvider(makeAutocompleteProvider())
-                continue
-            }
             if commandInput.hasPrefix("/effort") || commandInput.hasPrefix("/thinking") {
                 await handleEffortCommand(input: commandInput, agentLoop: agentLoop, renderer: renderer)
                 continue
@@ -1174,14 +1156,10 @@ private func helpLines() -> [String] {
         "  /memory  memory commands (save/log/search/list/undo/status/snippet)",
         "  /context show context usage",
         "  /skills  list discovered skills",
-        "  /hooks   list active hooks",
         "  /model   open model chooser; /model <name|id|number> to switch",
         "  /model free  show only free OpenRouter models in /model picker",
         "  /model all   clear model filter and show all models",
         "  /effort [level] set reasoning effort: off, minimal, low, medium, high",
-        "  /login [provider [key]] set BYOK API key for an online provider (e.g. openrouter)",
-        "  /logout <provider> clear a stored online provider API key",
-        "  /transforms show context transforms; '/transforms clear' removes all",
         "  /save-history [path] save session transcript as markdown",
         "  /save-history-json [path] save session transcript as json",
         "  /load-history-json [path] load prior session transcript",
@@ -1279,7 +1257,7 @@ private func handleModelCommand(
     case .openRemoteProvidersMenu:
         let items = TUIModelCommandParser.remoteProvidersMenuItems()
         guard !items.isEmpty else {
-            await renderer.printScrollLine("  No remote providers configured.")
+            await renderer.printScrollLine("  No remote providers configured. Add them to ~/.mlx-coder/config.json.")
             return
         }
         await renderer.openCommandPalette(commands: items)
@@ -1325,8 +1303,8 @@ private func openRemoteModelsMenu(provider: String, renderer: Renderer) async {
     let currentModel = await renderer.getCurrentModelLabel()
     let items = TUIModelCommandParser.remoteModelsMenuItems(provider: provider, currentModelLabel: currentModel)
 
-    if providerConfig?.requiresAuth == true && !Credentials.isConfigured(provider) {
-        await renderer.printScrollLine("  \(providerName) needs an API key — run /login \(provider) first.")
+    if providerConfig != nil && providerConfig?.hasAPIKey == false {
+        await renderer.printScrollLine("  \(providerName) has no API key set — add one to ~/.mlx-coder/config.json if the provider requires it.")
     }
     // items always has at least the "refresh" row; hint when nothing cached.
     if items.count <= 1 {
@@ -1352,7 +1330,7 @@ private func refreshRemoteCatalog(providerID: String, renderer: Renderer) async 
 
 /// Recombines the bootstrap model list (from `appConfig`) with the freshly
 /// regenerated online catalog entries. Stripping the previous online rows by
-/// `openrouter:` prefix keeps the result clean across repeated /login cycles.
+/// `openrouter:` prefix keeps the result clean across repeated refreshes.
 @MainActor
 private func rebuildSessionModels(
     base: [AppConfig.ModelConfig],
@@ -1361,60 +1339,6 @@ private func rebuildSessionModels(
     let localOnly = base.filter { !InferenceBackend(modelPath: $0.id).isOnline }
     let onlineFilter: OnlineModelCatalog.Filter = (filterMode == .freeOnly) ? .freeOnly : .all
     return localOnly + OnlineModelCatalog.entries(filter: onlineFilter)
-}
-
-@MainActor
-private func handleLoginCommand(
-    input: String,
-    renderer: Renderer
-) async {
-    guard let intent = TUILoginCommandParser.resolve(input: input) else { return }
-
-    switch intent {
-    case .openMenu:
-        let items = TUILoginCommandParser.menuItems()
-        guard !items.isEmpty else {
-            await renderer.printScrollLine("  No online providers available.")
-            return
-        }
-        await renderer.openCommandPalette(commands: items)
-        await renderer.renderFooter()
-    case .showHelp(let provider):
-        let display = TUILoginCommandParser.displayName(provider)
-        let envVar = Credentials.envVarName(for: provider)
-        await renderer.printScrollLine("  \(display) login:")
-        await renderer.printScrollLine("    /login \(provider) <your-api-key>")
-        await renderer.printScrollLine("  Or export \(envVar) before launching mlx-coder.")
-        if Credentials.isConfigured(provider) {
-            await renderer.printScrollLine("  (\(display) is currently configured — re-running /login replaces the stored key.)")
-        }
-    case .saveKey(let provider, let key):
-        // Clear the input echo so the key isn't lingering on screen.
-        await renderer.setInputBuffer("")
-        await renderer.renderFooter()
-        do {
-            try Credentials.setAPIKey(key, for: provider)
-            let display = TUILoginCommandParser.displayName(provider)
-            await renderer.printScrollLine("  ✓ \(display) configured. Open /model to select an online model.")
-        } catch {
-            await renderer.printScrollLine(
-                "\(DesignSystem.brightRed)  Error saving credentials: \(error.localizedDescription)\(DesignSystem.reset)"
-            )
-        }
-    case .clearKey(let provider):
-        do {
-            try Credentials.clear(provider: provider)
-            let display = TUILoginCommandParser.displayName(provider)
-            await renderer.printScrollLine("  ✓ \(display) credentials cleared.")
-        } catch {
-            await renderer.printScrollLine(
-                "\(DesignSystem.brightRed)  Error clearing credentials: \(error.localizedDescription)\(DesignSystem.reset)"
-            )
-        }
-    case .unknownProvider(let name):
-        let known = TUILoginCommandParser.knownProviders.map(\.id).joined(separator: ", ")
-        await renderer.printScrollLine("  Unknown provider '\(name)'. Available: \(known)")
-    }
 }
 
 @MainActor
@@ -1451,21 +1375,15 @@ private func switchToModel(
     deferReload: Bool = false
 ) async {
     // Online providers carry their identifier in `model.id` as `<provider>:<model>`.
-    // We don't probe the local model directory for those, and we refuse the switch
-    // when no credentials are stored — the AgentLoop generation path would just
-    // throw OpenRouterError.notConfigured at the first prompt otherwise.
+    // We don't probe the local model directory for those. Block the switch only
+    // when the provider isn't configured in ~/.mlx-coder/config.json at all — the
+    // AgentLoop generation path would just throw an unknown-provider error otherwise.
     let backend = InferenceBackend(modelPath: model.id)
-    if let providerID = backend.providerID {
-        // Only block when the provider actually requires auth and no key is
-        // stored. No-auth providers (lmstudio/vllm/mlx-lm) switch freely; an
-        // unknown provider id is allowed through best-effort.
-        let provider = RemoteProviderRegistry.provider(id: providerID)
-        if provider?.requiresAuth == true && !Credentials.isConfigured(providerID) {
-            await renderer.printScrollLine(
-                "  \(model.label). Run /login \(providerID) <api-key> first, then re-select this model."
-            )
-            return
-        }
+    if let providerID = backend.providerID, !RemoteProviderRegistry.isConfigured(providerID) {
+        await renderer.printScrollLine(
+            "  \(model.label): provider '\(providerID)' is not configured. Add it to ~/.mlx-coder/config.json, then re-select this model."
+        )
+        return
     }
 
     let modelPath: String

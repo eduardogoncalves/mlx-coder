@@ -1,7 +1,7 @@
 // Tests for the two-level /model menu parser grammar and static menu builders.
 // These tests avoid touching ~/.mlx-coder or the network — they exercise pure
 // parsing and the root/provider menu shapes (provider list comes from the
-// registry's built-ins).
+// user's configured providers in ~/.mlx-coder/config.json).
 
 import XCTest
 import SwiftCoderTUI
@@ -91,11 +91,14 @@ final class ModelMenuTests: XCTestCase {
         XCTAssertEqual(items[1].name, "/model remote")
     }
 
-    func testRemoteProvidersMenuIncludesBuiltIns() {
-        let names = Set(TUIModelCommandParser.remoteProvidersMenuItems().map(\.name))
-        XCTAssertTrue(names.contains("/model remote openrouter"))
-        XCTAssertTrue(names.contains("/model remote lmstudio"))
-        XCTAssertTrue(names.contains("/model remote vllm"))
-        XCTAssertTrue(names.contains("/model remote mlx-lm"))
+    func testRemoteProvidersMenuMirrorsConfiguredProviders() {
+        // The menu lists exactly the providers configured in ~/.mlx-coder/config.json
+        // (no built-ins), one row per provider.
+        let providers = RemoteProviderRegistry.providers()
+        let items = TUIModelCommandParser.remoteProvidersMenuItems()
+        XCTAssertEqual(items.count, providers.count)
+        for provider in providers {
+            XCTAssertTrue(items.contains { $0.name == "/model remote \(provider.id)" })
+        }
     }
 }

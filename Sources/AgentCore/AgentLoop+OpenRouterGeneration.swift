@@ -33,10 +33,7 @@ extension AgentLoop {
             )
         }
 
-        let apiKey = Credentials.apiKey(for: providerID)
-        if provider.requiresAuth && (apiKey == nil || apiKey!.isEmpty) {
-            throw OpenRouterError.notConfigured
-        }
+        let apiKey = RemoteProviderRegistry.apiKey(for: providerID)
 
         // Apply context transforms — same flow as the local path so behavior
         // (compaction, summarization injection, etc.) stays consistent across backends.
