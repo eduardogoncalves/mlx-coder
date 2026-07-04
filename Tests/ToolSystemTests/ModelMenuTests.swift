@@ -80,6 +80,42 @@ final class ModelMenuTests: XCTestCase {
         )
     }
 
+    func testSinglePartialMatchSelectsExisting() {
+        let list = [
+            AppConfig.ModelConfig(id: "qwen/qwen3-coder", label: "qwen/qwen3-coder"),
+            AppConfig.ModelConfig(id: "meta/llama-3", label: "meta/llama-3")
+        ]
+        XCTAssertEqual(
+            TUIModelCommandParser.resolve(input: "/model coder", models: list),
+            .selectExisting(index: 0)
+        )
+    }
+
+    func testMultiplePartialMatchesOpenFilteredMenu() {
+        let list = [
+            AppConfig.ModelConfig(id: "qwen/qwen3-coder", label: "qwen/qwen3-coder"),
+            AppConfig.ModelConfig(id: "openrouter:qwen/qwen2.5-coder", label: "openrouter:qwen/qwen2.5-coder"),
+            AppConfig.ModelConfig(id: "meta/llama-3", label: "meta/llama-3")
+        ]
+        XCTAssertEqual(
+            TUIModelCommandParser.resolve(input: "/model coder", models: list),
+            .openFilteredMenu(query: "coder")
+        )
+    }
+
+    func testFilteredMenuItemsListMatches() {
+        let list = [
+            AppConfig.ModelConfig(id: "qwen/qwen3-coder", label: "qwen/qwen3-coder"),
+            AppConfig.ModelConfig(id: "openrouter:qwen/qwen2.5-coder", label: "openrouter:qwen/qwen2.5-coder"),
+            AppConfig.ModelConfig(id: "meta/llama-3", label: "meta/llama-3")
+        ]
+        let items = TUIModelCommandParser.filteredMenuItems(query: "coder", models: list, currentModelLabel: "")
+        XCTAssertEqual(items.map(\.name), [
+            "/model qwen/qwen3-coder",
+            "/model openrouter:qwen/qwen2.5-coder"
+        ])
+    }
+
     func testNonModelReturnsNil() {
         XCTAssertNil(TUIModelCommandParser.resolve(input: "/effort high", models: models))
     }

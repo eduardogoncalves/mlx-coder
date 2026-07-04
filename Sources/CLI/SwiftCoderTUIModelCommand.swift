@@ -10,6 +10,7 @@ enum TUIModelCommandIntent: Equatable {
     case refreshRemote(provider: String)
     case selectRemote(provider: String, modelID: String)
     case selectExisting(index: Int)      // back-compat: /model <label|#>
+    case openFilteredMenu(query: String) // /model <substring> matching >1 model
     case invalidModelName(String)
 }
 
@@ -65,14 +66,32 @@ enum TUIModelCommandParser {
             }
         }
 
-        // Back-compat: numeric index or existing label/id.
+        // Back-compat: numeric index or exact label/id.
         if let numeric = Int(rest), (1...models.count).contains(numeric) {
             return .selectExisting(index: numeric - 1)
         }
         if let index = modelIndex(named: rest, in: models) {
             return .selectExisting(index: index)
         }
+        // Partial (case-insensitive substring) match against labels/ids:
+        // `/model coder` → one match switches, several open a filtered menu.
+        let matches = substringMatchIndices(query: rest, in: models)
+        if matches.count == 1 {
+            return .selectExisting(index: matches[0])
+        }
+        if matches.count > 1 {
+            return .openFilteredMenu(query: rest)
+        }
         return .invalidModelName(rest)
+    }
+
+    /// Indices of models whose label or id contains `query` (case-insensitive).
+    static func substringMatchIndices(query: String, in models: [AppConfig.ModelConfig]) -> [Int] {
+        let needle = query.lowercased()
+        guard !needle.isEmpty else { return [] }
+        return models.enumerated().compactMap { index, model in
+            (model.label.lowercased().contains(needle) || model.id.lowercased().contains(needle)) ? index : nil
+        }
     }
 
     // MARK: - Menu builders
@@ -105,14 +124,7 @@ enum TUIModelCommandParser {
     static func remoteProvidersMenuItems() -> [(name: String, desc: String)] {
         RemoteProviderRegistry.providers().map { provider in
             let count = RemoteModelCache.cachedModels(providerID: provider.id).count
-            let auth: String
-            if !provider.requiresAuth {
-                auth = "no key needed"
-            } else if Credentials.isConfigured(provider.id) {
-                auth = "configured"
-            } else {
-                auth = "needs /login \(provider.id)"
-            }
+            let auth = provider.hasAPIKey ? "API key set" : "no API key"
             return (
                 name: "/model remote \(provider.id)",
                 desc: "\(provider.name) — \(auth) — \(count) models cached"
@@ -143,6 +155,20 @@ enum TUIModelCommandParser {
         }
 
         return items
+    }
+
+    /// Palette rows for the models matching a `/model <substring>` query.
+    static func filteredMenuItems(
+        query: String,
+        models: [AppConfig.ModelConfig],
+        currentModelLabel: String
+    ) -> [(name: String, desc: String)] {
+        substringMatchIndices(query: query, in: models).map { index in
+            let model = models[index]
+            let isCurrent = model.label.caseInsensitiveCompare(currentModelLabel) == .orderedSame
+            let desc = isCurrent ? "Current model" : "Switch to #\(index + 1) \(model.id)"
+            return (name: "/model \(model.label)", desc: desc)
+        }
     }
 
     private static func modelIndex(named requested: String, in models: [AppConfig.ModelConfig]) -> Int? {
@@ -180,8 +206,8 @@ struct TUIModelSlashCommand: SlashCommand {
             .enumerated()
             .filter { _, model in
                 guard !normalized.isEmpty else { return true }
-                return model.label.lowercased().hasPrefix(normalized)
-                    || model.id.lowercased().hasPrefix(normalized)
+                return model.label.lowercased().contains(normalized)
+                    || model.id.lowercased().contains(normalized)
             }
             .map { index, model in
                 let desc = model.id == model.label

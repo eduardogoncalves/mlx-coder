@@ -1282,8 +1282,22 @@ private func handleModelCommand(
         }
         await switchToModel(model: models[index], index: index, agentLoop: agentLoop, renderer: renderer)
 
+    case .openFilteredMenu(let query):
+        let currentModel = await renderer.getCurrentModelLabel()
+        let items = TUIModelCommandParser.filteredMenuItems(
+            query: query,
+            models: models,
+            currentModelLabel: currentModel
+        )
+        guard !items.isEmpty else {
+            await renderer.printScrollLine("  No models match '\(query)'.")
+            return
+        }
+        await renderer.openCommandPalette(commands: items)
+        await renderer.renderFooter()
+
     case .invalidModelName(let name):
-        // Allow a raw carrier (`remote:<p>:<m>` / `openrouter:<id>`) to be typed
+        // Allow a raw carrier (`<provider>:<model>`, e.g. `openrouter:qwen/…`) to be typed
         // directly even if not in the picker. AgentLoop accepts any modelPath;
         // we just validate the carrier shape here.
         if InferenceBackend(modelPath: name).isOnline {
