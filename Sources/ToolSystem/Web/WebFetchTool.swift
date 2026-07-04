@@ -108,16 +108,19 @@ enum URLFetchValidator {
 public struct WebFetchTool: Tool {
     public let name = "web_fetch"
     public let description = """
-        Fetch content from a URL.
+        Fetch content from a URL. The full page is downloaded, pre-processed (optional HTML \
+        stripping) and stored in an on-disk cache; only a bounded window of at most \
+        \(WebFetchTool.defaultMaxOutputLength) characters is returned per call to keep the context small.
         • text_only: true  — strips HTML tags, CSS, and scripts; returns clean readable text \
         (recommended for most pages; greatly reduces context size).
         • query             — additionally extract a specific answer from the page using the LLM \
         (combine with text_only for best results).
-        • If neither is set, returns raw content truncated at \(WebFetchTool.defaultMaxOutputLength) chars.
-        • offset            — continue reading a page that was truncated. The omitted-content marker \
-        reports the next offset to pass; call web_fetch again with the same url (and same text_only) \
-        plus that offset to read the next chunk. The page is served from cache, so no new network \
-        request is made.
+        • If the page is larger than one window, the returned truncation marker reports the exact \
+        next offset. Call web_fetch again with the SAME url (and same text_only) plus that offset to \
+        read the next chunk. Continuation reads are served from the disk cache — no new network \
+        request is made — so you can read a large JSON/page in order without losing or inventing data.
+        • fresh: true       — bypass the cache and re-download from the network (use only when the \
+        page may have changed since it was first fetched).
         """
     public let parameters = JSONSchema(
         type: "object",
@@ -128,13 +131,19 @@ public struct WebFetchTool: Tool {
             "query": PropertySchema(type: "string",
                 description: "Specific question or information to extract from the page via LLM. If empty, returns the full text (after optional HTML stripping)."),
             "offset": PropertySchema(type: "integer",
-                description: "Character offset to start reading from (default: 0). Use to continue reading a page that was truncated: pass the next offset reported in the truncation marker. Ignored when query is set."),
+                description: "Character offset to start reading from (default: 0). Use to continue reading a page that was truncated: pass the next offset reported in the truncation marker. The chunk is served from the disk cache. Ignored when query is set."),
+            "fresh": PropertySchema(type: "boolean",
+                description: "When true, ignore any cached copy and re-download from the network (default: false). Use only when you need an up-to-date version of a page that may have changed."),
             "timeout": PropertySchema(type: "integer", description: "Timeout in seconds (default: 15)"),
         ],
         required: ["url"]
     )
 
-    public static let defaultMaxOutputLength = 50_000
+    // Per-call window returned to the model. The full page is always cached; this
+    // only bounds how much reaches the main context at once. Kept moderate so a
+    // typical JSON API response fits in one or two chunks with correct, absolute
+    // offset-based continuation, rather than being silently clipped downstream.
+    public static let defaultMaxOutputLength = 12_000
 
     private let maxOutputLength: Int
     private let modelContainer: ModelContainer?
@@ -176,20 +185,25 @@ extension WebFetchTool: ProgressReportingTool {
         let query = arguments["query"] as? String
         let textOnly = arguments["text_only"] as? Bool ?? false
         let offset = max(0, arguments["offset"] as? Int ?? 0)
+        let fresh = arguments["fresh"] as? Bool ?? false
 
         let timeout = arguments["timeout"] as? Int ?? 15
 
         // --- Cache lookup ---
+        // Continuation reads (offset > 0) and repeated reads are served from the
+        // on-disk cache so the model can page through a large page without issuing
+        // a new network request. `fresh: true` bypasses the cache to force a
+        // re-download when the page may have changed.
         let cache = WebFetchCache.shared
 
         // If text_only and a pre-stripped copy exists, use it immediately
-        if textOnly, let cached = cache.textContent(for: urlString) {
+        if !fresh, textOnly, let cached = cache.textContent(for: urlString) {
             reportProgress("cache hit (text) — skipping network request")
             return try await resolveResult(text: cached, query: query, offset: offset, reportProgress: reportProgress)
         }
 
         // If a raw copy exists, we can skip the network request entirely
-        if let cachedRaw = cache.rawContent(for: urlString) {
+        if !fresh, let cachedRaw = cache.rawContent(for: urlString) {
             reportProgress("cache hit (raw) — skipping network request")
             if textOnly {
                 let isHTML = cachedRaw.prefix(512).lowercased().contains("<!doctype html")
