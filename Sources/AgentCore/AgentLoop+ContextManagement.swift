@@ -141,6 +141,10 @@ extension AgentLoop {
         )
         guard compacted else { return }
 
+        // Compaction rewrote the history prefix, so the persisted KV cache no longer
+        // matches the prompt that produced it. Drop it — the next turn re-prefills.
+        promptCache.invalidate(reason: "context compaction")
+
         // Re-snapshot after compaction for the "after" count.
         let afterContentSnapshot = history.messages.map(\.content)
         let after: Int

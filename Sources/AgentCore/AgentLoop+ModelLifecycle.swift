@@ -16,6 +16,10 @@ extension AgentLoop {
         await registry.clear()
         modelContainer = nil
 
+        // The KV cache belongs to a specific loaded model; a reload swaps weights
+        // (and possibly KV-cache config), so any persisted cache must be discarded.
+        promptCache.invalidate(reason: "model reload")
+
         // Clear any unreferenced MLX buffers before loading replacement weights.
         MLX.Memory.clearCache()
 

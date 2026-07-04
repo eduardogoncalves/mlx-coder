@@ -132,6 +132,9 @@ struct ModelArguments: ParsableArguments, Sendable {
     @Flag(name: .long, help: "Show verbose output including thinking blocks")
     var verbose: Bool = false
 
+    @Flag(name: .long, help: "Show a per-turn prompt-cache indicator (tokens reused from the previous turn's KV cache vs. freshly prefilled) to validate cross-turn caching")
+    var promptCacheStats: Bool = false
+
     @Option(name: .long, help: "Initial working mode (agent or plan)")
     var mode: String = "plan"
 

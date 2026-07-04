@@ -48,6 +48,9 @@ public actor AgentLoop {
     var frontend: any AgentFrontend
     /// When true, AgentCore emits debug-level status events.
     let verbose: Bool
+    /// When true, emit a per-turn prompt-cache indicator (reused vs. freshly
+    /// prefilled token counts) so cross-turn KV reuse can be validated live.
+    let promptCacheStats: Bool
     let auditLogger: ToolAuditLogger?
     public internal(set) var history: ConversationHistory
     let maxToolIterations: Int
@@ -92,6 +95,14 @@ public actor AgentLoop {
     var pendingReload: Bool = false
     var pendingImages: [URL] = []
 
+    /// Persistent cross-turn KV (prompt) cache for the plain-text generation path.
+    /// Holds the previous turn's KV cache plus the exact tokens it represents so
+    /// each turn only prefills the new suffix. Lives here (rather than as a local
+    /// in `generateResponse`) so the cache survives between turns; all reads and
+    /// mutations happen inside the `ModelContainer.perform` closure — see
+    /// `PromptCacheStore` for the Sendable rationale.
+    let promptCache = PromptCacheStore()
+
     public internal(set) var mode: WorkingMode = .plan
     public internal(set) var thinkingLevel: ThinkingLevel = .low
     public internal(set) var taskType: TaskType = .general
@@ -133,6 +144,7 @@ public actor AgentLoop {
         generationConfig: GenerationEngine.Config,
         frontend: any AgentFrontend,
         verbose: Bool = false,
+        promptCacheStats: Bool = false,
         systemPrompt: String,
         modelPath: String,
         workspace: String = ".",
@@ -158,7 +170,15 @@ public actor AgentLoop {
         self.currentGenerationConfig = generationConfig
         self.frontend = frontend
         self.verbose = verbose
+        self.promptCacheStats = promptCacheStats
         self.history = ConversationHistory(systemPrompt: systemPrompt)
+        // Surface prompt-cache lifecycle (cleared / initialized) in the terminal.
+        // Captured by value so the store — which lives past `init` — never touches
+        // `self`; `AgentFrontend` is `Sendable`, so this is safe from the closure.
+        let cacheLogFrontend = frontend
+        self.promptCache.log = { message in
+            cacheLogFrontend.emitStatus(message)
+        }
         self.auditLogger = auditLogger
         self.maxToolIterations = maxToolIterations
         self.modelPath = modelPath

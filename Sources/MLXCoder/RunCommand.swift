@@ -233,6 +233,7 @@ struct RunCommand: AsyncParsableCommand {
             generationConfig: config,
             frontend: frontend,
             verbose: args.verbose,
+            promptCacheStats: args.promptCacheStats,
             systemPrompt: promptComposition.prompt,
             modelPath: selectedModel,
             workspace: absWorkspace,

@@ -67,5 +67,10 @@ let package = Package(
             dependencies: ["MLXCoder"],
             path: "Tests/MemoryTests"
         ),
+        .testTarget(
+            name: "AgentCoreTests",
+            dependencies: ["MLXCoder"],
+            path: "Tests/AgentCoreTests"
+        ),
     ]
 )

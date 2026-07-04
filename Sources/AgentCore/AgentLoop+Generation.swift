@@ -87,10 +87,22 @@ extension AgentLoop {
         }
 
         let draftModel = self.draftModel
-        let result = try await modelContainer.perform { [currentGenerationConfig, frontend, chatML, imageURLs, vlmMessageData, vlmLastUserIndex, shouldUseProcessorPath, isVLM, dialect, draftModel] context in
+        let promptCache = self.promptCache
+        let promptCacheStats = self.promptCacheStats
+        let result = try await modelContainer.perform { [currentGenerationConfig, frontend, chatML, imageURLs, vlmMessageData, vlmLastUserIndex, shouldUseProcessorPath, isVLM, dialect, draftModel, promptCache, promptCacheStats] context in
             if Task.isCancelled { throw CancellationError() }
             var hasTokenProcessingEnded = false
             var hasGenerationStarted = false
+
+            // Persistent cross-turn KV cache bookkeeping (plain-text path only).
+            // These stay nil on every other path, so the defer below is a no-op there.
+            // `persistentCache` is the cache selected for THIS turn (reused-and-trimmed
+            // or freshly created); `promptTokensForCache` is the full prompt token list
+            // used to update the store after a successful generation.
+            var persistentCache: [KVCache]? = nil
+            var promptTokensForCache: [Int]? = nil
+            var cacheCommitted = false
+
             defer {
                 if hasGenerationStarted {
                     frontend.emit(.generationActivity(.ended))
@@ -98,6 +110,23 @@ extension AgentLoop {
                 if !hasTokenProcessingEnded {
                     frontend.emit(.tokenProcessingActivity(.ended))
                 }
+                // If a persistent cache was selected for this turn but never committed
+                // (generation threw or was cancelled mid-stream), drop the store so a
+                // partially-filled / corrupt cache is never reused on the next turn.
+                if persistentCache != nil && !cacheCommitted {
+                    promptCache.invalidate(reason: "generation did not complete")
+                }
+            }
+
+            // Cross-turn prompt caching only applies on the safe plain-text path:
+            // non-VLM (so no processor-driven prep), no speculative draft model, and
+            // no TurboQuant cache. On every other path we drop any cache left over
+            // from a previous plain-text turn so a prompt shape mismatch can't reuse it.
+            let persistentCachingApplies = !isVLM
+                && draftModel == nil
+                && currentGenerationConfig.turboQuantBits == nil
+            if !persistentCachingApplies {
+                promptCache.invalidate(reason: "path does not support caching")
             }
 
             // Processor path: for image turns and model families that require processor-driven
@@ -105,6 +134,17 @@ extension AgentLoop {
             // processor.prepare so model-specific prompt formatting and tensor shapes are respected.
             // Fallback text-only path tokenizes ChatML directly.
             let tokenizer = context.tokenizer
+
+            // Resolve generation parameters up front — they are needed both for the
+            // token stream below and, on the plain-text path, for sizing a fresh KV
+            // cache via `model.newCache(parameters:)`.
+            var generationParameters = currentGenerationConfig.generateParameters
+            if shouldUseProcessorPath {
+                generationParameters.repetitionPenalty = nil
+                generationParameters.presencePenalty = nil
+                generationParameters.frequencyPenalty = nil
+            }
+
             let input: LMInput
             if let messageData = vlmMessageData {
                 // Reconstruct Chat.Message inside the closure (Chat.Message is not Sendable).
@@ -157,8 +197,104 @@ extension AgentLoop {
                     using: tokenizer.encode(text:)
                 )
                 if isVLM {
+                    // VLM checkpoint without processor metadata: still text-only here,
+                    // but persistent caching stays disabled for this family.
                     input = try AgentLoop.makeSafeTextLMInput(tokens: tokens)
+                } else if persistentCachingApplies {
+                    // Plain-text LLM path — the only path that participates in
+                    // cross-turn prompt caching. Diff this turn's prompt against the
+                    // tokens the persisted cache physically holds, trim the cache back
+                    // to the shared prefix, and feed ONLY the new suffix. This mirrors
+                    // mlx_lm.server: the default prefill does not skip already-cached
+                    // tokens on its own, so the caller must slice the input and trim
+                    // the cache to `offset == common`.
+                    promptTokensForCache = tokens
+
+                    let cacheIsReusable = promptCache.cache.map(canTrimPromptCache) ?? false
+                    // The cache's live physical length. Authoritative for the trim
+                    // amount — it can be one greater than `cachedTokens.count` when a
+                    // trailing stop token was fed on the previous EOS-terminated turn.
+                    let liveOffset = promptCache.cache?.first?.offset ?? 0
+                    let decision = AgentLoop.computePromptCacheDecision(
+                        cachedTokens: promptCache.cachedTokens,
+                        promptTokens: tokens,
+                        cacheOffset: liveOffset,
+                        cacheIsReusable: cacheIsReusable
+                    )
+
+                    if decision.reuseCache, let existing = promptCache.cache {
+                        if decision.toTrim > 0 {
+                            trimPromptCache(existing, numTokens: decision.toTrim)
+                        }
+                        // After trimming, every layer's offset must equal the shared
+                        // prefix length. If any layer disagrees the cache is not a
+                        // valid prefix for this prompt, so discard it and re-prefill
+                        // the full prompt into a fresh cache.
+                        let offsetsConsistent = existing.allSatisfy { $0.offset == decision.common }
+                        if offsetsConsistent {
+                            persistentCache = existing
+                            let suffix = Array(tokens[decision.common...])
+                            input = try AgentLoop.makeSafeTokenLMInput(tokens: suffix)
+                            // Reuse indicator (flag-gated): `common` tokens are served
+                            // from the previous turn's cache and skipped; only `suffix`
+                            // is prefilled now. On a healthy multi-turn chat, reused
+                            // should be large and new should be roughly one message.
+                            if promptCacheStats {
+                                frontend.emitStatus(
+                                    "[PromptCache] reused \(decision.common) tok from cache, "
+                                    + "prefilling \(suffix.count) new tok "
+                                    + "(prompt \(tokens.count) tok, trimmed \(decision.toTrim))"
+                                )
+                            }
+                        } else {
+                            let fresh = context.model.newCache(parameters: generationParameters)
+                            persistentCache = fresh
+                            input = try AgentLoop.makeSafeTokenLMInput(tokens: tokens)
+                            frontend.emitStatus(
+                                "[PromptCache] initialized (offset mismatch after trim — "
+                                + "re-prefilling \(tokens.count) tok)"
+                            )
+                        }
+                    } else {
+                        // First turn, or a divergent first token: prefill the entire
+                        // prompt. Whether we KEEP the resulting cache for future reuse
+                        // depends on whether this model's cache can be trimmed back to a
+                        // shared prefix at all.
+                        let fresh = context.model.newCache(parameters: generationParameters)
+                        input = try AgentLoop.makeSafeTokenLMInput(tokens: tokens)
+                        if canTrimPromptCache(fresh) {
+                            persistentCache = fresh
+                            frontend.emitStatus(
+                                "[PromptCache] initialized (prefilling \(tokens.count) tok)"
+                            )
+                            if promptCacheStats {
+                                frontend.emitStatus(
+                                    "[PromptCache] reused 0 tok from cache, "
+                                    + "prefilling \(tokens.count) new tok (prompt \(tokens.count) tok)"
+                                )
+                            }
+                        } else {
+                            // The model exposes a non-trimmable cache — e.g. a hybrid
+                            // state-space/attention model (Qwen3.5's Mamba layers) or a
+                            // sliding-window cache. Mamba layers keep a fixed recurrent
+                            // state with no per-token entries to roll back, so cross-turn
+                            // prefix reuse is impossible. Don't hold a cache we can never
+                            // reuse; let the iterator build its own for this turn.
+                            persistentCache = nil
+                            promptTokensForCache = nil
+                            if !promptCache.reuseUnavailableAnnounced {
+                                promptCache.reuseUnavailableAnnounced = true
+                                frontend.emitStatus(
+                                    "[PromptCache] reuse unavailable for this model — "
+                                    + "non-trimmable KV cache (hybrid/Mamba or sliding-window); "
+                                    + "prefilling full context each turn"
+                                )
+                            }
+                        }
+                    }
                 } else {
+                    // Text model on a non-cacheable path (speculative decoding or
+                    // TurboQuant): keep legacy behavior — prefill the full prompt.
                     input = try AgentLoop.makeSafeTokenLMInput(tokens: tokens)
                 }
             }
@@ -211,13 +347,6 @@ extension AgentLoop {
                 hasOpenThinkingActivity = false
             }
 
-            var generationParameters = currentGenerationConfig.generateParameters
-            if shouldUseProcessorPath {
-                generationParameters.repetitionPenalty = nil
-                generationParameters.presencePenalty = nil
-                generationParameters.frequencyPenalty = nil
-            }
-
             // Build TurboQuant KV cache when enabled.
             // KVCacheSimple layers are replaced with TurboQuantKVCache (fill phase);
             // sliding-window (RotatingKVCache) and other layers are preserved.
@@ -231,10 +360,23 @@ extension AgentLoop {
                     valueBits: bits
                 )
             }
-            
+
+            // The cache passed to the iterator: the persistent cross-turn cache when
+            // it applies (already trimmed + suffix-sliced above), else the TurboQuant
+            // cache, else nil (fresh per-call cache built by the iterator). These are
+            // mutually exclusive — persistent caching requires `turboQuantBits == nil`.
+            let generationCache: [KVCache]? = persistentCache ?? tqCache
+
             // For correct streaming detokenization
             var segmentTokens = [Int]()
             var segment = ""
+            // Full list of generated token ids in order. `segmentTokens` is reset on
+            // newlines for detokenization, so it cannot be used for cache bookkeeping;
+            // this collects every id so the store can record prompt + generated tokens.
+            var generatedTokenIds = [Int]()
+            // Token-rate stats, captured from the terminal `.info` event and emitted
+            // only after the final flush so it prints after the last streamed line.
+            var generationStatMessage: String? = nil
             
             // Build the token stream inside `withError` so a C++ MLX failure
             // (e.g. the "[reshape] Cannot infer the shape of an empty array"
@@ -250,7 +392,7 @@ extension AgentLoop {
                 if let draftModel {
                     return try MLXLMCommon.generateTokens(
                         input: input,
-                        cache: tqCache,
+                        cache: generationCache,
                         parameters: generationParameters,
                         context: context,
                         draftModel: draftModel.model,
@@ -259,7 +401,7 @@ extension AgentLoop {
                 } else {
                     return try MLXLMCommon.generateTokens(
                         input: input,
-                        cache: tqCache,
+                        cache: generationCache,
                         parameters: generationParameters,
                         context: context
                     )
@@ -272,6 +414,7 @@ extension AgentLoop {
                 
                 switch item {
                 case .token(let id):
+                    generatedTokenIds.append(id)
                     segmentTokens.append(id)
                     let newSegment = tokenizer.decode(tokenIds: segmentTokens, skipSpecialTokens: false)
                     
@@ -333,13 +476,17 @@ extension AgentLoop {
                     // and all events would appear batched at the end of generation.
                     await Task.yield()
                 case .info(let info):
-                    let statMessage = String(format: "Generated %d tokens (%.1f tok/s), prompt: %d tokens (%.1f tok/s)",
-                                             info.generationTokenCount, info.tokensPerSecond,
-                                             info.promptTokenCount, info.promptTokensPerSecond)
-                    frontend.emitStatus(statMessage)
+                    // Defer emitting the stats line until after `parser.flush()`
+                    // below. The flush can still release the final buffered
+                    // assistant text (the last streamed line), and emitting the
+                    // stats here would order it — and the caller's subsequent
+                    // "Turn complete." status — ahead of that trailing line.
+                    generationStatMessage = String(format: "Generated %d tokens (%.1f tok/s), prompt: %d tokens (%.1f tok/s)",
+                                                    info.generationTokenCount, info.tokensPerSecond,
+                                                    info.promptTokenCount, info.promptTokensPerSecond)
                 }
             }
-            
+
             // Flush any remaining buffered state in the parser
             for event in parser.flush(closeUnterminatedThinkingBlock: true) {
                 switch event {
@@ -365,11 +512,38 @@ extension AgentLoop {
                     break
                 }
             }
-            
+
+            // Now that every streamed line (including any released by the flush
+            // above) has been emitted, surface the token-rate stats. Emitting it
+            // here keeps it — and the caller's "Turn complete." status — ordered
+            // after the final assistant line.
+            if let generationStatMessage {
+                frontend.emitStatus(generationStatMessage)
+            }
+
+            // Generation completed successfully — persist the cache for the next
+            // turn. The cache now physically holds prompt + generated tokens, so
+            // `cachedTokens` must mirror that exact sequence for the next turn's
+            // prefix diff to be correct. `cacheCommitted` disarms the defer's
+            // invalidate-on-failure guard.
+            if let cache = persistentCache, let promptTokens = promptTokensForCache {
+                promptCache.cache = cache
+                promptCache.cachedTokens = promptTokens + generatedTokenIds
+                cacheCommitted = true
+                // Size indicator (flag-gated): what the next turn can reuse — the
+                // full prompt plus the tokens just generated.
+                if promptCacheStats {
+                    frontend.emitStatus(
+                        "[PromptCache] committed — cache holds \(promptCache.cachedTokens.count) tok "
+                        + "(prompt \(promptTokens.count) + generated \(generatedTokenIds.count))"
+                    )
+                }
+            }
+
             // Strip EOS tokens if they leaked into the text
             rawResponseText = rawResponseText.replacingOccurrences(of: ToolCallPattern.eosToken, with: "")
             rawResponseText = rawResponseText.trimmingCharacters(in: .whitespacesAndNewlines)
-            
+
             return (text: rawResponseText, writer: writer, startedThinking: enableThinking)
         }
 
