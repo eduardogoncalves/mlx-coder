@@ -17,10 +17,12 @@ final class InferenceBackendTests: XCTestCase {
         let backend = InferenceBackend(modelPath: "openrouter:anthropic/claude-sonnet-4.5")
         XCTAssertTrue(backend.isOnline)
         XCTAssertEqual(backend.providerID, "openrouter")
-        XCTAssertEqual(backend.modelPath, "openrouter:anthropic/claude-sonnet-4.5")
-        guard case .openRouter(let id) = backend else {
-            return XCTFail("expected .openRouter case")
+        // Legacy `openrouter:` form canonicalizes to the generic `remote:` form.
+        XCTAssertEqual(backend.modelPath, "remote:openrouter:anthropic/claude-sonnet-4.5")
+        guard case .remote(let providerID, let id) = backend else {
+            return XCTFail("expected .remote case")
         }
+        XCTAssertEqual(providerID, "openrouter")
         XCTAssertEqual(id, "anthropic/claude-sonnet-4.5")
     }
 

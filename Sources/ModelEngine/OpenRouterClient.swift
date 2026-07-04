@@ -1,5 +1,9 @@
 // Sources/ModelEngine/OpenRouterClient.swift
-// Streaming client for OpenRouter's OpenAI-compatible Chat Completions API.
+// Streaming client for OpenAI-compatible Chat Completions APIs. Despite the name
+// (kept for source compatibility), this now serves ANY OpenAI-compatible
+// endpoint — OpenRouter, LM Studio, vLLM, mlx-lm.server, etc. — driven by the
+// `baseURL` init param. The `Authorization` header is only sent when an API key
+// is provided, so keyless local servers work out of the box.
 //
 // Usage:
 //     let client = OpenRouterClient(apiKey: "...")
@@ -133,7 +137,11 @@ public struct OpenRouterClient: Sendable {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
-        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        // Only authenticate when a key is present — local servers (LM Studio,
+        // vLLM, mlx-lm.server) need no key, and an empty Bearer can break them.
+        if !apiKey.isEmpty {
+            request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        }
         if let referrer { request.setValue(referrer, forHTTPHeaderField: "HTTP-Referer") }
         if let appTitle { request.setValue(appTitle, forHTTPHeaderField: "X-Title") }
 
@@ -283,6 +291,10 @@ public struct OpenRouterClient: Sendable {
         var request = URLRequest(url: baseURL.appendingPathComponent("models"))
         request.httpMethod = "GET"
         request.setValue("application/json", forHTTPHeaderField: "Accept")
+        // Only authenticate when a key is present — see note in runStream.
+        if !apiKey.isEmpty {
+            request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        }
         if let referrer { request.setValue(referrer, forHTTPHeaderField: "HTTP-Referer") }
         if let appTitle { request.setValue(appTitle, forHTTPHeaderField: "X-Title") }
 

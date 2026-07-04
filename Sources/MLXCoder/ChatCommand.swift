@@ -223,6 +223,7 @@ struct ChatCommand: AsyncParsableCommand {
             generationConfig: config,
             frontend: frontend,
             verbose: args.verbose,
+            promptCacheStats: args.promptCacheStats,
             systemPrompt: promptComposition.prompt,
             modelPath: selectedModel,
             workspace: absWorkspace,
@@ -319,18 +320,19 @@ struct ChatCommand: AsyncParsableCommand {
             if !modelConfigs.contains(where: { $0.id.caseInsensitiveCompare(selectedModel) == .orderedSame }) {
                 modelConfigs.insert(AppConfig.ModelConfig(id: selectedModel, label: selectedModel), at: 0)
             }
-            // Append online-provider rows (e.g. "OpenRouter • unconfigured" / "OpenRouter • configured"
-            // and `<id> [openrouter]` per cached tool-capable model). Picking these routes
-            // generation through AgentLoop's online backend path.
+            // Append remote-provider rows (`<id> [<provider>]` per cached
+            // tool-capable model, across every configured provider). Picking
+            // these routes generation through AgentLoop's remote backend path.
             modelConfigs.append(contentsOf: OnlineModelCatalog.entries())
-            // Kick off a background catalog refresh if the on-disk list is stale.
-            // The /models endpoint is public, so this runs even before /login.
-            // Result lands in the cache file; the picker reflects it after the
-            // next time the session model list is rebuilt (e.g. after /login,
-            // or on subsequent launches).
-            if OpenRouterModelCache.isStale() {
+            // Kick off a background catalog refresh for each provider whose
+            // on-disk cache is stale. The /models endpoint is public, so this
+            // runs even before /login. Results land in each provider's cache
+            // file; the picker reflects them after the session model list is
+            // next rebuilt (e.g. after /login, or on subsequent launches).
+            for provider in RemoteProviderRegistry.providers() where RemoteModelCache.isStale(providerID: provider.id) {
+                let providerID = provider.id
                 Task.detached {
-                    _ = try? await OpenRouterModelCache.refresh()
+                    _ = try? await RemoteModelCache.refresh(providerID: providerID)
                 }
             }
             let defaultModelIndex = modelConfigs.firstIndex {

@@ -16,7 +16,7 @@ extension AgentLoop {
         // Route online backends through their HTTP client — local MLX path below
         // assumes a loaded ModelContainer, which online providers never produce.
         if backend.isOnline {
-            return try await generateResponseViaOpenRouter()
+            return try await generateResponseViaRemote()
         }
 
         // Apply context transforms (snapshot — does not mutate stored history)

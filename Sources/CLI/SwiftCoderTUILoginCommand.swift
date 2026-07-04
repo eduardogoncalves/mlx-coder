@@ -22,9 +22,11 @@ enum TUILoginCommandIntent: Equatable {
 }
 
 enum TUILoginCommandParser {
-    static let knownProviders: [(id: String, label: String)] = [
-        ("openrouter", "OpenRouter")
-    ]
+    /// Driven by the provider registry so newly added providers show up in
+    /// `/login` menus and completions without code changes.
+    static var knownProviders: [(id: String, label: String)] {
+        RemoteProviderRegistry.providers().map { (id: $0.id, label: $0.name) }
+    }
 
     /// Returns the intent for both `/login` and `/logout` inputs. Returns nil
     /// for inputs that aren't login commands.

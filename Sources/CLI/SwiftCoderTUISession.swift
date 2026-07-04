@@ -813,7 +813,7 @@ public func runSwiftCoderTUISession(
                     modelFilterMode = .freeOnly
                     sessionModels = rebuildSessionModels(base: frontend.appConfig.models, filterMode: modelFilterMode)
                     await renderer.setAutocompleteProvider(makeAutocompleteProvider())
-                    await renderer.printScrollLine("  Model filter: free OpenRouter models only.")
+                    await renderer.printScrollLine("  Model filter: free remote models only.")
                     await renderer.renderFooter()
                     continue
                 }
@@ -825,32 +825,20 @@ public func runSwiftCoderTUISession(
                     await renderer.renderFooter()
                     continue
                 }
-                if modelArg == "openrouter"
-                    || modelArg == "openrouter • configured"
-                    || modelArg == "openrouter • unconfigured"
-                {
-                    let headlineID = "openrouter:\(OnlineModelCatalog.defaultOpenRouterModel)"
-                    let synthetic = AppConfig.ModelConfig(id: headlineID, label: "OpenRouter • configured")
-                    let index = sessionModels.firstIndex {
-                        $0.id.caseInsensitiveCompare(headlineID) == .orderedSame
-                    } ?? 0
-                    await switchToModel(model: synthetic, index: index, agentLoop: agentLoop, renderer: renderer)
-                    continue
-                }
                 await handleModelCommand(input: commandInput, models: sessionModels, agentLoop: agentLoop, renderer: renderer)
                 continue
             }
             if commandInput.hasPrefix("/login") || commandInput.hasPrefix("/logout") {
-                let beforeOpenRouterConfigured = Credentials.isConfigured("openrouter")
+                // Snapshot credential state per provider so we can detect which
+                // one flipped and refresh only that provider's catalog.
+                let providerIDs = RemoteProviderRegistry.providers().map(\.id)
+                let before = Dictionary(uniqueKeysWithValues: providerIDs.map { ($0, Credentials.isConfigured($0)) })
                 await handleLoginCommand(input: commandInput, renderer: renderer)
                 // If /login or /logout flipped credential state, refresh the
-                // remote catalog and rebuild the session model list so /model
-                // and autocomplete reflect the new entries immediately.
-                let afterOpenRouterConfigured = Credentials.isConfigured("openrouter")
-                if beforeOpenRouterConfigured != afterOpenRouterConfigured
-                    || OpenRouterModelCache.isStale()
-                {
-                    await refreshOpenRouterCatalog(renderer: renderer)
+                // affected provider's catalog and rebuild the session model list
+                // so /model and autocomplete reflect the new entries immediately.
+                for providerID in providerIDs where before[providerID] != Credentials.isConfigured(providerID) {
+                    await refreshRemoteCatalog(providerID: providerID, renderer: renderer)
                 }
                 sessionModels = rebuildSessionModels(base: frontend.appConfig.models, filterMode: modelFilterMode)
                 await renderer.setAutocompleteProvider(makeAutocompleteProvider())
@@ -1268,25 +1256,58 @@ private func handleModelCommand(
     }
 
     switch intent {
-    case .openMenu:
+    case .openRootMenu:
+        await renderer.openCommandPalette(commands: TUIModelCommandParser.rootMenuItems())
+        await renderer.renderFooter()
+
+    case .openLocalMenu:
         let currentModel = await renderer.getCurrentModelLabel()
-        let items = TUIModelCommandParser.menuItems(models: models, currentModelLabel: currentModel)
+        let items = TUIModelCommandParser.localMenuItems(models: models, currentModelLabel: currentModel)
         guard !items.isEmpty else {
-            await renderer.printScrollLine("  No models configured.")
+            await renderer.printScrollLine("  No local models in ~/models/.")
             return
         }
         await renderer.openCommandPalette(commands: items)
         await renderer.renderFooter()
-    case .selectModel(let index):
+
+    case .selectLocal(let id):
+        // Find the local model in the session list, or synthesize a config.
+        let index = models.firstIndex { $0.id.caseInsensitiveCompare(id) == .orderedSame }
+        let model = index.map { models[$0] } ?? AppConfig.ModelConfig(id: id, label: id)
+        await switchToModel(model: model, index: index ?? models.count, agentLoop: agentLoop, renderer: renderer)
+
+    case .openRemoteProvidersMenu:
+        let items = TUIModelCommandParser.remoteProvidersMenuItems()
+        guard !items.isEmpty else {
+            await renderer.printScrollLine("  No remote providers configured.")
+            return
+        }
+        await renderer.openCommandPalette(commands: items)
+        await renderer.renderFooter()
+
+    case .openRemoteModelsMenu(let provider):
+        await openRemoteModelsMenu(provider: provider, renderer: renderer)
+
+    case .refreshRemote(let provider):
+        await refreshRemoteCatalog(providerID: provider, renderer: renderer)
+        await openRemoteModelsMenu(provider: provider, renderer: renderer)
+
+    case .selectRemote(let provider, let modelID):
+        let carrier = InferenceBackend.remote(providerID: provider, modelID: modelID).modelPath
+        let synthetic = AppConfig.ModelConfig(id: carrier, label: "\(modelID) [\(provider)]")
+        await switchToModel(model: synthetic, index: models.count, agentLoop: agentLoop, renderer: renderer)
+
+    case .selectExisting(let index):
         guard models.indices.contains(index) else {
             await renderer.printScrollLine("  Invalid model index \(index + 1).")
             return
         }
         await switchToModel(model: models[index], index: index, agentLoop: agentLoop, renderer: renderer)
+
     case .invalidModelName(let name):
-        // Allow `openrouter:<id>` to be typed directly even if not in the picker —
-        // the user may want a model the cache hasn't surfaced. AgentLoop will
-        // happily accept any modelPath; we just validate the carrier shape.
+        // Allow a raw carrier (`remote:<p>:<m>` / `openrouter:<id>`) to be typed
+        // directly even if not in the picker. AgentLoop accepts any modelPath;
+        // we just validate the carrier shape here.
         if InferenceBackend(modelPath: name).isOnline {
             let synthetic = AppConfig.ModelConfig(id: name, label: name)
             await switchToModel(model: synthetic, index: models.count, agentLoop: agentLoop, renderer: renderer)
@@ -1298,14 +1319,33 @@ private func handleModelCommand(
 }
 
 @MainActor
-private func refreshOpenRouterCatalog(renderer: Renderer) async {
-    await renderer.printScrollLine("  Refreshing OpenRouter model list…")
+private func openRemoteModelsMenu(provider: String, renderer: Renderer) async {
+    let providerConfig = RemoteProviderRegistry.provider(id: provider)
+    let providerName = providerConfig?.name ?? provider
+    let currentModel = await renderer.getCurrentModelLabel()
+    let items = TUIModelCommandParser.remoteModelsMenuItems(provider: provider, currentModelLabel: currentModel)
+
+    if providerConfig?.requiresAuth == true && !Credentials.isConfigured(provider) {
+        await renderer.printScrollLine("  \(providerName) needs an API key — run /login \(provider) first.")
+    }
+    // items always has at least the "refresh" row; hint when nothing cached.
+    if items.count <= 1 {
+        await renderer.printScrollLine("  No cached models for \(providerName). Run /model remote \(provider) refresh.")
+    }
+    await renderer.openCommandPalette(commands: items)
+    await renderer.renderFooter()
+}
+
+@MainActor
+private func refreshRemoteCatalog(providerID: String, renderer: Renderer) async {
+    let providerName = RemoteProviderRegistry.provider(id: providerID)?.name ?? providerID
+    await renderer.printScrollLine("  Refreshing \(providerName) model list…")
     do {
-        let models = try await OpenRouterModelCache.refresh()
-        await renderer.printScrollLine("  ✓ Loaded \(models.count) tool-capable OpenRouter models. Open /model to browse.")
+        let models = try await RemoteModelCache.refresh(providerID: providerID)
+        await renderer.printScrollLine("  ✓ Loaded \(models.count) tool-capable \(providerName) models. Open /model to browse.")
     } catch {
         await renderer.printScrollLine(
-            "\(DesignSystem.brightRed)  Failed to refresh OpenRouter models: \(error.localizedDescription)\(DesignSystem.reset)"
+            "\(DesignSystem.brightRed)  Failed to refresh \(providerName) models: \(error.localizedDescription)\(DesignSystem.reset)"
         )
     }
 }
@@ -1415,11 +1455,17 @@ private func switchToModel(
     // when no credentials are stored — the AgentLoop generation path would just
     // throw OpenRouterError.notConfigured at the first prompt otherwise.
     let backend = InferenceBackend(modelPath: model.id)
-    if let providerID = backend.providerID, !Credentials.isConfigured(providerID) {
-        await renderer.printScrollLine(
-            "  \(model.label). Run /login \(providerID) <api-key> first, then re-select this model."
-        )
-        return
+    if let providerID = backend.providerID {
+        // Only block when the provider actually requires auth and no key is
+        // stored. No-auth providers (lmstudio/vllm/mlx-lm) switch freely; an
+        // unknown provider id is allowed through best-effort.
+        let provider = RemoteProviderRegistry.provider(id: providerID)
+        if provider?.requiresAuth == true && !Credentials.isConfigured(providerID) {
+            await renderer.printScrollLine(
+                "  \(model.label). Run /login \(providerID) <api-key> first, then re-select this model."
+            )
+            return
+        }
     }
 
     let modelPath: String

@@ -1,32 +1,58 @@
 // Sources/ModelEngine/InferenceBackend.swift
 // Backend classification used by AgentLoop.generateResponse() to branch between
-// local MLX inference and an online OpenAI-compatible provider.
+// local MLX inference and a remote OpenAI-compatible provider.
 //
 // The carrier remains the existing `modelPath: String` so we don't have to
-// rewire every callsite. Strings prefixed with `<provider>:` are treated as
-// online identifiers; everything else is a local MLX model path / Hub id.
+// rewire every callsite. Remote identifiers use `remote:<providerID>:<modelID>`
+// (legacy `openrouter:<modelID>` is still accepted); everything else is a local
+// MLX model path / Hub id.
 
 import Foundation
 
 public enum InferenceBackend: Sendable, Equatable {
     case local(modelPath: String)
-    case openRouter(modelID: String)
+    case remote(providerID: String, modelID: String)
 
     public static let openRouterPrefix = "openrouter:"
+    public static let remotePrefix = "remote:"
 
     public init(modelPath: String) {
-        if let modelID = Self.onlineModelID(modelPath, prefix: Self.openRouterPrefix) {
-            self = .openRouter(modelID: modelID)
-        } else {
-            self = .local(modelPath: modelPath)
+        let lower = modelPath.lowercased()
+
+        // 1. Generic remote form: remote:<providerID>:<modelID>
+        if lower.hasPrefix(Self.remotePrefix) {
+            let remainder = String(modelPath.dropFirst(Self.remotePrefix.count))
+            if let colon = remainder.firstIndex(of: ":") {
+                let providerID = String(remainder[remainder.startIndex..<colon])
+                let modelID = String(remainder[remainder.index(after: colon)...])
+                if !providerID.isEmpty && !modelID.isEmpty {
+                    self = .remote(providerID: providerID, modelID: modelID)
+                    return
+                }
+            }
+            // Malformed — fall through to local.
         }
+
+        // 2. Back-compat: legacy openrouter:<modelID> form.
+        if lower.hasPrefix(Self.openRouterPrefix) {
+            let modelID = String(modelPath.dropFirst(Self.openRouterPrefix.count))
+            if !modelID.isEmpty {
+                self = .remote(providerID: "openrouter", modelID: modelID)
+                return
+            }
+        }
+
+        // 3. Local MLX model path / Hub id.
+        self = .local(modelPath: modelPath)
     }
 
     /// Build the carrier string that round-trips through `InferenceBackend(modelPath:)`.
     public var modelPath: String {
         switch self {
-        case .local(let path):     return path
-        case .openRouter(let id):  return "\(Self.openRouterPrefix)\(id)"
+        case .local(let path):
+            return path
+        case .remote(let providerID, let modelID):
+            return "\(Self.remotePrefix)\(providerID):\(modelID)"
         }
     }
 
@@ -40,14 +66,16 @@ public enum InferenceBackend: Sendable, Equatable {
     /// Provider id, lowercase, suitable for `Credentials.apiKey(for:)`.
     public var providerID: String? {
         switch self {
-        case .local:        return nil
-        case .openRouter:   return "openrouter"
+        case .local:                 return nil
+        case .remote(let id, _):     return id
         }
     }
 
-    private static func onlineModelID(_ raw: String, prefix: String) -> String? {
-        guard raw.lowercased().hasPrefix(prefix) else { return nil }
-        let id = String(raw.dropFirst(prefix.count))
-        return id.isEmpty ? nil : id
+    /// The remote model id for `.remote`, nil otherwise.
+    public var remoteModelID: String? {
+        switch self {
+        case .local:                    return nil
+        case .remote(_, let modelID):   return modelID
+        }
     }
 }

@@ -1,5 +1,6 @@
 // Sources/AgentCore/AgentLoop+OpenRouterGeneration.swift
-// OpenRouter-backed generation path. Mirrors the return shape of
+// Remote (OpenAI-compatible) generation path — works with any configured
+// RemoteProvider (OpenRouter, LM Studio, vLLM, mlx-lm.server). Mirrors the return shape of
 // AgentLoop+Generation.swift's local MLX path so the rest of the agent loop
 // (tool dispatch, malformed-tool retry, history bookkeeping) is unchanged.
 //
@@ -15,8 +16,8 @@ import Foundation
 
 extension AgentLoop {
 
-    func generateResponseViaOpenRouter() async throws -> (text: String, writer: StreamingToolCallWriter, startedThinking: Bool) {
-        guard case .openRouter(let modelID) = backend else {
+    func generateResponseViaRemote() async throws -> (text: String, writer: StreamingToolCallWriter, startedThinking: Bool) {
+        guard case .remote(let providerID, let modelID) = backend else {
             throw NSError(
                 domain: "AgentLoop",
                 code: 100,
@@ -24,7 +25,16 @@ extension AgentLoop {
             )
         }
 
-        guard let apiKey = Credentials.apiKey(for: "openrouter") else {
+        guard let provider = RemoteProviderRegistry.provider(id: providerID) else {
+            throw NSError(
+                domain: "AgentLoop",
+                code: 101,
+                userInfo: [NSLocalizedDescriptionKey: "Unknown remote provider '\(providerID)'. Configure it in ~/.mlx-coder/config.json."]
+            )
+        }
+
+        let apiKey = Credentials.apiKey(for: providerID)
+        if provider.requiresAuth && (apiKey == nil || apiKey!.isEmpty) {
             throw OpenRouterError.notConfigured
         }
 
@@ -49,7 +59,9 @@ extension AgentLoop {
             case .assistant: role = .assistant
             case .tool:      role = .tool
             }
-            return OpenRouterMessage(role: role, content: msg.content, toolCallId: msg.toolCallId)
+            // Automated (agent-injected) steering rides the user role wrapped in a
+            // <system-reminder> marker — same treatment as the local ChatML path.
+            return OpenRouterMessage(role: role, content: msg.wireContent, toolCallId: msg.toolCallId)
         }
 
         let tools: [OpenRouterToolSpec]
@@ -60,8 +72,9 @@ extension AgentLoop {
             tools = []
         }
 
-        let client = OpenRouterClient(apiKey: apiKey)
-        let stream = client.stream(model: modelID, messages: chatMessages, tools: tools)
+        let base = provider.baseURLValue ?? URL(string: "https://openrouter.ai/api/v1")!
+        let client = OpenRouterClient(apiKey: apiKey ?? "", baseURL: base)
+        let stream = client.stream(model: modelID, messages: chatMessages, tools: tools, sessionId: sessionId)
 
         // Lifecycle events — mirror the activity emissions of the local path so
         // the TUI spinner labels are consistent.
