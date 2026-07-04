@@ -3,9 +3,13 @@
 // local MLX inference and a remote OpenAI-compatible provider.
 //
 // The carrier remains the existing `modelPath: String` so we don't have to
-// rewire every callsite. Remote identifiers use `remote:<providerID>:<modelID>`
-// (legacy `openrouter:<modelID>` is still accepted); everything else is a local
-// MLX model path / Hub id.
+// rewire every callsite. Remote identifiers use `<providerID>:<modelID>` (e.g.
+// `openrouter:qwen/qwen3-235b`); everything else is a local MLX model path / Hub id.
+//
+// A `<providerID>:<modelID>` is recognized as remote only when the segment
+// before the first colon is a bare token (letters, digits, `_`, `-`) with no
+// path separators — so local Hub ids (`owner/repo`) and filesystem paths, which
+// don't carry a leading `token:`, always resolve to `.local`.
 
 import Foundation
 
@@ -13,37 +17,29 @@ public enum InferenceBackend: Sendable, Equatable {
     case local(modelPath: String)
     case remote(providerID: String, modelID: String)
 
-    public static let openRouterPrefix = "openrouter:"
-    public static let remotePrefix = "remote:"
-
     public init(modelPath: String) {
-        let lower = modelPath.lowercased()
-
-        // 1. Generic remote form: remote:<providerID>:<modelID>
-        if lower.hasPrefix(Self.remotePrefix) {
-            let remainder = String(modelPath.dropFirst(Self.remotePrefix.count))
-            if let colon = remainder.firstIndex(of: ":") {
-                let providerID = String(remainder[remainder.startIndex..<colon])
-                let modelID = String(remainder[remainder.index(after: colon)...])
-                if !providerID.isEmpty && !modelID.isEmpty {
-                    self = .remote(providerID: providerID, modelID: modelID)
-                    return
-                }
-            }
-            // Malformed — fall through to local.
+        // Provider carrier: <providerID>:<modelID>.
+        if let backend = Self.parseProviderCarrier(modelPath) {
+            self = backend
+            return
         }
 
-        // 2. Back-compat: legacy openrouter:<modelID> form.
-        if lower.hasPrefix(Self.openRouterPrefix) {
-            let modelID = String(modelPath.dropFirst(Self.openRouterPrefix.count))
-            if !modelID.isEmpty {
-                self = .remote(providerID: "openrouter", modelID: modelID)
-                return
-            }
-        }
-
-        // 3. Local MLX model path / Hub id.
+        // Local MLX model path / Hub id.
         self = .local(modelPath: modelPath)
+    }
+
+    /// Parse `<providerID>:<modelID>` into a `.remote` backend, or nil when the
+    /// string isn't a provider carrier (no colon, empty halves, or a provider
+    /// segment containing path separators / other punctuation).
+    private static func parseProviderCarrier(_ string: String) -> InferenceBackend? {
+        guard let colon = string.firstIndex(of: ":") else { return nil }
+        let providerID = String(string[string.startIndex..<colon])
+        let modelID = String(string[string.index(after: colon)...])
+        guard !providerID.isEmpty, !modelID.isEmpty else { return nil }
+        guard providerID.allSatisfy({ $0.isLetter || $0.isNumber || $0 == "_" || $0 == "-" }) else {
+            return nil
+        }
+        return .remote(providerID: providerID, modelID: modelID)
     }
 
     /// Build the carrier string that round-trips through `InferenceBackend(modelPath:)`.
@@ -52,7 +48,7 @@ public enum InferenceBackend: Sendable, Equatable {
         case .local(let path):
             return path
         case .remote(let providerID, let modelID):
-            return "\(Self.remotePrefix)\(providerID):\(modelID)"
+            return "\(providerID):\(modelID)"
         }
     }
 
@@ -63,7 +59,7 @@ public enum InferenceBackend: Sendable, Equatable {
 
     public var isOnline: Bool { !isLocal }
 
-    /// Provider id, lowercase, suitable for `Credentials.apiKey(for:)`.
+    /// Provider id, lowercase, suitable for `RemoteProviderRegistry.provider(id:)`.
     public var providerID: String? {
         switch self {
         case .local:                 return nil

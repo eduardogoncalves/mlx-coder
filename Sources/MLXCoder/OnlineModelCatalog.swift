@@ -3,13 +3,13 @@
 // local MLX model list.
 //
 // Each entry's `id` is the carrier string consumed by `AgentLoop.switchModel`
-// and re-interpreted by `InferenceBackend(modelPath:)` — the generic shape is
-// `remote:<providerID>:<modelID>`. The label is what the user sees in /model.
+// and re-interpreted by `InferenceBackend(modelPath:)` — the shape is
+// `<providerID>:<modelID>`. The label shown in /model is the same carrier.
 //
 // One row is emitted per cached tool-capable model per configured provider:
-//   `remote:<provider>:<model.id>` → `<model.id>[ free] [<provider>]`.
+//   `<provider>:<model.id>` → displayed verbatim (e.g. `openrouter:qwen/qwen3-235b`).
 // Sourced from `RemoteModelCache`, which is refreshed lazily at launch and
-// eagerly after `/login`. Provider status/headline rows are intentionally not
+// eagerly via `/model remote <provider> refresh`. Provider status/headline rows are intentionally not
 // emitted here — the two-level `/model remote` menu surfaces provider status.
 
 import Foundation
@@ -39,10 +39,10 @@ enum OnlineModelCatalog {
                 }
             }
             for model in cached {
-                let freeBadge = model.isFree ? " free" : ""
+                let carrier = InferenceBackend.remote(providerID: provider.id, modelID: model.id).modelPath
                 result.append(AppConfig.ModelConfig(
-                    id: InferenceBackend.remote(providerID: provider.id, modelID: model.id).modelPath,
-                    label: "\(model.id)\(freeBadge) [\(provider.id)]"
+                    id: carrier,
+                    label: carrier
                 ))
             }
         }

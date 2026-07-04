@@ -1272,7 +1272,7 @@ private func handleModelCommand(
 
     case .selectRemote(let provider, let modelID):
         let carrier = InferenceBackend.remote(providerID: provider, modelID: modelID).modelPath
-        let synthetic = AppConfig.ModelConfig(id: carrier, label: "\(modelID) [\(provider)]")
+        let synthetic = AppConfig.ModelConfig(id: carrier, label: carrier)
         await switchToModel(model: synthetic, index: models.count, agentLoop: agentLoop, renderer: renderer)
 
     case .selectExisting(let index):
