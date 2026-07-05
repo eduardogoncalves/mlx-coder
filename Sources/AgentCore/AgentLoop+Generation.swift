@@ -205,92 +205,205 @@ extension AgentLoop {
                     // cross-turn prompt caching. Diff this turn's prompt against the
                     // tokens the persisted cache physically holds, trim the cache back
                     // to the shared prefix, and feed ONLY the new suffix. This mirrors
-                    // mlx_lm.server: the default prefill does not skip already-cached
-                    // tokens on its own, so the caller must slice the input and trim
-                    // the cache to `offset == common`.
+                    // mlx_lm.server / lmstudio mlx-engine: the default prefill does not
+                    // skip already-cached tokens on its own, so the caller must slice
+                    // the input and trim the cache to `offset == common`.
                     promptTokensForCache = tokens
 
-                    let cacheIsReusable = promptCache.cache.map(canTrimPromptCache) ?? false
-                    // The cache's live physical length. Authoritative for the trim
-                    // amount — it can be one greater than `cachedTokens.count` when a
-                    // trailing stop token was fed on the previous EOS-terminated turn.
-                    let liveOffset = promptCache.cache?.first?.offset ?? 0
+                    let hasCache = promptCache.cache != nil
+                    let cacheIsTrimmable = promptCache.cache.map(canTrimPromptCache) ?? false
+                    // Use max offset across all layers because hybrid models (e.g.
+                    // Qwen3.5) mix KVCacheSimple (which updates offset per token) with
+                    // MambaCache (which never updates its offset property — always 0,
+                    // since Mamba layers store state via subscripts, not update(keys:values:)).
+                    // Using first?.offset would return 0 for such models.
+                    let liveOffset = promptCache.cache?.map(\.offset).max() ?? 0
+
                     let decision = AgentLoop.computePromptCacheDecision(
                         cachedTokens: promptCache.cachedTokens,
                         promptTokens: tokens,
                         cacheOffset: liveOffset,
-                        cacheIsReusable: cacheIsReusable
+                        hasCache: hasCache,
+                        cacheIsTrimmable: cacheIsTrimmable
                     )
+
+                    if promptCacheStats {
+                        frontend.emitStatus(
+                            "[PromptCache] decision: cached=\(promptCache.cachedTokens.count) "
+                            + "prompt=\(tokens.count) liveOffset=\(liveOffset) "
+                            + "common=\(decision.common) toTrim=\(decision.toTrim) "
+                            + "trimmable=\(cacheIsTrimmable) hasCache=\(hasCache) "
+                            + "-> \(decision.reuseCache ? "reuse" : "fresh") "
+                            + "ckpt=\(promptCache.checkpointTokens.count)"
+                        )
+                    }
+
+                    // Phase 1: select the cache and reuseStart.
+                    // reuseStart is the index into `tokens` from which we still need
+                    // to prefill; tokens[..<reuseStart] are already in the selected cache.
+                    var reuseStart: Int = 0
 
                     if decision.reuseCache, let existing = promptCache.cache {
                         if decision.toTrim > 0 {
                             trimPromptCache(existing, numTokens: decision.toTrim)
                         }
-                        // After trimming, every layer's offset must equal the shared
-                        // prefix length. If any layer disagrees the cache is not a
-                        // valid prefix for this prompt, so discard it and re-prefill
-                        // the full prompt into a fresh cache.
-                        let offsetsConsistent = existing.allSatisfy { $0.offset == decision.common }
+                        // After trimming, every attention layer's offset must equal
+                        // the shared prefix length. MambaCache (hybrid models like
+                        // Qwen3.5) never updates its offset property (stays 0), so
+                        // we check the max across all layers — which reflects the
+                        // KVCacheSimple (attention) layers' actual physical state.
+                        let offsetsConsistent = (existing.map { $0.offset }.max() ?? 0) == decision.common
                         if offsetsConsistent {
                             persistentCache = existing
-                            let suffix = Array(tokens[decision.common...])
-                            input = try AgentLoop.makeSafeTokenLMInput(tokens: suffix)
-                            // Reuse indicator (flag-gated): `common` tokens are served
-                            // from the previous turn's cache and skipped; only `suffix`
-                            // is prefilled now. On a healthy multi-turn chat, reused
-                            // should be large and new should be roughly one message.
+                            reuseStart = decision.common
                             if promptCacheStats {
                                 frontend.emitStatus(
-                                    "[PromptCache] reused \(decision.common) tok from cache, "
-                                    + "prefilling \(suffix.count) new tok "
-                                    + "(prompt \(tokens.count) tok, trimmed \(decision.toTrim))"
+                                    "[PromptCache] restore: cached_tokens=\(decision.common) "
+                                    + "uncached_tokens=\(tokens.count - decision.common)"
                                 )
                             }
                         } else {
+                            let actualOffsets = existing.prefix(8).map { $0.offset }
                             let fresh = context.model.newCache(parameters: generationParameters)
                             persistentCache = fresh
-                            input = try AgentLoop.makeSafeTokenLMInput(tokens: tokens)
+                            reuseStart = 0
                             frontend.emitStatus(
                                 "[PromptCache] initialized (offset mismatch after trim — "
-                                + "re-prefilling \(tokens.count) tok)"
+                                + "re-prefilling \(tokens.count) tok) offsets=\(actualOffsets)"
                             )
                         }
-                    } else {
-                        // First turn, or a divergent first token: prefill the entire
-                        // prompt. Whether we KEEP the resulting cache for future reuse
-                        // depends on whether this model's cache can be trimmed back to a
-                        // shared prefix at all.
-                        let fresh = context.model.newCache(parameters: generationParameters)
-                        input = try AgentLoop.makeSafeTokenLMInput(tokens: tokens)
-                        if canTrimPromptCache(fresh) {
+                    } else if hasCache && !cacheIsTrimmable && decision.toTrim > 0 {
+                        // Diverged on a non-trimmable hybrid model (e.g. Qwen3.5).
+                        // Try the mlx-engine checkpoint: a snapshot taken before the
+                        // volatile tail tokens, which may still be a pure prefix of the
+                        // new prompt even after thinking-block re-rendering.
+                        let fallback = AgentLoop.computeCheckpointFallback(
+                            checkpointTokens: promptCache.checkpointTokens,
+                            promptTokens: tokens
+                        )
+                        if fallback.useCheckpoint, let checkpoint = promptCache.checkpointCache {
+                            // Copy-on-restore: clone the checkpoint so it stays valid
+                            // even if this generation later fails mid-stream.
+                            let restored = checkpoint.map { $0.copy() }
+                            let restoredOffset = restored.map(\.offset).max() ?? 0
+                            if restoredOffset == fallback.prefillFrom {
+                                persistentCache = restored
+                                reuseStart = fallback.prefillFrom
+                                if promptCacheStats {
+                                    frontend.emitStatus(
+                                        "[PromptCache] checkpoint restore: "
+                                        + "cached_tokens=\(fallback.prefillFrom) "
+                                        + "uncached_tokens=\(tokens.count - fallback.prefillFrom)"
+                                    )
+                                }
+                            } else {
+                                // Checkpoint offset mismatch — discard the checkpoint and
+                                // fall back to a full re-prefill.
+                                frontend.emitStatus(
+                                    "[PromptCache] checkpoint offset mismatch "
+                                    + "(offset \(restoredOffset), expected \(fallback.prefillFrom))"
+                                    + " — discarding"
+                                )
+                                promptCache.checkpointCache = nil
+                                promptCache.checkpointTokens = []
+                                let fresh = context.model.newCache(parameters: generationParameters)
+                                persistentCache = fresh
+                                reuseStart = 0
+                            }
+                        } else {
+                            // Checkpoint not usable — full re-prefill. The fresh cache
+                            // will be committed and checkpointed so the next turn can
+                            // benefit if the prompt grows monotonically.
+                            let lcp = AgentLoop.longestCommonPrefixLength(
+                                promptCache.checkpointTokens, tokens)
+                            let ckptInfo = promptCache.checkpointTokens.isEmpty
+                                ? ""
+                                : " (checkpoint unusable:"
+                                    + " ckpt=\(promptCache.checkpointTokens.count) lcp=\(lcp))"
+                            frontend.emitStatus(
+                                "[PromptCache] non-trimmable cache diverged "
+                                + "(common \(decision.common), would trim \(decision.toTrim)) "
+                                + "— re-prefilling full prompt (\(tokens.count) tok)\(ckptInfo)"
+                            )
+                            let fresh = context.model.newCache(parameters: generationParameters)
                             persistentCache = fresh
+                            reuseStart = 0
+                        }
+                    } else {
+                        // First turn, divergent first token, or other non-reuse case:
+                        // prefill the full prompt into a fresh cache. The cache is always
+                        // kept for future reuse — pure-prefix extension is valid for any
+                        // cache type (including non-trimmable Mamba/hybrid), so we never
+                        // discard the cache here.
+                        let fresh = context.model.newCache(parameters: generationParameters)
+                        persistentCache = fresh
+                        reuseStart = 0
+                        if promptCacheStats {
                             frontend.emitStatus(
                                 "[PromptCache] initialized (prefilling \(tokens.count) tok)"
                             )
-                            if promptCacheStats {
-                                frontend.emitStatus(
-                                    "[PromptCache] reused 0 tok from cache, "
-                                    + "prefilling \(tokens.count) new tok (prompt \(tokens.count) tok)"
-                                )
-                            }
-                        } else {
-                            // The model exposes a non-trimmable cache — e.g. a hybrid
-                            // state-space/attention model (Qwen3.5's Mamba layers) or a
-                            // sliding-window cache. Mamba layers keep a fixed recurrent
-                            // state with no per-token entries to roll back, so cross-turn
-                            // prefix reuse is impossible. Don't hold a cache we can never
-                            // reuse; let the iterator build its own for this turn.
-                            persistentCache = nil
-                            promptTokensForCache = nil
-                            if !promptCache.reuseUnavailableAnnounced {
-                                promptCache.reuseUnavailableAnnounced = true
-                                frontend.emitStatus(
-                                    "[PromptCache] reuse unavailable for this model — "
-                                    + "non-trimmable KV cache (hybrid/Mamba or sliding-window); "
-                                    + "prefilling full context each turn"
-                                )
-                            }
                         }
+                    }
+
+                    // Phase 2: two-phase prefill + checkpoint snapshot (non-trimmable
+                    // caches only, mlx-engine style). For trimmable models, trimming
+                    // already handles divergence — keep their existing single-phase path
+                    // where input = tokens[reuseStart...].
+                    //
+                    // Idea: bulk-prefill the stable portion of the suffix (everything
+                    // except the last `checkpointTailTokens`), snapshot the cache state
+                    // BEFORE the volatile generation-header tail is fed, then hand only
+                    // the tail to the main generateTokens call. On the next turn, if the
+                    // re-rendered prompt diverges inside that tail region (e.g. a thinking
+                    // block is stripped), the checkpoint is still a pure prefix and can be
+                    // restored without trimming — bypassing the Mamba constraint.
+                    let selectedCacheNonTrimmable = !canTrimPromptCache(persistentCache!)
+                    let suffix = Array(tokens[reuseStart...])
+                    if selectedCacheNonTrimmable
+                        && suffix.count > PromptCacheStore.checkpointTailTokens {
+                        let bulkTokens = Array(
+                            suffix.dropLast(PromptCacheStore.checkpointTailTokens))
+                        let tailTokens = Array(
+                            suffix.suffix(PromptCacheStore.checkpointTailTokens))
+                        // Bulk-prefill into the selected cache. `TokenIterator.init`
+                        // calls model.prepare() (feeds tokens[0..N-2] through the model)
+                        // then step() (feeds the last token), advancing the cache by
+                        // exactly bulkTokens.count positions. We discard the iterator;
+                        // only the cache mutation matters.
+                        // Uses `init(input:model:cache:parameters:)` so kvBits /
+                        // prefillStepSize from generationParameters are respected,
+                        // matching the settings of the main generateTokens call.
+                        // Wrap in the sync withError so a C++ MLX assertion surfaces
+                        // as a thrown Swift error rather than aborting the process.
+                        let bulkInput = try AgentLoop.makeSafeTokenLMInput(
+                            tokens: bulkTokens)
+                        _ = try withError {
+                            try TokenIterator(
+                                input: bulkInput,
+                                model: context.model,
+                                cache: persistentCache,
+                                parameters: generationParameters
+                            )
+                        }
+                        // Snapshot the cache state at (promptLen − tailMargin),
+                        // before the volatile tail is prefilled.
+                        promptCache.checkpointCache = persistentCache!.map { $0.copy() }
+                        promptCache.checkpointTokens = Array(
+                            tokens.prefix(
+                                tokens.count - PromptCacheStore.checkpointTailTokens))
+                        if promptCacheStats {
+                            frontend.emitStatus(
+                                "[PromptCache] checkpoint saved at"
+                                + " \(promptCache.checkpointTokens.count) tok"
+                                + " (tail margin \(PromptCacheStore.checkpointTailTokens))"
+                            )
+                        }
+                        input = try AgentLoop.makeSafeTokenLMInput(tokens: tailTokens)
+                    } else {
+                        // Trimmable cache (single-phase) or suffix too small to
+                        // checkpoint. Keep the existing checkpoint — it is still a valid
+                        // prefix and remains usable on the next turn.
+                        input = try AgentLoop.makeSafeTokenLMInput(tokens: suffix)
                     }
                 } else {
                     // Text model on a non-cacheable path (speculative decoding or
@@ -314,7 +427,7 @@ extension AgentLoop {
                     frontend.emit(.status(StatusMessage(message, severity: severity)))
                 }
             )
-            
+
             var rawResponseText = ""
             // StreamParser handles the think-block state machine and emits the
             // correct AgentEvents. startsThinking mirrors enableThinking because
@@ -377,7 +490,27 @@ extension AgentLoop {
             // Token-rate stats, captured from the terminal `.info` event and emitted
             // only after the final flush so it prints after the last streamed line.
             var generationStatMessage: String? = nil
-            
+
+            // Build the set of stop-token ids we must intercept in the stream.
+            // `buildStopTokenIds` in MLXLMCommon/Evaluate.swift is private, so we
+            // replicate the same logic here. With includeStopToken: true, the stop
+            // token arrives as a final .token(id) in the stream and must be appended
+            // to generatedTokenIds (so the cache mirrors the physical state) but must
+            // NOT enter text processing — otherwise the EOS text leaks to the UI.
+            // unknownTokenId is also treated as a stop by the iterator loop.
+            var stopTokenIds: Set<Int> = context.configuration.eosTokenIds
+            if let eosId = tokenizer.eosTokenId {
+                stopTokenIds.insert(eosId)
+            }
+            for extraToken in context.configuration.extraEOSTokens {
+                if let id = tokenizer.convertTokenToId(extraToken) {
+                    stopTokenIds.insert(id)
+                }
+            }
+            if let unknownId = tokenizer.unknownTokenId {
+                stopTokenIds.insert(unknownId)
+            }
+
             // Build the token stream inside `withError` so a C++ MLX failure
             // (e.g. the "[reshape] Cannot infer the shape of an empty array"
             // assertion that fires while loading the prompt into the penalty
@@ -390,6 +523,8 @@ extension AgentLoop {
             // caller's retry/compaction loop for graceful recovery.
             let tokenStream: AsyncStream<TokenGeneration> = try await withError {
                 if let draftModel {
+                    // Speculative-decoding path: never uses persistent caching, leave
+                    // includeStopToken at the default (false) to preserve existing behaviour.
                     return try MLXLMCommon.generateTokens(
                         input: input,
                         cache: generationCache,
@@ -399,11 +534,17 @@ extension AgentLoop {
                         numDraftTokens: currentGenerationConfig.numDraftTokens
                     )
                 } else {
+                    // Plain-text persistent-cache path: request the stop token so the
+                    // iterator emits it as the final .token(id). This ensures the cache
+                    // physically holds prompt + response + EOS, matching `cachedTokens`
+                    // after commit, so the next turn's toTrim math stays zero for a pure
+                    // prefix extension.
                     return try MLXLMCommon.generateTokens(
                         input: input,
                         cache: generationCache,
                         parameters: generationParameters,
-                        context: context
+                        context: context,
+                        includeStopToken: true
                     )
                 }
             }
@@ -411,18 +552,29 @@ extension AgentLoop {
                 if Task.isCancelled {
                     throw CancellationError()
                 }
-                
+
                 switch item {
                 case .token(let id):
+                    // Always record the token id for cache bookkeeping — including the
+                    // stop token, so cachedTokens mirrors the physical cache depth.
                     generatedTokenIds.append(id)
+
+                    // Stop tokens (EOS / unknown) must not enter text processing:
+                    // the iterator feeds them through the cache before emitting (so the
+                    // physical cache advances), but their decoded text (e.g. "<|im_end|>")
+                    // must never appear in the UI. Skip all text paths for stop ids.
+                    if stopTokenIds.contains(id) {
+                        continue
+                    }
+
                     segmentTokens.append(id)
                     let newSegment = tokenizer.decode(tokenIds: segmentTokens, skipSpecialTokens: false)
-                    
+
                     // Skip yielding if incomplete multi-byte sequence
                     if newSegment.last == "\u{fffd}" {
                         continue
                     }
-                    
+
                     let newText = String(newSegment.suffix(newSegment.count - segment.count))
                     rawResponseText += newText
 
@@ -522,19 +674,28 @@ extension AgentLoop {
             }
 
             // Generation completed successfully — persist the cache for the next
-            // turn. The cache now physically holds prompt + generated tokens, so
-            // `cachedTokens` must mirror that exact sequence for the next turn's
-            // prefix diff to be correct. `cacheCommitted` disarms the defer's
-            // invalidate-on-failure guard.
+            // turn. The cache now physically holds prompt + generated tokens (including
+            // the stop token, since includeStopToken: true feeds it through the cache
+            // before the stream emits it). `cachedTokens` must mirror that exact
+            // sequence for the next turn's prefix diff to be correct.
+            // `cacheCommitted` disarms the defer's invalidate-on-failure guard.
             if let cache = persistentCache, let promptTokens = promptTokensForCache {
                 promptCache.cache = cache
                 promptCache.cachedTokens = promptTokens + generatedTokenIds
                 cacheCommitted = true
-                // Size indicator (flag-gated): what the next turn can reuse — the
-                // full prompt plus the tokens just generated.
-                if promptCacheStats {
+                let physicalOffset = cache.map { $0.offset }.max() ?? 0
+                let recorded = promptCache.cachedTokens.count
+                let mismatch = physicalOffset != recorded
+                if mismatch {
                     frontend.emitStatus(
-                        "[PromptCache] committed — cache holds \(promptCache.cachedTokens.count) tok "
+                        "MISMATCH [PromptCache] committed: recorded=\(recorded) "
+                        + "physicalOffset=\(physicalOffset) "
+                        + "(prompt \(promptTokens.count) + generated \(generatedTokenIds.count))"
+                    )
+                } else if promptCacheStats {
+                    frontend.emitStatus(
+                        "[PromptCache] committed: recorded=\(recorded) "
+                        + "physicalOffset=\(physicalOffset) "
                         + "(prompt \(promptTokens.count) + generated \(generatedTokenIds.count))"
                     )
                 }
