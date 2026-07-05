@@ -105,7 +105,10 @@ public struct StreamParser: Sendable {
                 }
             } else {
                 if let range = pending.range(of: openTag) {
+                    // Strip any spurious close tags that appeared before the next
+                    // open tag in the visible-text region.
                     let before = String(pending[..<range.lowerBound])
+                        .replacingOccurrences(of: closeTag, with: "")
                     if !before.isEmpty {
                         events.append(.assistantTextChunk(before))
                     }
@@ -117,7 +120,13 @@ public struct StreamParser: Sendable {
                     // Could be the start of `<think>` — wait for more bytes.
                     return
                 } else {
-                    events.append(.assistantTextChunk(pending))
+                    // Strip any spurious close tags before emitting as visible text.
+                    // A bare </think> in assistant-visible output is always a model
+                    // artifact — there is no valid semantic meaning for it there.
+                    let cleaned = pending.replacingOccurrences(of: closeTag, with: "")
+                    if !cleaned.isEmpty {
+                        events.append(.assistantTextChunk(cleaned))
+                    }
                     pending = ""
                 }
             }

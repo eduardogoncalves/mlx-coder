@@ -521,7 +521,7 @@ extension AgentLoop {
             // the task-local handler, so per-token MLX failures are likewise
             // prevented from aborting the process. Surfaced errors flow up to the
             // caller's retry/compaction loop for graceful recovery.
-            let tokenStream: AsyncStream<TokenGeneration> = try await withError {
+            let tokenStream: AsyncStream<TokenGeneration> = try withError {
                 if let draftModel {
                     // Speculative-decoding path: never uses persistent caching, leave
                     // includeStopToken at the default (false) to preserve existing behaviour.

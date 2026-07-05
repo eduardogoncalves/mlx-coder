@@ -125,6 +125,25 @@ public struct ConversationHistory: Sendable {
         messages.last(where: { $0.role == .user && $0.origin == .human })?.content
     }
 
+    /// Retroactively marks all messages at `index..<messages.count` as transient.
+    ///
+    /// Used when a tool-call iteration produces at least one error: the assistant
+    /// response and every tool result from that iteration are wrapped up so
+    /// `purgeTransient()` removes them once the turn completes successfully. The
+    /// messages remain visible to the model during the current turn so it can
+    /// recover; they just never enter persistent history.
+    public mutating func markTransient(from index: Int) {
+        guard index < messages.count else { return }
+        for i in index..<messages.count {
+            let m = messages[i]
+            messages[i] = Message(
+                role: m.role, content: m.content,
+                toolCallId: m.toolCallId, origin: m.origin,
+                transient: true
+            )
+        }
+    }
+
     /// Remove ephemeral turn artifacts so only the successful execution path persists.
     ///
     /// Drops every `transient` message — malformed/rejected tool-call attempts and
@@ -132,8 +151,13 @@ public struct ConversationHistory: Sendable {
     /// user → assistant → tool → assistant sequence intact and in order. Called when a
     /// turn completes; during the turn these messages stay in context so the model can
     /// recover.
-    public mutating func purgeTransient() {
+    ///
+    /// - Returns: `true` if at least one transient message was removed.
+    @discardableResult
+    public mutating func purgeTransient() -> Bool {
+        let before = messages.count
         messages.removeAll { $0.transient }
+        return messages.count < before
     }
 
     /// Clears the history, retaining only the initial system prompt.

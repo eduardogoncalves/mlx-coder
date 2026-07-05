@@ -52,6 +52,12 @@ public enum ReasoningStripper {
             result = String(result[closeRange.upperBound...])
         }
 
+        // 3. Strip any remaining orphaned close tags — the model sometimes emits a
+        //    spurious second </tag> in its visible response after the block already
+        //    closed. There is no valid semantic reason for a bare close tag to appear
+        //    in assistant-visible text, so stripping is always safe here.
+        result = result.replacingOccurrences(of: close, with: "")
+
         return result
     }
 }

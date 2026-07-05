@@ -440,9 +440,16 @@ public actor AgentLoop {
                 history.addAssistant(response)
 
                 // Turn completed successfully: drop the ephemeral recovery artifacts
-                // (malformed attempts, automated steering) accumulated during it, so
-                // only the successful execution path persists.
-                history.purgeTransient()
+                // (malformed attempts, failed tool-call iterations, automated steering)
+                // accumulated during it, so only the successful execution path persists.
+                let hadTransient = history.purgeTransient()
+                if hadTransient {
+                    // The ChatML prompt for the next turn will be shorter (failed
+                    // iterations removed). Invalidate the KV cache so the next turn
+                    // re-prefills from the clean history rather than relying on
+                    // trim/checkpoint to reconcile the divergence.
+                    promptCache.invalidate(reason: "transient turn artifacts purged — history diverged")
+                }
 
                 // Check builds if write/edit tools were executed in agent/coding mode
                 if fileModificationToolsExecuted && mode == .agent && taskType == .coding {
@@ -479,6 +486,11 @@ public actor AgentLoop {
                 return
             }
 
+            // Record the history boundary before this iteration's assistant message so
+            // we can retroactively mark the whole iteration transient if any tool fails.
+            let iterationStartIndex = history.messages.count
+            var iterationAnyToolFailed = false
+
             // Add the assistant's response (including tool calls) to history
             history.addAssistant(response)
 
@@ -487,7 +499,8 @@ public actor AgentLoop {
                 frontend.emit(.toolCallStarted(ToolCallSnapshot(name: streamedCall.toolName, arguments: stringifyArgs(["path": streamedCall.path, "content": "[streamed to tmp]"]))))
                 let streamResult = await handleStreamedToolCall(streamedCall)
                 frontend.emit(.toolCallResult(makeDisplaySnapshot(toolName: streamedCall.toolName, result: streamResult)))
-                
+                if streamResult.isError { iterationAnyToolFailed = true }
+
                 // Track file modifications
                 if !streamResult.isError {
                     fileModificationToolsExecuted = true
@@ -500,7 +513,7 @@ public actor AgentLoop {
                     lastReadFileSignature = nil
                     sameReadFileStreak = 0
                 }
-                
+
                 let userGoal = history.latestUserMessage ?? ""
                 let toolResponse = try await makeToolResponseForHistory(
                     toolName: streamedCall.toolName,
@@ -523,6 +536,7 @@ public actor AgentLoop {
                     fileModificationToolsExecuted: &fileModificationToolsExecuted,
                     modifiedFilePaths: &modifiedFilePaths
                 )
+                if result.isError { iterationAnyToolFailed = true }
 
                 let userGoal = history.latestUserMessage ?? ""
                 let toolResponse = try await makeToolResponseForHistory(
@@ -532,6 +546,14 @@ public actor AgentLoop {
                 )
 
                 history.addToolResponse(toolResponse, toolCallId: call.name)
+            }
+
+            // If any tool in this iteration failed, mark the whole iteration (assistant
+            // message + all tool responses) as transient. The model still sees them
+            // during the current turn for recovery context, but purgeTransient() will
+            // remove them when the turn completes so only the successful path persists.
+            if iterationAnyToolFailed {
+                history.markTransient(from: iterationStartIndex)
             }
 
             // After processing all tool calls for this turn, drain the steering queue.
@@ -552,7 +574,10 @@ public actor AgentLoop {
 
         // Turn is ending (iteration cap reached); still drop transient recovery
         // artifacts so they don't leak into persistent history.
-        history.purgeTransient()
+        let hadTransientAtCap = history.purgeTransient()
+        if hadTransientAtCap {
+            promptCache.invalidate(reason: "transient turn artifacts purged — history diverged")
+        }
         frontend.emitError("Exceeded maximum tool iterations (\(maxToolIterations))")
     }
 
