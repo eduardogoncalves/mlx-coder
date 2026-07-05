@@ -70,7 +70,7 @@ public func runSwiftCoderTUISession(
 
     let caffeinateManager = CaffeinateManager()
 
-    let dynamicCommandNames: Set<String> = ["/model", "/effort", "/caffeinate", "/memory"]
+    let dynamicCommandNames: Set<String> = ["/model", "/effort", "/caffeinate", "/memory", "/login", "/logout"]
     let staticItems = frontend.appConfig.commands
         .filter { !dynamicCommandNames.contains($0.name) }
         .map {
@@ -89,6 +89,8 @@ public func runSwiftCoderTUISession(
                 TUIEffortSlashCommand(),
                 CaffeinateSlashCommand(),
                 TUIMemorySlashCommand(),
+                TUILoginSlashCommand(),
+                TUILogoutSlashCommand(),
             ],
             staticCommands: staticItems
         )
@@ -131,6 +133,10 @@ public func runSwiftCoderTUISession(
     // restored once the suggestion is submitted or cancelled.
     var approvalSuggestionMode = false
     var approvalStashedInput = ""
+
+    // /login wizard state. While non-.idle, free-text input is captured by the
+    // wizard and never forwarded to AgentLoop.
+    var loginWizardStep: LoginWizardStep = .idle
 
     // Voice input session state. `voiceProvider` is the same instance wired
     // into `AppConfig.voiceInputProvider` in `ChatCommand`, captured here so
@@ -297,6 +303,53 @@ public func runSwiftCoderTUISession(
                 await renderer.moveOptionSelectSelection(offset: -1)
             case .arrowDown:
                 await renderer.moveOptionSelectSelection(offset: 1)
+            default:
+                break
+            }
+            continue
+        }
+
+        // Login wizard — when active, all input is captured by the wizard and
+        // never forwarded to the autocomplete or AgentLoop paths.
+        if loginWizardStep != .idle {
+            switch key {
+            case .character(let ch):
+                await renderer.appendChar(ch)
+                await renderer.renderFooter()
+            case .backspace, .delete:
+                await renderer.deleteChar()
+                await renderer.renderFooter()
+            case .arrowLeft:
+                await renderer.moveCursorLeft()
+                await renderer.renderFooter()
+            case .arrowRight:
+                await renderer.moveCursorRight()
+                await renderer.renderFooter()
+            case .paste(let pasted):
+                await renderer.insertText(pasted)
+                await renderer.renderFooter()
+            case .enter:
+                let value = await renderer.getInputBuffer()
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                await renderer.setInputBuffer("")
+                let (nextStep, addedID) = await advanceLoginWizard(
+                    step: loginWizardStep, value: value, renderer: renderer
+                )
+                loginWizardStep = nextStep
+                await renderer.renderFooter()
+                if let id = addedID {
+                    await refreshRemoteCatalog(providerID: id, renderer: renderer)
+                    sessionModels = rebuildSessionModels(
+                        base: frontend.appConfig.models, filterMode: modelFilterMode
+                    )
+                    await renderer.setAutocompleteProvider(makeAutocompleteProvider())
+                }
+            case .escape, .ctrlC:
+                loginWizardStep = .idle
+                await renderer.setStatusNotice(nil)
+                await renderer.setInputBuffer("")
+                await renderer.renderFooter()
+                await renderer.printScrollLine("  Cancelled.")
             default:
                 break
             }
@@ -826,6 +879,12 @@ public func runSwiftCoderTUISession(
                 await handleModelCommand(input: commandInput, models: sessionModels, agentLoop: agentLoop, renderer: renderer)
                 continue
             }
+            if commandInput.hasPrefix("/login") || commandInput.hasPrefix("/logout") {
+                loginWizardStep = await handleLoginCommand(input: commandInput, renderer: renderer)
+                sessionModels = rebuildSessionModels(base: frontend.appConfig.models, filterMode: modelFilterMode)
+                await renderer.setAutocompleteProvider(makeAutocompleteProvider())
+                continue
+            }
             if commandInput.hasPrefix("/effort") || commandInput.hasPrefix("/thinking") {
                 await handleEffortCommand(input: commandInput, agentLoop: agentLoop, renderer: renderer)
                 continue
@@ -1160,6 +1219,8 @@ private func helpLines() -> [String] {
         "  /model free  show only free OpenRouter models in /model picker",
         "  /model all   clear model filter and show all models",
         "  /effort [level] set reasoning effort: off, minimal, low, medium, high",
+        "  /login  add or update a remote provider in config.json (multi-step wizard)",
+        "  /logout [id] remove a configured remote provider",
         "  /save-history [path] save session transcript as markdown",
         "  /save-history-json [path] save session transcript as json",
         "  /load-history-json [path] load prior session transcript",

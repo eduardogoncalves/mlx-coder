@@ -226,6 +226,29 @@ enum RemoteProviderRegistry {
         provider(id: id) != nil
     }
 
+    /// Upsert a provider by derived id. If a provider with the same id already
+    /// exists it is replaced in-place; otherwise the entry is appended.
+    /// The file is rewritten as clean JSON (any JSONC comments are not preserved).
+    static func addOrUpdate(_ provider: RemoteProvider) throws {
+        ensureConfigFileExists()
+        var current = providers()
+        if let idx = current.firstIndex(where: { $0.id == provider.id }) {
+            current[idx] = provider
+        } else {
+            current.append(provider)
+        }
+        try saveProviders(current)
+    }
+
+    /// Remove the provider with the given id (case-insensitive slug match).
+    /// No-op if the id is not present.
+    static func remove(id: String) throws {
+        let needle = id.lowercased()
+        var current = providers()
+        current.removeAll { $0.id == needle }
+        try saveProviders(current)
+    }
+
     // MARK: - Internals
 
     struct ConfigFile: Codable {
@@ -250,5 +273,21 @@ enum RemoteProviderRegistry {
             var c = encoder.container(keyedBy: CodingKeys.self)
             try c.encode(providers, forKey: .providers)
         }
+    }
+
+    private static func saveProviders(_ list: [RemoteProvider]) throws {
+        try FileManager.default.createDirectory(
+            atPath: directoryPath,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        let data = try encoder.encode(ConfigFile(providers: list))
+        try data.write(to: URL(filePath: filePath), options: .atomic)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o600],
+            ofItemAtPath: filePath
+        )
     }
 }
