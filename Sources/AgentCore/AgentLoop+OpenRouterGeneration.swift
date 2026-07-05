@@ -16,7 +16,7 @@ import Foundation
 
 extension AgentLoop {
 
-    func generateResponseViaRemote() async throws -> (text: String, writer: StreamingToolCallWriter, startedThinking: Bool) {
+    func generateResponseViaRemote() async throws -> (text: String, writer: StreamingToolCallWriter, startedThinking: Bool, turnStats: (promptTokens: Int, completionTokens: Int, elapsed: TimeInterval, tokensPerSecond: Double?)?) {
         guard case .remote(let providerID, let modelID) = backend else {
             throw NSError(
                 domain: "AgentLoop",
@@ -88,6 +88,9 @@ extension AgentLoop {
             var arguments: String = ""
         }
         var pending: [Int: PartialToolCall] = [:]
+        var usagePrompt = 0
+        var usageCompletion = 0
+        let generationStart = Date()
 
         do {
             for try await event in stream {
@@ -107,10 +110,23 @@ extension AgentLoop {
                     // Stream may emit `.done` mid-completion (per-choice finish_reason)
                     // before `[DONE]`; let the loop continue and exit naturally.
                     break
+                case .usage(let prompt, let completion):
+                    usagePrompt = prompt
+                    usageCompletion = completion
                 }
             }
         } catch {
             throw error
+        }
+
+        // Capture stats to return to the caller for turn-level accumulation.
+        // The spinner ↑ is still updated immediately; the formatted stats line
+        // is emitted once by the outer loop after all rounds complete.
+        var capturedTurnStats: (promptTokens: Int, completionTokens: Int, elapsed: TimeInterval, tokensPerSecond: Double?)? = nil
+        if usagePrompt > 0 || usageCompletion > 0 {
+            frontend.emit(.promptTokensKnown(usagePrompt))
+            let elapsed = Date().timeIntervalSince(generationStart)
+            capturedTurnStats = (promptTokens: usagePrompt, completionTokens: usageCompletion, elapsed: elapsed, tokensPerSecond: nil)
         }
 
         // Serialize accumulated tool calls as qwen-format `<tool_call>{...}</tool_call>`
@@ -157,6 +173,30 @@ extension AgentLoop {
             onStatusChange: nil
         )
 
-        return (text: responseText, writer: writer, startedThinking: false)
+        return (text: responseText, writer: writer, startedThinking: false, turnStats: capturedTurnStats)
+    }
+
+    static func formatGenerationStats(
+        promptTokens: Int,
+        completionTokens: Int,
+        elapsed: TimeInterval,
+        tokensPerSecond: Double? = nil
+    ) -> String {
+        func kilo(_ n: Int) -> String {
+            n >= 1000 ? String(format: "%.1fk", Double(n) / 1000) : "\(n)"
+        }
+        let elapsedStr: String
+        if elapsed >= 60 {
+            let m = Int(elapsed) / 60
+            let s = Int(elapsed) % 60
+            elapsedStr = "\(m)m \(s)s"
+        } else {
+            elapsedStr = String(format: "%.1fs", elapsed)
+        }
+        var result = "↑ \(kilo(promptTokens)) · ↓ \(kilo(completionTokens)) tokens · \(elapsedStr)"
+        if let tps = tokensPerSecond, tps > 0 {
+            result += String(format: " · %.1f tok/s", tps)
+        }
+        return result
     }
 }

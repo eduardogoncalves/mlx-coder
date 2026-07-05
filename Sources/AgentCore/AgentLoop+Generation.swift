@@ -12,7 +12,7 @@ extension AgentLoop {
     /// Generate a response from the model using the current conversation history.
     /// Returns the response text, the streaming writer (for streamed tool calls),
     /// and whether the response began inside a pre-filled `<think>` block.
-    func generateResponse() async throws -> (text: String, writer: StreamingToolCallWriter, startedThinking: Bool) {
+    func generateResponse() async throws -> (text: String, writer: StreamingToolCallWriter, startedThinking: Bool, turnStats: (promptTokens: Int, completionTokens: Int, elapsed: TimeInterval, tokensPerSecond: Double?)?) {
         // Route online backends through their HTTP client — local MLX path below
         // assumes a loaded ModelContainer, which online providers never produce.
         if backend.isOnline {
@@ -102,6 +102,10 @@ extension AgentLoop {
             var persistentCache: [KVCache]? = nil
             var promptTokensForCache: [Int]? = nil
             var cacheCommitted = false
+            // New tokens the model actually processes this turn (suffix since cache reuse).
+            // Set inside the caching block; falls back to input.text.tokens.size for
+            // non-caching paths (VLM, speculative). Used for the spinner ↑ count and stats.
+            var turnInputTokenCount: Int = 0
 
             defer {
                 if hasGenerationStarted {
@@ -359,6 +363,7 @@ extension AgentLoop {
                     // restored without trimming — bypassing the Mamba constraint.
                     let selectedCacheNonTrimmable = !canTrimPromptCache(persistentCache!)
                     let suffix = Array(tokens[reuseStart...])
+                    turnInputTokenCount = suffix.count
                     if selectedCacheNonTrimmable
                         && suffix.count > PromptCacheStore.checkpointTailTokens {
                         let bulkTokens = Array(
@@ -409,6 +414,7 @@ extension AgentLoop {
                     // Text model on a non-cacheable path (speculative decoding or
                     // TurboQuant): keep legacy behavior — prefill the full prompt.
                     input = try AgentLoop.makeSafeTokenLMInput(tokens: tokens)
+                    turnInputTokenCount = tokens.count
                 }
             }
 
@@ -438,6 +444,10 @@ extension AgentLoop {
                 closeTag: ToolCallPattern.thinkClose,
                 startsThinking: enableThinking
             )
+            // VLM and other non-caching paths don't set turnInputTokenCount; fall back
+            // to the raw input size (full prompt — no cache on those paths anyway).
+            if turnInputTokenCount == 0 { turnInputTokenCount = input.text.tokens.size }
+            frontend.emit(.promptTokensKnown(turnInputTokenCount))
             hasTokenProcessingEnded = true
             frontend.emit(.tokenProcessingActivity(.ended))
             hasGenerationStarted = true
@@ -487,9 +497,9 @@ extension AgentLoop {
             // newlines for detokenization, so it cannot be used for cache bookkeeping;
             // this collects every id so the store can record prompt + generated tokens.
             var generatedTokenIds = [Int]()
-            // Token-rate stats, captured from the terminal `.info` event and emitted
-            // only after the final flush so it prints after the last streamed line.
-            var generationStatMessage: String? = nil
+            // Per-round stats captured from the terminal `.info` event and returned to
+            // the caller for accumulation across tool-call rounds within one turn.
+            var capturedTurnStats: (promptTokens: Int, completionTokens: Int, elapsed: TimeInterval, tokensPerSecond: Double?)? = nil
 
             // Build the set of stop-token ids we must intercept in the stream.
             // `buildStopTokenIds` in MLXLMCommon/Evaluate.swift is private, so we
@@ -633,9 +643,12 @@ extension AgentLoop {
                     // assistant text (the last streamed line), and emitting the
                     // stats here would order it — and the caller's subsequent
                     // "Turn complete." status — ahead of that trailing line.
-                    generationStatMessage = String(format: "Generated %d tokens (%.1f tok/s), prompt: %d tokens (%.1f tok/s)",
-                                                    info.generationTokenCount, info.tokensPerSecond,
-                                                    info.promptTokenCount, info.promptTokensPerSecond)
+                    capturedTurnStats = (
+                        promptTokens: turnInputTokenCount,
+                        completionTokens: info.generationTokenCount,
+                        elapsed: info.generateTime,
+                        tokensPerSecond: info.tokensPerSecond
+                    )
                 }
             }
 
@@ -665,13 +678,6 @@ extension AgentLoop {
                 }
             }
 
-            // Now that every streamed line (including any released by the flush
-            // above) has been emitted, surface the token-rate stats. Emitting it
-            // here keeps it — and the caller's "Turn complete." status — ordered
-            // after the final assistant line.
-            if let generationStatMessage {
-                frontend.emitStatus(generationStatMessage)
-            }
 
             // Generation completed successfully — persist the cache for the next
             // turn. The cache now physically holds prompt + generated tokens (including
@@ -705,7 +711,7 @@ extension AgentLoop {
             rawResponseText = rawResponseText.replacingOccurrences(of: ToolCallPattern.eosToken, with: "")
             rawResponseText = rawResponseText.trimmingCharacters(in: .whitespacesAndNewlines)
 
-            return (text: rawResponseText, writer: writer, startedThinking: enableThinking)
+            return (text: rawResponseText, writer: writer, startedThinking: enableThinking, turnStats: capturedTurnStats)
         }
 
         return result

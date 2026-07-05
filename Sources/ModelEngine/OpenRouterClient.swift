@@ -48,6 +48,8 @@ public enum OpenRouterStreamEvent: Sendable {
     case toolCallDelta(index: Int, id: String?, name: String?, argumentsChunk: String)
     /// End-of-stream sentinel. `finishReason` is "stop", "tool_calls", "length", etc.
     case done(finishReason: String?)
+    /// Token usage reported in the final stream frame (requires stream_options.include_usage).
+    case usage(promptTokens: Int, completionTokens: Int)
 }
 
 public struct OpenRouterMessage: Sendable {
@@ -158,6 +160,9 @@ public struct OpenRouterClient: Sendable {
         // Groups all generations from one conversation under a single OpenRouter
         // session so multi-step agent runs can be followed and debugged together.
         if let sessionId, !sessionId.isEmpty { body["session_id"] = sessionId }
+        // Request usage counts in the final stream frame (OpenAI spec; supported by
+        // OpenRouter, LM Studio, vLLM). Ignored silently by providers that don't support it.
+        body["stream_options"] = ["include_usage": true]
 
         request.httpBody = try JSONSerialization.data(withJSONObject: body, options: [])
 
@@ -211,8 +216,18 @@ public struct OpenRouterClient: Sendable {
             // doesn't tear down on a benign heartbeat.
             return
         }
-        guard let dict = obj as? [String: Any],
-              let choices = dict["choices"] as? [[String: Any]],
+        guard let dict = obj as? [String: Any] else { return }
+
+        // Usage appears in its own frame (choices may be empty or absent).
+        if let usage = dict["usage"] as? [String: Any] {
+            let prompt = (usage["prompt_tokens"] as? Int) ?? 0
+            let completion = (usage["completion_tokens"] as? Int) ?? 0
+            if prompt > 0 || completion > 0 {
+                continuation.yield(.usage(promptTokens: prompt, completionTokens: completion))
+            }
+        }
+
+        guard let choices = dict["choices"] as? [[String: Any]],
               let first = choices.first
         else {
             return
@@ -323,9 +338,11 @@ public struct OpenRouterClient: Sendable {
         models.reserveCapacity(entries.count)
         for entry in entries {
             guard let id = entry["id"] as? String, !id.isEmpty else { continue }
-            let supports = (entry["supported_parameters"] as? [String]) ?? []
-            let supportsTools = supports.contains("tools")
-            guard supportsTools else { continue }
+            // `supported_parameters` is OpenRouter-specific. Local servers (LM Studio,
+            // vLLM, mlx-lm.server) omit it entirely — treat absence as "tools supported".
+            if let supports = entry["supported_parameters"] as? [String] {
+                guard supports.contains("tools") else { continue }
+            }
             let displayName = entry["name"] as? String
             let context = entry["context_length"] as? Int
             let isFree = Self.isFreeModel(entry: entry, id: id)

@@ -1483,6 +1483,11 @@ private func switchToModel(
             try await agentLoop.switchModel(to: modelPath)
         }
         await renderer.setCurrentModelIndex(index)
+        // `index` may be out of range for synthetic/dynamic models (remote models
+        // not in config). Override the status-bar label explicitly in that case.
+        if index >= (await renderer.getConfigModelCount()) {
+            await renderer.setModelLabel(model.label)
+        }
         if !shouldDeferReload {
             await renderer.printScrollLine("  Active model: \(model.label)")
         }

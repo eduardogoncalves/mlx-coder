@@ -313,6 +313,10 @@ public actor AgentLoop {
 
         var iterations = 0
         var fileModificationToolsExecuted = false
+        var turnTotalPromptTokens = 0
+        var turnTotalCompletionTokens = 0
+        var turnTotalElapsed: TimeInterval = 0
+        var hasTurnStats = false
         var modifiedFilePaths = Set<String>()
         var lastReadFileSignature: String?
         var sameReadFileStreak = 0
@@ -327,7 +331,7 @@ public actor AgentLoop {
             await applyDeterministicContextCompactionIfNeeded(reason: "before_generation")
 
             // Generate response
-            let generationResult: (text: String, writer: StreamingToolCallWriter, startedThinking: Bool)
+            let generationResult: (text: String, writer: StreamingToolCallWriter, startedThinking: Bool, turnStats: (promptTokens: Int, completionTokens: Int, elapsed: TimeInterval, tokensPerSecond: Double?)?)
             do {
                 generationResult = try await generateResponse()
             } catch is CancellationError {
@@ -362,6 +366,12 @@ public actor AgentLoop {
             let response = generationResult.text
             let writer = generationResult.writer
             let startedThinking = generationResult.startedThinking
+            if let stats = generationResult.turnStats {
+                turnTotalPromptTokens += stats.promptTokens
+                turnTotalCompletionTokens += stats.completionTokens
+                turnTotalElapsed += stats.elapsed
+                hasTurnStats = true
+            }
 
             // Get streamed tool calls from the writer
             let streamedCalls = writer.drainCompletedCalls()
@@ -479,6 +489,18 @@ public actor AgentLoop {
                     Task.detached(priority: .utility) { [provider] in
                         await provider.reflect(snapshot)
                     }
+                }
+
+                // Emit accumulated token stats for the whole turn (all rounds summed).
+                if hasTurnStats {
+                    let tps = turnTotalElapsed > 0
+                        ? Double(turnTotalCompletionTokens) / turnTotalElapsed : nil
+                    frontend.emitStatus(AgentLoop.formatGenerationStats(
+                        promptTokens: turnTotalPromptTokens,
+                        completionTokens: turnTotalCompletionTokens,
+                        elapsed: turnTotalElapsed,
+                        tokensPerSecond: tps
+                    ))
                 }
 
                 // Audible + visible completion cue for terminal users.

@@ -198,6 +198,9 @@ public final class LegacyTerminalFrontend: AgentFrontend, @unchecked Sendable {
         case .steeringInjected(let msg):
             renderer.printStatus("↩️  Steering: \(msg)")
 
+        case .promptTokensKnown:
+            break
+
         }
     }
 
