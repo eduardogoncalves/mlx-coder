@@ -26,7 +26,7 @@ jobs:
     runs-on: macos-15
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -114,7 +114,7 @@ jobs:
     runs-on: macos-15
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Select Xcode with Swift 6.2+
         shell: bash
@@ -208,7 +208,7 @@ jobs:
     runs-on: macos-15
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Select Xcode with Swift 6.2+
         shell: bash
