@@ -108,9 +108,12 @@ public struct TodoTool: Tool {
     private func uncompleteTodo(at index: Int) -> ToolResult {
         var todos = loadTodos()
         let i = index - 1
-        guard i >= 0, i < todos.count else {
-            return .error("Invalid todo number: \(index) (valid range is 1–\(todos.count))")
-        }
+guard i >= 0, i < todos.count else {
+    if todos.isEmpty {
+        return .error("Invalid todo number: \(index) (no todos)")
+    }
+    return .error("Invalid todo number: \(index) (valid range is 1–\(todos.count))")
+}
         todos[i] = markTodoUncompleted(todos[i])
         saveTodos(todos)
         return .success("Uncompleted: \(todos[i])")
