@@ -8,13 +8,14 @@ import MLXLMCommon
 func registerAllTools(
     registry: ToolRegistry,
     permissions: PermissionEngine,
-    modelContainer: ModelContainer,
+    modelContainer: ModelContainer?,
     modelPath: String,
     useSandbox: Bool,
     config: GenerationEngine.Config,
     renderer: StreamRenderer,
     frontend: any AgentFrontend,
-    mcpConfigs: [MCPClient.ServerConfig] = []
+    mcpConfigs: [MCPClient.ServerConfig] = [],
+    skillsRegistry: SkillsRegistry? = nil
 ) async {
     // Filesystem tools
     await registry.register(ReadFileTool(permissions: permissions))
@@ -35,22 +36,34 @@ func registerAllTools(
     await registry.register(BashTool(permissions: permissions, useSandbox: useSandbox))
 
     // Agent tools
-    await registry.register(TaskTool(
-        modelContainer: modelContainer,
-        permissions: permissions,
-        generationConfig: config,
-        modelPath: modelPath,
-        useSandbox: useSandbox,
-        parentRegistry: registry,
-        frontend: frontend
-    ))
     await registry.register(TodoTool(workspaceRoot: permissions.workspaceRoot))
-    await registry.register(ProjectExpertLoRATool(modelContainer: modelContainer, workspaceRoot: permissions.workspaceRoot, modelPath: modelPath, frontend: frontend))
+    if let modelContainer {
+        await registry.register(TaskTool(
+            modelContainer: modelContainer,
+            permissions: permissions,
+            generationConfig: config,
+            modelPath: modelPath,
+            useSandbox: useSandbox,
+            parentRegistry: registry,
+            frontend: frontend
+        ))
+        await registry.register(ProjectExpertLoRATool(
+            modelContainer: modelContainer,
+            workspaceRoot: permissions.workspaceRoot,
+            modelPath: modelPath,
+            frontend: frontend
+        ))
+    }
+
+    // Skills
+    await registry.register(ReadSkillTool(
+        skills: skillsRegistry ?? SkillsRegistry(workspaceRoot: permissions.workspaceRoot)
+    ))
 
     // Web tools
     await registry.register(WebFetchTool(
         modelContainer: modelContainer,
-        generationConfig: config
+        generationConfig: modelContainer == nil ? nil : config
     ))
     await registry.register(WebSearchTool())
 

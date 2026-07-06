@@ -27,6 +27,7 @@ struct RunCommand: AsyncParsableCommand {
 
     mutating func run() async throws {
         guard !args.testAbsorber.isTestInvocation else { return }
+        RemoteProviderRegistry.ensureConfigFileExists()
         let renderer = StreamRenderer(verbose: args.verbose)
         let interactiveInput = InteractiveInput()
         let frontend = LegacyTerminalFrontend(renderer: renderer, interactiveInput: interactiveInput)
@@ -69,7 +70,13 @@ struct RunCommand: AsyncParsableCommand {
         MemoryGuard.configure(budget: budget)
 
         let selectedModel = args.model
-        if !localModelExists(selectedModel) && !looksLikeHubModelID(selectedModel) {
+        let selectedBackend = InferenceBackend(modelPath: selectedModel)
+        if let providerID = selectedBackend.providerID, !RemoteProviderRegistry.isConfigured(providerID) {
+            renderer.printError("Online model selected but provider '\(providerID)' is not configured. Add it to ~/.mlx-coder/config.json.")
+            return
+        }
+
+        if selectedBackend.isLocal && !localModelExists(selectedModel) && !looksLikeHubModelID(selectedModel) {
             renderer.printStatus("No local model found at \(selectedModel).")
             renderer.printStatus("Using Apple Foundation fallback for this single prompt.")
             if await runAppleFoundationSinglePromptFallback(prompt: effectivePrompt, renderer: renderer) {
@@ -80,21 +87,63 @@ struct RunCommand: AsyncParsableCommand {
             return
         }
 
-        // Load model
-        renderer.printStatus("Loading model...")
-        let modelContainer: ModelContainer
-        do {
-            modelContainer = try await loadModelWithCancellation(
-                from: selectedModel,
-                memoryLimit: budget.totalBytes,
-                cacheLimit: budget.cacheBytes,
-                renderer: renderer
-            )
-        } catch is CancellationError {
-            return
-        } catch {
-            renderer.printError("Failed to load model: \(error.localizedDescription)")
-            return
+        // Load local model only for local backends; online backends stream over HTTP.
+        // `var` (not `let`) so we can drop this frame's strong reference once the
+        // AgentLoop actor owns the container (see `modelContainer = nil` below) and
+        // a later /model switch can fully reclaim the old model's weights.
+        var modelContainer: ModelContainer?
+        if selectedBackend.isOnline {
+            renderer.printStatus("Using online model \(selectedModel)")
+            modelContainer = nil
+        } else {
+            renderer.printStatus("Loading model...")
+            do {
+                modelContainer = try await loadModelWithCancellation(
+                    from: selectedModel,
+                    memoryLimit: budget.totalBytes,
+                    cacheLimit: budget.cacheBytes,
+                    renderer: renderer
+                )
+            } catch is CancellationError {
+                return
+            } catch {
+                renderer.printError("Failed to load model: \(error.localizedDescription)")
+                return
+            }
+        }
+
+        let draftModelPath = args.resolvedDraftModelPath(for: selectedModel)
+        let draftModel: AgentLoop.DraftModelHandle?
+        if let draftModelPath {
+            if selectedBackend.isOnline {
+                renderer.printStatus("Ignoring --draft-model for online backends.")
+                draftModel = nil
+            } else {
+                renderer.printStatus("Loading draft model...")
+                do {
+                    let draftContainer = try await loadModelWithCancellation(
+                        from: draftModelPath,
+                        memoryLimit: budget.totalBytes,
+                        cacheLimit: budget.cacheBytes,
+                        renderer: renderer
+                    )
+                    draftModel = await draftContainer.perform { context in
+                        AgentLoop.DraftModelHandle(model: context.model)
+                    }
+                    renderer.printStatus("Draft model loaded successfully")
+                } catch is CancellationError {
+                    return
+                } catch {
+                    if args.isDraftModelExplicitlyProvided {
+                        renderer.printError("Failed to load draft model: \(error.localizedDescription)")
+                        return
+                    }
+                    renderer.printStatus("Draft model unavailable (\(error.localizedDescription)). Continuing without speculative decoding.")
+                    draftModel = nil
+                }
+            }
+        } else {
+            draftModel = nil
         }
 
         // Run single prompt setup
@@ -107,13 +156,20 @@ struct RunCommand: AsyncParsableCommand {
             kvGroupSize: args.kvGroupSize ?? profile.kvGroupSize,
             quantizedKVStart: args.quantizedKVStart ?? profile.quantizedKVStart,
             longContextThreshold: profile.longContextThreshold,
-            turboQuantBits: args.turboQuantBits
+            turboQuantBits: args.turboQuantBits,
+            numDraftTokens: args.numDraftTokens
         )
         
         // Set up tools
         let workspacePath = NSString(string: args.workspace).expandingTildeInPath
         let absWorkspace = workspacePath.hasPrefix("/") ? workspacePath : FileManager.default.currentDirectoryPath + "/" + workspacePath
         let runtimeConfig = RuntimeConfigLoader.loadMerged(workspaceRoot: absWorkspace)
+        // Auto-load project env vars from <workspace>/.mlx-coder.env so child
+        // processes (bash tool, LSP servers, …) inherit them every session.
+        let workspaceEnv = WorkspaceEnvironment.applyToCurrentProcess(workspaceRoot: absWorkspace)
+        if !workspaceEnv.isEmpty {
+            renderer.printStatus("Loaded \(workspaceEnv.count) workspace env var(s) from \(WorkspaceEnvironment.fileName)")
+        }
         let effectiveApprovalMode = resolvedApprovalMode(from: args.approvalMode, runtimeConfig: runtimeConfig)
         let effectivePolicyFile = args.policyFile ?? runtimeConfig.defaultPolicyFile
         let effectiveAuditLogPath = args.auditLogPath ?? runtimeConfig.defaultAuditLogPath
@@ -139,6 +195,7 @@ struct RunCommand: AsyncParsableCommand {
             includeOverride: args.mcpInclude,
             excludeOverride: args.mcpExclude
         )
+        let skillsRegistry = SkillsRegistry(workspaceRoot: absWorkspace)
         await registerAllTools(
             registry: registry,
             permissions: permissions,
@@ -151,10 +208,10 @@ struct RunCommand: AsyncParsableCommand {
             mcpConfigs: mergedMCPConfigs(
                 runtimeConfigs: runtimeMCPConfigs,
                 cliConfig: makeMCPServerConfig(from: args)
-            )
+            ),
+            skillsRegistry: skillsRegistry
         )
 
-        let skillsRegistry = SkillsRegistry(workspaceRoot: absWorkspace)
         let skillMetadata = await skillsRegistry.listMetadata()
         let hooks = HookPipeline()
         await hooks.register(AuditHook(logger: auditLogger))
@@ -165,7 +222,8 @@ struct RunCommand: AsyncParsableCommand {
             thinkingLevel: .low,
             taskType: .general,
             workspaceRoot: absWorkspace,
-            skillsMetadata: skillMetadata
+            skillsMetadata: skillMetadata,
+            dialect: ToolCallDialect.detect(modelPath: selectedModel)
         )
 
         let agentLoop = AgentLoop(
@@ -175,6 +233,7 @@ struct RunCommand: AsyncParsableCommand {
             generationConfig: config,
             frontend: frontend,
             verbose: args.verbose,
+            promptCacheStats: args.promptCacheStats,
             systemPrompt: promptComposition.prompt,
             modelPath: selectedModel,
             workspace: absWorkspace,
@@ -186,8 +245,13 @@ struct RunCommand: AsyncParsableCommand {
             skillsMetadata: skillMetadata,
             promptSectionTokenEstimates: promptComposition.sectionTokenEstimates,
             memoryLimit: budget.totalBytes,
-            cacheLimit: budget.cacheBytes
+            cacheLimit: budget.cacheBytes,
+            draftModel: draftModel
         )
+
+        // The AgentLoop actor now holds the container. Release this frame's copy
+        // so that a later /model switch can fully reclaim the old model's weights.
+        modelContainer = nil
 
         let parsedPrompt = ImageAttachmentParser.parse(prompt: effectivePrompt)
         if !parsedPrompt.imageURLs.isEmpty {

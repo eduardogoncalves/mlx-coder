@@ -84,6 +84,7 @@ public struct SandboxEngine: Sendable {
             // .NET / NuGet
             "\(home)/.local/share/NuGet",
             "\(home)/.nuget",
+            "\(home)/.dotnet",
             // Node.js ecosystem
             "\(home)/.npm",
             "\(home)/.pnpm-store",

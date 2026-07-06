@@ -6,12 +6,12 @@ import Foundation
 /// Performs targeted search-and-replace edits on a file.
 public struct EditFileTool: Tool {
     public let name = "edit_file"
-    public let description = "Apply search-and-replace edits to an existing file. Preferred over full rewrites for making updates to existing files. Each edit replaces an exact match of old_text with new_text."
+    public let description = "Surgical search-and-replace for small, localized changes — not full rewrites. Match the shortest possible old_text (1–3 lines). Prefer multiple small edits. Omit unchanged context. If >30% of the file must change, ask first."
     public let parameters = JSONSchema(
         type: "object",
         properties: [
-            "path": PropertySchema(type: "string", description: "Path to the file to edit (relative to workspace root)"),
-            "old_text": PropertySchema(type: "string", description: "Exact text to find and replace"),
+            "path": PropertySchema(type: "string", description: "File path (relative to workspace root)"),
+            "old_text": PropertySchema(type: "string", description: "Exact snippet to replace (minimal, 1–3 lines)"),
             "new_text": PropertySchema(type: "string", description: "Replacement text"),
         ],
         required: ["path", "old_text", "new_text"]

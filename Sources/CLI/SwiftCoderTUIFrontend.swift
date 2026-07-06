@@ -54,6 +54,13 @@ public final class SwiftCoderTUIFrontend: AgentFrontend, @unchecked Sendable {
     private var pendingGenerationEnd: Bool = false
     private var markdownTableNormalizer = StreamingMarkdownTableNormalizer()
 
+    // Live token counters for the spinner label.
+    private var liveTokens: Int = 0          // ↓ chunks streamed this turn
+    private var promptTokenCount: Int = 0    // ↑ prompt tokens (from promptTokensKnown)
+    private var spinnerBaseLabel: String = "Processing…"
+    // Stats text captured from the backend; appended to the Turn complete line.
+    private var pendingTurnStats: String? = nil
+
     public init(renderer: Renderer, appConfig: AppConfig) {
         self.renderer = renderer
         self.appConfig = appConfig
@@ -205,6 +212,17 @@ public final class SwiftCoderTUIFrontend: AgentFrontend, @unchecked Sendable {
         }
     }
 
+    private static func kilo(_ n: Int) -> String {
+        n >= 1000 ? String(format: "%.1fk", Double(n) / 1000) : "\(n)"
+    }
+
+    private func spinnerLabel() -> String {
+        let up   = promptTokenCount > 0 ? " ↑ \(Self.kilo(promptTokenCount))" : ""
+        let down = liveTokens > 0      ? " ↓ \(liveTokens)" : ""
+        let sep  = !up.isEmpty && !down.isEmpty ? " ·" : ""
+        return "\(spinnerBaseLabel)\(up)\(sep)\(down)"
+    }
+
     private func render(_ event: AgentEvent) async {
         // Drop all events from a cancelled generation so late-arriving chunks,
         // stats, and lifecycle events cannot corrupt the footer after ESC.
@@ -223,12 +241,9 @@ public final class SwiftCoderTUIFrontend: AgentFrontend, @unchecked Sendable {
         switch event {
         case .assistantTextChunk(let text):
             guard generationActive else { return }
-            // First visible assistant token: transition spinner label from
-            // "Processing…" to "Generating…" so the user sees inference output.
-            if isFirstContentToken {
-                isFirstContentToken = false
-                await renderer.setThinking("Generating…")
-            }
+            isFirstContentToken = false
+            liveTokens += 1
+            await renderer.setThinking(spinnerLabel())
             // Keep backend output UI-agnostic: this is raw markdown. The TUI
             // renderer applies incremental ANSI formatting as chunks arrive.
             // Use appendStreamChunk (raw concat, no auto-space) because
@@ -244,18 +259,17 @@ public final class SwiftCoderTUIFrontend: AgentFrontend, @unchecked Sendable {
             case .started:
                 thinkingActive = true
                 thinkingBuffer = ""
-                isFirstContentToken = false  // thinking IS first content
+                spinnerBaseLabel = "Thinking…"
                 // Flush any partial assistant stream line before the think block.
                 await renderer.flushStreamLine()
-                await renderer.setThinking("Thinking…")
+                await renderer.setThinking(spinnerLabel())
             case .ended:
                 guard thinkingActive else { break }
                 thinkingActive = false
-                // Flush any remaining partial think line to scroll and restore
-                // "Generating…" label.
+                spinnerBaseLabel = "Generating…"
                 await renderer.flushThinkLine()
                 thinkingBuffer = ""
-                await renderer.setThinking("Generating…")
+                await renderer.setThinking(spinnerLabel())
                 if pendingGenerationEnd {
                     pendingGenerationEnd = false
                     await finalizeGenerationUI()
@@ -267,6 +281,8 @@ public final class SwiftCoderTUIFrontend: AgentFrontend, @unchecked Sendable {
             let normalized = normalizedThinkingDelta(incoming: text, alreadyRendered: thinkingBuffer)
             guard !normalized.isEmpty else { return }
             thinkingBuffer += normalized
+            liveTokens += 1
+            await renderer.setThinking(spinnerLabel())
             // Route through appendThinkChunk: complete lines go directly to
             // the scroll area; partial line is managed by the renderer.
             await renderer.appendThinkChunk(normalized)
@@ -304,11 +320,27 @@ public final class SwiftCoderTUIFrontend: AgentFrontend, @unchecked Sendable {
                 await renderer.renderFooter()
                 return
             }
-            // Hide the generation indicator before printing final token stats.
-            if s.severity == .info && s.text.hasPrefix("Generated ") {
+            // Intercept per-turn generation stats (starts with "↑"). Store for
+            // the Turn complete line and suppress the separate dim stats line.
+            // For remote providers, stats arrive before generationActivity.ended,
+            // so we also need to trigger finalizeGenerationUI here.
+            if s.severity == .info && s.text.hasPrefix("↑") {
+                pendingTurnStats = s.text
                 if tokenProcessingActive || generationActive || thinkingActive || pendingGenerationEnd {
                     await finalizeGenerationUI()
                 }
+                return
+            }
+            // Append pending stats to the Turn complete success line.
+            if s.severity == .success && s.text.hasPrefix("Turn complete.") {
+                if tokenProcessingActive || generationActive || thinkingActive || pendingGenerationEnd {
+                    await finalizeGenerationUI()
+                }
+                await renderer.flushStreamLine()
+                let statsStr = pendingTurnStats.map { " \(DesignSystem.dim)· \($0)" } ?? ""
+                pendingTurnStats = nil
+                await renderer.printScrollLine("\u{001B}[92m✓ \(s.text)\(DesignSystem.reset)\(statsStr)\(DesignSystem.reset)")
+                return
             }
             // Flush any partial streaming line to scroll BEFORE the status
             // message so the response text always precedes its own stats line.
@@ -394,6 +426,10 @@ public final class SwiftCoderTUIFrontend: AgentFrontend, @unchecked Sendable {
         case .steeringInjected(let s):
             await renderer.printScrollLine("\(DesignSystem.dim)steering: \(s)\(DesignSystem.reset)")
 
+        case .promptTokensKnown(let count):
+            promptTokenCount = count
+            await renderer.setThinking(spinnerLabel())
+
         case .tokenProcessingActivity(let lifecycle):
             switch lifecycle {
             case .started:
@@ -405,16 +441,20 @@ public final class SwiftCoderTUIFrontend: AgentFrontend, @unchecked Sendable {
                 thinkingBuffer = ""
                 isFirstContentToken = true
                 markdownTableNormalizer.reset()
+                liveTokens = 0
+                promptTokenCount = 0
+                spinnerBaseLabel = "Processing…"
+                pendingTurnStats = nil
                 await renderer.setThinking("Processing…")
                 await renderer.setGenerating(true)
                 await renderer.renderFooter()
                 startSpinnerTicker()
             case .ended:
                 tokenProcessingActive = false
-                if !generationActive {
-                    await renderer.setThinking("Generating…")
-                    await renderer.renderFooter()
-                }
+                // Keep the processing label through prompt decode / generation
+                // handoff. Downstream events (think or assistant text) select the
+                // specific active label.
+                await renderer.renderFooter()
             }
 
         case .generationActivity(let lifecycle):
@@ -424,7 +464,11 @@ public final class SwiftCoderTUIFrontend: AgentFrontend, @unchecked Sendable {
                 tokenProcessingActive = false
                 isFirstContentToken = true
                 markdownTableNormalizer.reset()
-                await renderer.setThinking("Generating…")
+                // Switch to "Generating…" immediately so the ↑ count (if known)
+                // is visible from the first spinner tick — not deferred until the
+                // first text token arrives.
+                spinnerBaseLabel = "Generating…"
+                await renderer.setThinking(spinnerLabel())
                 await renderer.renderFooter()
             case .ended:
                 let wasActive = tokenProcessingActive || generationActive || thinkingActive || pendingGenerationEnd

@@ -22,6 +22,11 @@ public final class LegacyTerminalFrontend: AgentFrontend, @unchecked Sendable {
     /// The legacy terminal spinner — owned by this adapter so AgentCore stays
     /// frontend-agnostic.
     private var spinner: Spinner?
+    private var thinkingActive = false
+    private var generationActive = false
+    private var didRenderAssistantChunkInGeneration = false
+    private var pendingSpinnerStopTask: Task<Void, Never>?
+    private let spinnerStopDebounceNanoseconds: UInt64 = 120_000_000
 
     public init(renderer: StreamRenderer, interactiveInput: InteractiveInput) {
         self.renderer = renderer
@@ -33,27 +38,60 @@ public final class LegacyTerminalFrontend: AgentFrontend, @unchecked Sendable {
     public func emit(_ event: AgentEvent) {
         switch event {
         case .assistantTextChunk(let text):
+            // Once visible content arrives, stop spinner immediately to avoid
+            // redraw races that can overwrite streamed assistant output.
+            if !didRenderAssistantChunkInGeneration {
+                didRenderAssistantChunkInGeneration = true
+                // Clear spinner row synchronously before printing the first
+                // assistant token so no stale "Thinking..." line remains.
+                clearCurrentTerminalLine()
+            }
+            stopSpinnerImmediately()
             renderer.printChunk(text)
 
         case .thinkingActivity(let lifecycle):
             if lifecycle == .started {
+                thinkingActive = true
+                // In non-verbose mode, thinking chunks are hidden. Keep a spinner
+                // visible so the user knows generation is still progressing.
+                if !renderer.verbose {
+                    showSpinner(message: "Thinking...")
+                }
                 renderer.startThinking()
             } else {
+                thinkingActive = false
+                if !renderer.verbose {
+                    if generationActive {
+                        showSpinner(message: "Generating...")
+                    } else {
+                        stopSpinnerDebounced()
+                    }
+                }
                 renderer.endThinking()
             }
 
         case .tokenProcessingActivity(let lifecycle):
             if lifecycle == .started {
-                startOrUpdateSpinner(message: "Processing...")
+                showSpinner(message: "Processing...")
             } else {
-                startOrUpdateSpinner(message: "Generating...")
+                // Debounce stop so rapid Processing -> Thinking/Generating
+                // transitions don't flicker in short responses.
+                stopSpinnerDebounced()
             }
 
         case .generationActivity(let lifecycle):
             if lifecycle == .started {
-                startOrUpdateSpinner(message: "Generating...")
+                generationActive = true
+                didRenderAssistantChunkInGeneration = false
+                if !thinkingActive {
+                    showSpinner(message: "Generating...")
+                }
             } else {
-                stopSpinner()
+                generationActive = false
+                didRenderAssistantChunkInGeneration = false
+                if !thinkingActive {
+                    stopSpinnerDebounced()
+                }
             }
 
         case .thinkingChunk(let text):
@@ -75,10 +113,14 @@ public final class LegacyTerminalFrontend: AgentFrontend, @unchecked Sendable {
         case .status(let status):
             // Severity is informational only for the legacy renderer —
             // it has a single printStatus formatting style.
+            if status.text.hasPrefix("Generated ") {
+                // Keep token stats visually separated from streamed assistant text.
+                print()
+            }
             renderer.printStatus(status.text)
 
         case .error(let text):
-            stopSpinner()
+            stopSpinnerImmediately()
             renderer.printError(text)
 
         case .stats(let stats):
@@ -156,6 +198,9 @@ public final class LegacyTerminalFrontend: AgentFrontend, @unchecked Sendable {
         case .steeringInjected(let msg):
             renderer.printStatus("↩️  Steering: \(msg)")
 
+        case .promptTokensKnown:
+            break
+
         }
     }
 
@@ -198,10 +243,33 @@ public final class LegacyTerminalFrontend: AgentFrontend, @unchecked Sendable {
         Task { await s.start() }
     }
 
-    private func stopSpinner() {
+    private func showSpinner(message: String) {
+        pendingSpinnerStopTask?.cancel()
+        pendingSpinnerStopTask = nil
+        startOrUpdateSpinner(message: message)
+    }
+
+    private func stopSpinnerDebounced() {
+        pendingSpinnerStopTask?.cancel()
+        guard let s = spinner else { return }
+        let delay = spinnerStopDebounceNanoseconds
+        pendingSpinnerStopTask = Task {
+            try? await Task.sleep(nanoseconds: delay)
+            guard !Task.isCancelled else { return }
+            await s.stop(clearLine: true)
+        }
+    }
+
+    private func stopSpinnerImmediately() {
+        pendingSpinnerStopTask?.cancel()
+        pendingSpinnerStopTask = nil
         if let s = spinner {
-            spinner = nil
             Task { await s.stop(clearLine: true) }
         }
+    }
+
+    private func clearCurrentTerminalLine() {
+        print("\r\u{001B}[2K\r", terminator: "")
+        fflush(stdout)
     }
 }

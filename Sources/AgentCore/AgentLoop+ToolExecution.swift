@@ -6,7 +6,8 @@ import Foundation
 extension AgentLoop {
 
     func registerToolsInternal() async {
-        guard let modelContainer else { return }
+        // Tools that do NOT depend on a loaded local model container — these
+        // register on every backend, including online ones (OpenRouter etc.).
 
         // Filesystem tools
         await registry.register(ReadFileTool(permissions: permissions))
@@ -26,24 +27,13 @@ extension AgentLoop {
         // Shell
         await registry.register(BashTool(permissions: permissions, useSandbox: useSandbox))
 
-        // Agent tools
-        await registry.register(TaskTool(
-            modelContainer: modelContainer,
-            permissions: permissions,
-            generationConfig: currentGenerationConfig,
-            modelPath: modelPath,
-            useSandbox: useSandbox,
-            parentRegistry: registry,
-            frontend: frontend
-        ))
+        // Agent tools that don't need a model container
         await registry.register(TodoTool(workspaceRoot: permissions.workspaceRoot))
-        await registry.register(ProjectExpertLoRATool(modelContainer: modelContainer, workspaceRoot: permissions.workspaceRoot, modelPath: modelPath, frontend: frontend))
 
-        // Web tools
-        await registry.register(WebFetchTool(
-            modelContainer: modelContainer,
-            generationConfig: currentGenerationConfig
-        ))
+        // Skills
+        await registry.register(ReadSkillTool(skills: SkillsRegistry(workspaceRoot: permissions.workspaceRoot)))
+
+        // Web tools that don't need a model container
         await registry.register(WebSearchTool())
 
         // LSP tools (.NET/C#)
@@ -55,6 +45,32 @@ extension AgentLoop {
         await registry.register(LSPSignatureHelpTool(permissions: permissions))
         await registry.register(LSPDocumentSymbolsTool(permissions: permissions))
         await registry.register(LSPRenameTool(permissions: permissions))
+
+        // Memory tools
+        await registry.register(LogKnowledgeTool(workspaceRoot: permissions.workspaceRoot))
+        await registry.register(SearchKnowledgeTool(workspaceRoot: permissions.workspaceRoot))
+
+        // Tools that REQUIRE a loaded local MLX container (sub-agent spawning,
+        // local web summarization, LoRA-backed expert routing). Skipped on online
+        // backends — those flows would themselves need an HTTP-backed equivalent
+        // before they'd be useful, and TaskTool's parent registry crash would
+        // otherwise fire mid-turn.
+        if let modelContainer {
+            await registry.register(TaskTool(
+                modelContainer: modelContainer,
+                permissions: permissions,
+                generationConfig: currentGenerationConfig,
+                modelPath: modelPath,
+                useSandbox: useSandbox,
+                parentRegistry: registry,
+                frontend: frontend
+            ))
+            await registry.register(ProjectExpertLoRATool(modelContainer: modelContainer, workspaceRoot: permissions.workspaceRoot, modelPath: modelPath, frontend: frontend))
+            await registry.register(WebFetchTool(
+                modelContainer: modelContainer,
+                generationConfig: currentGenerationConfig
+            ))
+        }
     }
 
     func extractPolicyTargetPath(from arguments: [String: Any]) -> String? {
@@ -184,6 +200,91 @@ extension AgentLoop {
         return text
     }
 
+    // MARK: - Truncated Streamed Tool Call Recovery
+
+    /// Result of committing a partially-streamed write to disk: the user-visible
+    /// `ToolResult` plus the tail of the saved content so the agent can hint the
+    /// model about where to resume from.
+    struct TruncatedWriteCommit {
+        let result: ToolResult
+        let tail: String
+    }
+
+    /// Commits a partially-streamed write to its target path so the bytes already
+    /// produced by the model are not wasted. Only `write_file` and `append_file`
+    /// are recoverable this way: their semantics tolerate an incremental commit
+    /// + later append. Other tools (e.g. `edit_file`) need their full payload
+    /// before they can be applied and are not handled here.
+    func commitTruncatedStreamedWrite(_ call: TruncatedStreamedToolCall) async -> TruncatedWriteCommit {
+        let resolvedPath: String
+        do {
+            resolvedPath = try permissions.validatePath(call.path)
+        } catch {
+            try? FileManager.default.removeItem(at: call.contentFile)
+            return TruncatedWriteCommit(result: .error(error.localizedDescription), tail: "")
+        }
+
+        guard let tmpContent = try? String(contentsOf: call.contentFile, encoding: .utf8) else {
+            try? FileManager.default.removeItem(at: call.contentFile)
+            return TruncatedWriteCommit(result: .error("Failed to read truncated streamed content for \(call.path)"), tail: "")
+        }
+
+        let targetURL = URL(fileURLWithPath: resolvedPath)
+        let parentDir = targetURL.deletingLastPathComponent()
+        do {
+            try FileManager.default.createDirectory(at: parentDir, withIntermediateDirectories: true)
+        } catch {
+            try? FileManager.default.removeItem(at: call.contentFile)
+            return TruncatedWriteCommit(result: .error("Failed to prepare directory for \(call.path): \(error.localizedDescription)"), tail: "")
+        }
+
+        do {
+            switch call.toolName {
+            case "write_file":
+                if FileManager.default.fileExists(atPath: targetURL.path) {
+                    _ = try FileManager.default.replaceItemAt(targetURL, withItemAt: call.contentFile)
+                } else {
+                    try FileManager.default.moveItem(at: call.contentFile, to: targetURL)
+                }
+                let finalText = (try? String(contentsOf: targetURL, encoding: .utf8)) ?? tmpContent
+                let tail = String(finalText.suffix(200))
+                return TruncatedWriteCommit(
+                    result: .success("Recovered partial write_file to \(call.path) (\(tmpContent.count) bytes). Generation was truncated; use append_file to add the remaining content."),
+                    tail: tail
+                )
+
+            case "append_file":
+                if let fh = try? FileHandle(forWritingTo: targetURL) {
+                    defer { try? fh.close() }
+                    try fh.seekToEnd()
+                    try fh.write(contentsOf: Data(tmpContent.utf8))
+                } else {
+                    try tmpContent.write(toFile: resolvedPath, atomically: true, encoding: .utf8)
+                }
+                try? FileManager.default.removeItem(at: call.contentFile)
+                let finalText = (try? String(contentsOf: targetURL, encoding: .utf8)) ?? tmpContent
+                let tail = String(finalText.suffix(200))
+                return TruncatedWriteCommit(
+                    result: .success("Recovered partial append_file to \(call.path) (\(tmpContent.count) bytes). Generation was truncated; use append_file again to add the remaining content."),
+                    tail: tail
+                )
+
+            default:
+                try? FileManager.default.removeItem(at: call.contentFile)
+                return TruncatedWriteCommit(
+                    result: .error("Truncated streamed tool '\(call.toolName)' cannot be recovered automatically; the partial content was discarded."),
+                    tail: ""
+                )
+            }
+        } catch {
+            try? FileManager.default.removeItem(at: call.contentFile)
+            return TruncatedWriteCommit(
+                result: .error("Failed to recover partial \(call.toolName) for \(call.path): \(error.localizedDescription)"),
+                tail: ""
+            )
+        }
+    }
+
     // MARK: - Streamed Tool Call Handling
 
     /// Handles a tool call whose content was streamed to a .tmp file during generation.
@@ -215,20 +316,39 @@ extension AgentLoop {
         let previewContent: String
         switch call.toolName {
         case "edit_file":
-            if let originalContent,
-               let oldText = (
-                (call.otherArgs["old_text"] as? String)
-                ?? (call.otherArgs["oldText"] as? String)
-                ?? (call.otherArgs["old"] as? String)
-                ?? (call.otherArgs["search_text"] as? String)
-                ?? (call.otherArgs["searchText"] as? String)
-               ),
-               !oldText.isEmpty,
-               let range = originalContent.range(of: oldText) {
-                previewContent = originalContent.replacingCharacters(in: range, with: tmpContent)
+            if let originalContent {
+                var previewArguments = call.otherArgs
+                previewArguments["path"] = call.path
+                previewArguments["new_text"] = tmpContent
+
+                let correctedPreviewArguments = await ParameterCorrectionService.correct(
+                    toolName: "edit_file",
+                    arguments: previewArguments,
+                    workspaceRoot: permissions.effectiveWorkspaceRoot
+                ).correctedArguments
+
+                let oldText = (
+                    correctedPreviewArguments["old_text"] as? String
+                ) ?? (
+                    correctedPreviewArguments["oldText"] as? String
+                ) ?? (
+                    correctedPreviewArguments["old"] as? String
+                ) ?? (
+                    correctedPreviewArguments["search_text"] as? String
+                ) ?? (
+                    correctedPreviewArguments["searchText"] as? String
+                )
+
+                if let oldText,
+                   !oldText.isEmpty,
+                   let range = originalContent.range(of: oldText) {
+                    previewContent = originalContent.replacingCharacters(in: range, with: tmpContent)
+                } else {
+                    // If preview-time matching fails, keep the original content so we do not
+                    // show a misleading full-file replacement diff for a localized edit.
+                    previewContent = originalContent
+                }
             } else {
-                // Fallback for malformed/partial arguments; execution-time correction
-                // still handles these cases before writing.
                 previewContent = tmpContent
             }
         case "append_file":

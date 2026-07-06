@@ -42,17 +42,30 @@ public actor SkillsRegistry {
             .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
     }
 
+    public func metadata(name: String) -> SkillMetadata? {
+        resolveEntry(name: name)?.metadata
+    }
+
     public func loadBody(name: String) throws -> String? {
-        if let cached = cachedBodies[name] {
-            return cached
-        }
-        guard let entry = entriesByName[name] else {
+        guard let entry = resolveEntry(name: name) else {
             return nil
+        }
+        if let cached = cachedBodies[entry.metadata.name] {
+            return cached
         }
 
         let body = try String(contentsOfFile: entry.absolutePath, encoding: .utf8)
-        cachedBodies[name] = body
+        cachedBodies[entry.metadata.name] = body
         return body
+    }
+
+    /// Exact lookup first, then case-insensitive fallback so model-typed names
+    /// like "Dotnet-CLI" still resolve to "dotnet-cli".
+    private func resolveEntry(name: String) -> SkillEntry? {
+        if let entry = entriesByName[name] {
+            return entry
+        }
+        return entriesByName.first { $0.key.caseInsensitiveCompare(name) == .orderedSame }?.value
     }
 
     private static func discoverSkills(

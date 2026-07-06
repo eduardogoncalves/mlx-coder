@@ -24,10 +24,14 @@ extension AgentLoop {
             workspaceRoot: permissions.effectiveWorkspaceRoot,
             memorySection: memoryPromptSection,
             customizationSection: customizationPromptSection,
-            skillsMetadata: skillsMetadata
+            skillsMetadata: skillsMetadata,
+            dialect: toolCallDialect
         )
         promptSectionTokenEstimates = composition.sectionTokenEstimates
         history.updateSystemPrompt(composition.prompt)
+        // The system prompt sits at the very front of every turn's token stream, so
+        // replacing it invalidates the shared prefix the persisted KV cache relies on.
+        promptCache.invalidate(reason: "system prompt changed")
         
         let status = enabled ? "\u{001B}[32mEnabled\u{001B}[0m" : "\u{001B}[31mDisabled\u{001B}[0m"
         frontend.emitStatus("macOS Seatbelt Sandbox: \(status)")
@@ -58,10 +62,14 @@ extension AgentLoop {
             workspaceRoot: permissions.effectiveWorkspaceRoot,
             memorySection: memoryPromptSection,
             customizationSection: customizationPromptSection,
-            skillsMetadata: skillsMetadata
+            skillsMetadata: skillsMetadata,
+            dialect: toolCallDialect
         )
         promptSectionTokenEstimates = composition.sectionTokenEstimates
         history.updateSystemPrompt(composition.prompt)
+        // The system prompt sits at the very front of every turn's token stream, so
+        // replacing it invalidates the shared prefix the persisted KV cache relies on.
+        promptCache.invalidate(reason: "system prompt changed")
         
         if !silent {
             frontend.emit(.modeChanged(ModeSnapshot(
@@ -89,10 +97,14 @@ extension AgentLoop {
             workspaceRoot: permissions.effectiveWorkspaceRoot,
             memorySection: memoryPromptSection,
             customizationSection: customizationPromptSection,
-            skillsMetadata: skillsMetadata
+            skillsMetadata: skillsMetadata,
+            dialect: toolCallDialect
         )
         promptSectionTokenEstimates = composition.sectionTokenEstimates
         history.updateSystemPrompt(composition.prompt)
+        // The system prompt sits at the very front of every turn's token stream, so
+        // replacing it invalidates the shared prefix the persisted KV cache relies on.
+        promptCache.invalidate(reason: "system prompt changed")
         
         frontend.emit(.modeChanged(ModeSnapshot(
             workingMode: mode.rawValue,
@@ -153,10 +165,14 @@ extension AgentLoop {
             workspaceRoot: permissions.effectiveWorkspaceRoot,
             memorySection: memoryPromptSection,
             customizationSection: customizationPromptSection,
-            skillsMetadata: skillsMetadata
+            skillsMetadata: skillsMetadata,
+            dialect: toolCallDialect
         )
         promptSectionTokenEstimates = composition.sectionTokenEstimates
         history.updateSystemPrompt(composition.prompt)
+        // The system prompt sits at the very front of every turn's token stream, so
+        // replacing it invalidates the shared prefix the persisted KV cache relies on.
+        promptCache.invalidate(reason: "system prompt changed")
         
         frontend.emit(.modeChanged(ModeSnapshot(
             workingMode: mode.rawValue,
@@ -320,7 +336,8 @@ extension AgentLoop {
             kvBits: current.kvBits,
             kvGroupSize: current.kvGroupSize,
             quantizedKVStart: current.quantizedKVStart,
-            longContextThreshold: current.longContextThreshold
+            longContextThreshold: current.longContextThreshold,
+            numDraftTokens: current.numDraftTokens
         )
     }
 }

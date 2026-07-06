@@ -499,7 +499,8 @@ public struct TaskTool: Tool {
             mode: .agent, // Sub-agents are usually agents
             thinkingLevel: .high, // Default to high for sub-agents
             taskType: .general,
-            baseInstructions: baseInstructions
+            baseInstructions: baseInstructions,
+            dialect: ToolCallDialect.detect(modelPath: modelPath)
         )
 
         // Instantiate a fresh AgentLoop with isolated history
@@ -646,6 +647,8 @@ public struct TaskTool: Tool {
             await registry.register(BashTool(permissions: permissions, useSandbox: useSandbox))
         case "todo":
             await registry.register(TodoTool(workspaceRoot: permissions.workspaceRoot))
+        case "read_skill":
+            await registry.register(ReadSkillTool(skills: SkillsRegistry(workspaceRoot: permissions.workspaceRoot)))
         case "project_expert_lora":
             await registry.register(ProjectExpertLoRATool(modelContainer: modelContainer, workspaceRoot: permissions.workspaceRoot, modelPath: modelPath, frontend: frontend))
         case "web_fetch":

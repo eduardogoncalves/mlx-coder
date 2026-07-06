@@ -270,6 +270,21 @@ public struct BashTool: Tool {
         }
         // Ensure secure PATH and include Apple Silicon Homebrew locations.
         env["PATH"] = "/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+
+        // Project-scoped variables from <workspace>/.mlx-coder.env (sanitized;
+        // PATH entries are appended after the secure PATH, never replace it).
+        // Loaded per call so file edits apply without restarting the agent.
+        let workspaceEnv = WorkspaceEnvironment.load(workspaceRoot: permissions.effectiveWorkspaceRoot)
+        env = WorkspaceEnvironment.merge(into: env, workspace: workspaceEnv)
+
+        // The Seatbelt profile denies home-directory access, which breaks the
+        // dotnet CLI's home detection ("The user's home directory could not be
+        // determined"). dotnet's documented escape hatch is DOTNET_CLI_HOME, so
+        // default it to a workspace-local dir (writable inside the sandbox)
+        // unless the workspace env already sets it.
+        if useSandbox, env["DOTNET_CLI_HOME"] == nil {
+            env["DOTNET_CLI_HOME"] = permissions.effectiveWorkspaceRoot + "/.dotnet"
+        }
         return env
     }
 

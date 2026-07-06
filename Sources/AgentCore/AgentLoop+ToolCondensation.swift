@@ -23,13 +23,34 @@ extension AgentLoop {
             charsPerToken: condensationConfig.charsPerTokenEstimate
         )
 
+        // web_fetch already does its pre-processing outside the main context: it
+        // strips HTML, caches the full page to disk, and returns only a bounded
+        // window with a continuation marker ("call web_fetch again with offset N —
+        // served from cache"). Re-truncating here with a generic char cap would drop
+        // that continuation guidance and cut the payload mid-structure (e.g. a JSON
+        // body), which makes the model hallucinate the missing tail. Pass the
+        // already-bounded output through verbatim (with the fact-only preamble) so
+        // the model can page through the rest deterministically from cache.
+        if toolName == "web_fetch" {
+            let passthrough = applyFactOnlyPreambleIfNeeded(toolName: toolName, toolResponse: rawToolResponse)
+            let afterTokens = ToolResultCondensationPolicy.estimatedTokenCount(
+                for: passthrough,
+                charsPerToken: condensationConfig.charsPerTokenEstimate
+            )
+            await hooks.emit(.compression(toolName: toolName, beforeTokens: beforeTokens, afterTokens: afterTokens, usedFallback: true))
+            if verbose {
+                frontend.emitStatus("[debug] web_fetch output passed through tool-bounded window (continuation-aware): before≈\(beforeTokens) tokens, after≈\(afterTokens)")
+            }
+            return passthrough
+        }
+
         // Some checkpoints are unstable when invoked for secondary summarization
         // passes after file-read tools or web tools. Use bounded raw fallback directly
         // to avoid re-entrant MLX model invocations that corrupt the KV-cache state
         // and cause empty-tensor crashes on the next generation turn.
         // bash/task are included for the same reason: large shell output (e.g. dotnet
         // package restore) triggers LLM summarization mid-turn, corrupting KV state.
-        let nonLLMCondensationTools: Set<String> = ["read_file", "read_many", "web_fetch", "web_search", "bash", "task"]
+        let nonLLMCondensationTools: Set<String> = ["read_file", "read_many", "web_search", "bash", "task"]
         if nonLLMCondensationTools.contains(toolName) {
             let fallback = ToolResultCondensationPolicy.boundedFallbackRawMessage(
                 toolName: toolName,
@@ -150,7 +171,8 @@ extension AgentLoop {
             frequencyContextSize: currentGenerationConfig.frequencyContextSize,
             kvBits: currentGenerationConfig.kvBits,
             kvGroupSize: currentGenerationConfig.kvGroupSize,
-            quantizedKVStart: currentGenerationConfig.quantizedKVStart
+            quantizedKVStart: currentGenerationConfig.quantizedKVStart,
+            numDraftTokens: currentGenerationConfig.numDraftTokens
         )
 
         let chatML = """

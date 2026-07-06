@@ -19,6 +19,9 @@ struct ChatCommand: AsyncParsableCommand {
 
     mutating func run() async throws {
         guard !args.testAbsorber.isTestInvocation else { return }
+        if RemoteProviderRegistry.ensureConfigFileExists() {
+            print("Created \(RemoteProviderRegistry.filePath) with a commented sample provider. Edit it to add remote models.")
+        }
         let renderer = StreamRenderer(verbose: args.verbose)
         let interactiveInput = InteractiveInput()
         interactiveInput.voiceSilenceTimeout = args.voiceSilenceTimeout
@@ -36,8 +39,13 @@ struct ChatCommand: AsyncParsableCommand {
         renderer.printStatus("Detected \(chipInfo.family.rawValue) with \(String(format: "%.0f", chipInfo.totalMemoryGB)) GB RAM")
         renderer.printStatus("Memory budget: \(budget.totalBytes / 1_000_000) MB")
 
+        if let providerID = InferenceBackend(modelPath: selectedModel).providerID, !RemoteProviderRegistry.isConfigured(providerID) {
+            renderer.printError("Online model selected but provider '\(providerID)' is not configured. Add it to ~/.mlx-coder/config.json.")
+            return
+        }
+
         // If no local model exists, ask whether to download a recommended MLX model.
-        if !localModelExists(selectedModel) && !looksLikeHubModelID(selectedModel) {
+        if InferenceBackend(modelPath: selectedModel).isLocal && !localModelExists(selectedModel) && !looksLikeHubModelID(selectedModel) {
             renderer.printStatus("No local model found at \(selectedModel).")
             if let chosenHubModel = promptForRecommendedModelDownload() {
                 selectedModel = chosenHubModel
@@ -52,23 +60,68 @@ struct ChatCommand: AsyncParsableCommand {
             }
         }
 
-        // Load model
-        renderer.printStatus("Loading model from \(selectedModel)...")
-        let modelContainer: ModelContainer
-        do {
-            modelContainer = try await loadModelWithCancellation(
-                from: selectedModel,
-                memoryLimit: budget.totalBytes,
-                cacheLimit: budget.cacheBytes,
-                renderer: renderer
-            )
-        } catch is CancellationError {
-            return
-        } catch {
-            renderer.printError("Failed to load model: \(error.localizedDescription)")
-            return
+        let selectedBackend = InferenceBackend(modelPath: selectedModel)
+
+        // Load local model only for local backends; online backends stream over HTTP.
+        // `var` (not `let`) so we can drop this frame's strong reference once the
+        // AgentLoop actor owns the container — see the `modelContainer = nil`
+        // below. run() lives for the whole session, so a lingering reference here
+        // would pin the initial model's weights forever and double RAM on /model.
+        var modelContainer: ModelContainer?
+        if selectedBackend.isOnline {
+            renderer.printStatus("Using online model \(selectedModel)")
+            modelContainer = nil
+        } else {
+            renderer.printStatus("Loading model from \(selectedModel)...")
+            do {
+                modelContainer = try await loadModelWithCancellation(
+                    from: selectedModel,
+                    memoryLimit: budget.totalBytes,
+                    cacheLimit: budget.cacheBytes,
+                    renderer: renderer
+                )
+            } catch is CancellationError {
+                return
+            } catch {
+                renderer.printError("Failed to load model: \(error.localizedDescription)")
+                return
+            }
+            renderer.printStatus("Model loaded successfully")
         }
-        renderer.printStatus("Model loaded successfully")
+
+        let draftModelPath = args.resolvedDraftModelPath(for: selectedModel)
+        let draftModel: AgentLoop.DraftModelHandle?
+        if let draftModelPath {
+            if selectedBackend.isOnline {
+                renderer.printStatus("Ignoring --draft-model for online backends.")
+                draftModel = nil
+            } else {
+                renderer.printStatus("Loading draft model from \(draftModelPath)...")
+                do {
+                    let draftContainer = try await loadModelWithCancellation(
+                        from: draftModelPath,
+                        memoryLimit: budget.totalBytes,
+                        cacheLimit: budget.cacheBytes,
+                        renderer: renderer
+                    )
+                    draftModel = await draftContainer.perform { context in
+                        AgentLoop.DraftModelHandle(model: context.model)
+                    }
+                    renderer.printStatus("Draft model loaded successfully")
+                } catch is CancellationError {
+                    return
+                } catch {
+                    if args.isDraftModelExplicitlyProvided {
+                        renderer.printError("Failed to load draft model: \(error.localizedDescription)")
+                        return
+                    }
+                    renderer.printStatus("Draft model unavailable (\(error.localizedDescription)). Continuing without speculative decoding.")
+                    draftModel = nil
+                }
+            }
+        } else {
+            draftModel = nil
+        }
 
         // Start update check in background so it runs in parallel with the rest of setup.
         // We'll collect the result right before the REPL header so the notice always
@@ -85,6 +138,12 @@ struct ChatCommand: AsyncParsableCommand {
         // so that project_root values are consistent across sessions.
         let absWorkspace = URL(fileURLWithPath: rawWorkspace).standardized.path
         let runtimeConfig = RuntimeConfigLoader.loadMerged(workspaceRoot: absWorkspace)
+        // Auto-load project env vars from <workspace>/.mlx-coder.env so child
+        // processes (bash tool, LSP servers, …) inherit them every session.
+        let workspaceEnv = WorkspaceEnvironment.applyToCurrentProcess(workspaceRoot: absWorkspace)
+        if !workspaceEnv.isEmpty {
+            renderer.printStatus("Loaded \(workspaceEnv.count) workspace env var(s) from \(WorkspaceEnvironment.fileName)")
+        }
         let effectiveApprovalMode = resolvedApprovalMode(from: args.approvalMode, runtimeConfig: runtimeConfig)
         let effectivePolicyFile = args.policyFile ?? runtimeConfig.defaultPolicyFile
         let effectiveAuditLogPath = args.auditLogPath ?? runtimeConfig.defaultAuditLogPath
@@ -113,7 +172,8 @@ struct ChatCommand: AsyncParsableCommand {
             kvGroupSize: args.kvGroupSize ?? profile.kvGroupSize,
             quantizedKVStart: args.quantizedKVStart ?? profile.quantizedKVStart,
             longContextThreshold: profile.longContextThreshold,
-            turboQuantBits: args.turboQuantBits
+            turboQuantBits: args.turboQuantBits,
+            numDraftTokens: args.numDraftTokens
         )
 
         // Set up tool registry
@@ -123,6 +183,7 @@ struct ChatCommand: AsyncParsableCommand {
             includeOverride: args.mcpInclude,
             excludeOverride: args.mcpExclude
         )
+        let skillsRegistry = SkillsRegistry(workspaceRoot: absWorkspace)
         await registerAllTools(
             registry: registry,
             permissions: permissions,
@@ -135,14 +196,14 @@ struct ChatCommand: AsyncParsableCommand {
             mcpConfigs: mergedMCPConfigs(
                 runtimeConfigs: runtimeMCPConfigs,
                 cliConfig: makeMCPServerConfig(from: args)
-            )
+            ),
+            skillsRegistry: skillsRegistry
         )
 
         let toolCount = await registry.count
         renderer.printStatus("Registered \(toolCount) tools")
 
         // Build layered system prompt with optional skills metadata and memory restoration.
-        let skillsRegistry = SkillsRegistry(workspaceRoot: absWorkspace)
         let skillMetadata = await skillsRegistry.listMetadata()
         let hooks = HookPipeline()
         await hooks.register(AuditHook(logger: auditLogger))
@@ -158,7 +219,8 @@ struct ChatCommand: AsyncParsableCommand {
             taskType: .general,
             workspaceRoot: absWorkspace,
             memorySection: memorySection,
-            skillsMetadata: skillMetadata
+            skillsMetadata: skillMetadata,
+            dialect: ToolCallDialect.detect(modelPath: selectedModel)
         )
 
         let agentLoop = AgentLoop(
@@ -168,6 +230,7 @@ struct ChatCommand: AsyncParsableCommand {
             generationConfig: config,
             frontend: frontend,
             verbose: args.verbose,
+            promptCacheStats: args.promptCacheStats,
             systemPrompt: promptComposition.prompt,
             modelPath: selectedModel,
             workspace: absWorkspace,
@@ -179,8 +242,14 @@ struct ChatCommand: AsyncParsableCommand {
             skillsMetadata: skillMetadata,
             promptSectionTokenEstimates: promptComposition.sectionTokenEstimates,
             memoryLimit: budget.totalBytes,
-            cacheLimit: budget.cacheBytes
+            cacheLimit: budget.cacheBytes,
+            draftModel: draftModel
         )
+
+        // The AgentLoop actor now holds the container. Release this frame's copy
+        // so that a later /model switch (which unloads AgentLoop's reference and
+        // clears the tool registry) can fully reclaim the old model's weights.
+        modelContainer = nil
 
         // Wire up raw-terminal approval UI for the legacy (non-TUI) path.
         // The TUI path (SwiftCoderTUIFrontend) handles approvals via renderer.requestApproval.
@@ -262,6 +331,20 @@ struct ChatCommand: AsyncParsableCommand {
             var modelConfigs = localModelIDs.map { AppConfig.ModelConfig(id: $0, label: $0) }
             if !modelConfigs.contains(where: { $0.id.caseInsensitiveCompare(selectedModel) == .orderedSame }) {
                 modelConfigs.insert(AppConfig.ModelConfig(id: selectedModel, label: selectedModel), at: 0)
+            }
+            // Append remote-provider rows (`<id> [<provider>]` per cached
+            // tool-capable model, across every configured provider). Picking
+            // these routes generation through AgentLoop's remote backend path.
+            modelConfigs.append(contentsOf: OnlineModelCatalog.entries())
+            // Kick off a background catalog refresh for each configured provider
+            // whose on-disk cache is stale. Results land in each provider's cache
+            // file; the picker reflects them after the session model list is
+            // next rebuilt (e.g. on subsequent launches).
+            for provider in RemoteProviderRegistry.providers() where RemoteModelCache.isStale(providerID: provider.id) {
+                let providerID = provider.id
+                Task.detached {
+                    _ = try? await RemoteModelCache.refresh(providerID: providerID)
+                }
             }
             let defaultModelIndex = modelConfigs.firstIndex {
                 $0.id.caseInsensitiveCompare(selectedModel) == .orderedSame
@@ -834,7 +917,7 @@ func printREPLHelp() {
       \u{001B}[32m/voice-locale [id]\u{001B}[0m Set STT language (no arg = list all available locales)
       \u{001B}[32mCtrl+J, Option+Enter, \\+Enter\u{001B}[0m Insert newline in input box
       \u{001B}[32mCommand+V\u{001B}[0m      Paste text into input box (multiline supported)
-      \u{001B}[32m/memory <cmd>\u{001B}[0m  Memory commands: save, log, search, list, undo, status, snippet
+      \u{001B}[32m/memory <cmd>\u{001B}[0m  Memory commands: save, log, search, list, undo, status, snippet, remove, edit
       \u{001B}[32mEsc\u{001B}[0m            Cancel current generation
       \u{001B}[32mShift+Tab\u{001B}[0m      Cycle modes (default starts at Plan low):
                      Plan (low) → Plan (high) → General (fast) →
@@ -912,6 +995,8 @@ func handleMemoryCommand(
             "  /memory undo                              Delete last entry",
             "  /memory status                            Entry counts and DB stats",
             "  /memory snippet [--today|--week]          Generate work summary",
+            "  /memory remove                            Remove an entry (interactive picker)",
+            "  /memory edit                              Edit an entry (interactive picker + inline edit)",
         ])))
         return
     }
@@ -961,7 +1046,7 @@ func handleMemoryCommand(
         
     case "status":
         await handleMemoryStatus(store: store, frontend: frontend)
-        
+
     case "snippet":
         let windowArg = parts.count >= 3 ? String(parts[2]) : nil
         await handleMemorySnippet(window: windowArg, workspaceRoot: workspaceRoot, store: store, frontend: frontend)
@@ -969,6 +1054,95 @@ func handleMemoryCommand(
     default:
         frontend.emit(.memoryEvent(.error("Unknown memory subcommand: \(subcommand)")))
     }
+}
+
+// MARK: - Interactive Memory Remove
+
+@MainActor
+func handleMemoryInteractiveRemove(
+    workspaceRoot: String,
+    frontend: SwiftCoderTUIFrontend,
+    renderer: Renderer
+) async {
+    let store = KnowledgeStore.shared
+    do { try await store.initialize() } catch {
+        await renderer.printScrollLine("\(DesignSystem.brightRed)✗ Memory store error: \(error)\(DesignSystem.reset)")
+        return
+    }
+    let entries: [KnowledgeEntry]
+    do { entries = try await store.list(projectRoot: workspaceRoot, limit: 50) } catch {
+        await renderer.printScrollLine("\(DesignSystem.brightRed)✗ Failed to list entries: \(error)\(DesignSystem.reset)")
+        return
+    }
+    guard !entries.isEmpty else {
+        await renderer.printScrollLine("  No memory entries to remove.")
+        return
+    }
+
+    let options = entries.map {
+        "[\($0.type.rawValue)] \(String($0.content.prefix(70)).replacingOccurrences(of: "\n", with: " "))"
+    }
+    let pickerReq = OptionSelectRequest(prompt: "Select entry to remove:", options: options, escSelectsLastOption: false)
+    let pickerResp = await frontend.request(.optionSelect(pickerReq))
+    guard case .optionSelect(let idx) = pickerResp, let idx else {
+        await renderer.printScrollLine("  Cancelled.")
+        return
+    }
+    let entry = entries[idx]
+
+    let preview = String(entry.content.prefix(60)).replacingOccurrences(of: "\n", with: " ")
+    let confirmReq = OptionSelectRequest(
+        prompt: "Remove: \"\(preview)\"?",
+        options: ["Yes, delete this entry", "Cancel"],
+        escSelectsLastOption: true
+    )
+    let confirmResp = await frontend.request(.optionSelect(confirmReq))
+    guard case .optionSelect(let confirmIdx) = confirmResp, confirmIdx == 0 else {
+        await renderer.printScrollLine("  Cancelled.")
+        return
+    }
+
+    do {
+        try await store.delete(id: entry.id)
+        await renderer.printScrollLine("  \(DesignSystem.dim)✓ Entry removed.\(DesignSystem.reset)")
+    } catch {
+        await renderer.printScrollLine("\(DesignSystem.brightRed)✗ Remove failed: \(error)\(DesignSystem.reset)")
+    }
+}
+
+// MARK: - Interactive Memory Edit
+
+@MainActor
+func handleMemoryInteractiveEdit(
+    workspaceRoot: String,
+    frontend: SwiftCoderTUIFrontend,
+    renderer: Renderer
+) async -> KnowledgeEntry? {
+    let store = KnowledgeStore.shared
+    do { try await store.initialize() } catch {
+        await renderer.printScrollLine("\(DesignSystem.brightRed)✗ Memory store error: \(error)\(DesignSystem.reset)")
+        return nil
+    }
+    let entries: [KnowledgeEntry]
+    do { entries = try await store.list(projectRoot: workspaceRoot, limit: 50) } catch {
+        await renderer.printScrollLine("\(DesignSystem.brightRed)✗ Failed to list entries: \(error)\(DesignSystem.reset)")
+        return nil
+    }
+    guard !entries.isEmpty else {
+        await renderer.printScrollLine("  No memory entries to edit.")
+        return nil
+    }
+
+    let options = entries.map {
+        "[\($0.type.rawValue)] \(String($0.content.prefix(70)).replacingOccurrences(of: "\n", with: " "))"
+    }
+    let pickerReq = OptionSelectRequest(prompt: "Select entry to edit:", options: options, escSelectsLastOption: false)
+    let pickerResp = await frontend.request(.optionSelect(pickerReq))
+    guard case .optionSelect(let idx) = pickerResp, let idx else {
+        await renderer.printScrollLine("  Cancelled.")
+        return nil
+    }
+    return entries[idx]
 }
 
 func handleMemorySave(message: String, workspaceRoot: String, store: KnowledgeStore, frontend: any AgentFrontend) async {

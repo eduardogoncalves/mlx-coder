@@ -89,38 +89,49 @@ extension AgentLoop {
             kvBits: currentGenerationConfig.kvBits,
             kvGroupSize: currentGenerationConfig.kvGroupSize,
             quantizedKVStart: currentGenerationConfig.quantizedKVStart,
-            longContextThreshold: currentGenerationConfig.longContextThreshold
+            longContextThreshold: currentGenerationConfig.longContextThreshold,
+            numDraftTokens: currentGenerationConfig.numDraftTokens
         )
 
         guard let modelContainer else { return nil }
 
         do {
             let correctedOldText = try await modelContainer.perform { context in
-                if Task.isCancelled { throw CancellationError() }
-                let tokenizer = context.tokenizer
-                let tokens = try AgentLoop.encodeNonEmptyTokens(
-                    primaryText: correctionPrompt,
-                    fallbackTexts: ["a"],
-                    using: tokenizer.encode(text:)
-                )
-                let input = try AgentLoop.makeSafeTextLMInput(tokens: tokens)
-
-                var responseText = ""
-                let tokenStream = try MLXLMCommon.generateTokens(
-                    input: input,
-                    parameters: correctionConfig.generateParameters,
-                    context: context
-                )
-                for await item in tokenStream {
+                // Wrap MLX work in `withError` so a C++ MLX failure (e.g. a
+                // reshape on an empty array, deep in the model/penalty/sampler
+                // code) surfaces as a thrown Swift `MLXError` instead of the
+                // library's default `fatalError`, which would kill the whole
+                // process. The synchronous `TokenIterator` construction and the
+                // child generation task it spawns both run inside this scope and
+                // inherit the task-local handler, so any internal failure is
+                // caught here and handled gracefully by the do/catch below.
+                try await withError {
                     if Task.isCancelled { throw CancellationError() }
-                    if case .token(let id) = item {
-                        let decoded = tokenizer.decode(tokenIds: [id], skipSpecialTokens: false)
-                        responseText += decoded
-                        // Early exit if we have enough text
-                        if responseText.count > 2000 { break }
+                    let tokenizer = context.tokenizer
+                    let tokens = try AgentLoop.encodeNonEmptyTokens(
+                        primaryText: correctionPrompt,
+                        fallbackTexts: ["a"],
+                        using: tokenizer.encode(text:)
+                    )
+                    let input = try AgentLoop.makeSafeTextLMInput(tokens: tokens)
+
+                    var responseText = ""
+                    let tokenStream = try MLXLMCommon.generateTokens(
+                        input: input,
+                        parameters: correctionConfig.generateParameters,
+                        context: context
+                    )
+                    for await item in tokenStream {
+                        if Task.isCancelled { throw CancellationError() }
+                        if case .token(let id) = item {
+                            let decoded = tokenizer.decode(tokenIds: [id], skipSpecialTokens: false)
+                            responseText += decoded
+                            // Early exit if we have enough text
+                            if responseText.count > 2000 { break }
+                        }
                     }
+                    return responseText.trimmingCharacters(in: .whitespacesAndNewlines)
                 }
-                return responseText.trimmingCharacters(in: .whitespacesAndNewlines)
             }
 
             // Clean up the response — strip markdown code blocks if present

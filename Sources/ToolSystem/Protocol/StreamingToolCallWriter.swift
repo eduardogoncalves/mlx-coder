@@ -19,6 +19,28 @@ public struct StreamedToolCall: @unchecked Sendable {
     }
 }
 
+/// A streamed tool call whose content was cut off before the closing tag was emitted
+/// (typically because the model hit its max-token budget mid-write).
+///
+/// The partial content has already landed in `contentFile`; recovering it lets the
+/// agent commit what was generated and steer the model to append the remainder
+/// instead of regenerating the entire file from scratch.
+public struct TruncatedStreamedToolCall: @unchecked Sendable {
+    public let toolName: String
+    public let path: String
+    public let contentFile: URL
+    public let bytesWritten: Int
+    public let otherArgs: [String: Any]
+
+    public init(toolName: String, path: String, contentFile: URL, bytesWritten: Int, otherArgs: [String: Any]) {
+        self.toolName = toolName
+        self.path = path
+        self.contentFile = contentFile
+        self.bytesWritten = bytesWritten
+        self.otherArgs = otherArgs
+    }
+}
+
 /// Result of processing a chunk of tokens.
 public struct StreamProcessResult: Sendable {
     public let displayText: String
@@ -60,6 +82,7 @@ public final class StreamingToolCallWriter: @unchecked Sendable {
     private var tmpDir: URL
     private let toolCallOpen: String
     private let toolCallClose: String
+    private let parsesJSONBody: Bool
     private let onStatusChange: (@Sendable (String) -> Void)?
     private var inThinkBlock = false
     private var thinkBuffer = ""
@@ -75,11 +98,13 @@ public final class StreamingToolCallWriter: @unchecked Sendable {
         tmpDir: URL? = nil,
         toolCallOpen: String = "\u{ee7d4}\u{ee7d4}",
         toolCallClose: String = "\u{ee7d4}\u{ee7d4}\u{ee7d4}",
+        parsesJSONBody: Bool = true,
         onStatusChange: (@Sendable (String) -> Void)? = nil
     ) {
         self.tmpDir = tmpDir ?? URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("mlx-coder-streaming")
         self.toolCallOpen = toolCallOpen
         self.toolCallClose = toolCallClose
+        self.parsesJSONBody = parsesJSONBody
         self.onStatusChange = onStatusChange
         // 0700: streamed LLM content may contain secrets being written to the
         // workspace. Other local users must not read or list the staging area.
@@ -105,6 +130,43 @@ public final class StreamingToolCallWriter: @unchecked Sendable {
         let calls = failedCalls
         failedCalls.removeAll()
         return calls
+    }
+
+    /// If a content stream was active when generation ended (e.g. the model hit
+    /// max_tokens mid-write), close the file handle and return a descriptor for
+    /// the partial content so the caller can recover the bytes already on disk.
+    ///
+    /// Returns `nil` and leaves state untouched when no stream was in progress.
+    public func drainTruncatedStream() -> TruncatedStreamedToolCall? {
+        guard case .streamingContent(
+            let jsonBuffer,
+            let path,
+            let toolName,
+            let contentKey,
+            let tmpFile,
+            let fileHandle,
+            _,
+            _
+        ) = state else {
+            return nil
+        }
+
+        try? fileHandle.synchronize()
+        try? fileHandle.close()
+
+        let attrs = try? FileManager.default.attributesOfItem(atPath: tmpFile.path)
+        let bytesWritten = (attrs?[.size] as? NSNumber)?.intValue ?? 0
+
+        let otherArgs = extractOtherArgs(jsonBuffer, contentKey: contentKey, path: path)
+        state = .idle
+
+        return TruncatedStreamedToolCall(
+            toolName: toolName,
+            path: path,
+            contentFile: tmpFile,
+            bytesWritten: bytesWritten,
+            otherArgs: otherArgs
+        )
     }
 
     public func cleanupAllTmpFiles() {
@@ -171,14 +233,27 @@ public final class StreamingToolCallWriter: @unchecked Sendable {
         while !remaining.isEmpty {
             switch state {
             case .idle:
-                if let openRange = remaining.range(of: toolCallOpen) {
-                    displayText += String(remaining[..<openRange.lowerBound])
-                    onStatusChange?("Generating tool call...")
-                    remaining = String(remaining[openRange.upperBound...])
-                    state = .accumulatingJSON(buffer: "")
+                if let nextTag = earliestTagOccurrence(in: remaining, tags: [toolCallOpen, toolCallClose]) {
+                    displayText += String(remaining[..<nextTag.range.lowerBound])
+                    remaining = String(remaining[nextTag.range.upperBound...])
+                    if nextTag.tag == toolCallOpen {
+                        onStatusChange?("Generating tool call...")
+                        state = .accumulatingJSON(buffer: "")
+                    }
+                    // Standalone closing tags are swallowed in idle mode.
                 } else {
-                    displayText += remaining
-                    remaining = ""
+                    // Keep possible partial tool tags buffered so split
+                    // boundaries (e.g. "... </t" + "ool_call>") never leak
+                    // fragments to the terminal.
+                    let keep = trailingPossibleTagPrefix(in: remaining, forAny: [toolCallOpen, toolCallClose])
+                    let emitCount = max(0, remaining.count - keep.count)
+                    if emitCount > 0 {
+                        let split = remaining.index(remaining.startIndex, offsetBy: emitCount)
+                        displayText += String(remaining[..<split])
+                        remaining = String(remaining[split...])
+                    } else {
+                        break
+                    }
                 }
 
             case .accumulatingJSON(var buffer):
@@ -187,14 +262,21 @@ public final class StreamingToolCallWriter: @unchecked Sendable {
                     buffer += String(remaining[..<closeRange.lowerBound])
                     remaining = String(remaining[closeRange.upperBound...])
                     // Try to parse the JSON and handle
-                    handleCompletedJSON(buffer)
+                    if parsesJSONBody {
+                        handleCompletedJSON(buffer)
+                    }
+                    // Non-JSON dialects (e.g. LFM2) are parsed by ToolCallParser
+                    // from the full response text. The streaming writer only
+                    // hides the call body from the live display.
                     state = .idle
                 } else {
                     buffer += remaining
                     remaining = ""
 
-                    // Check if this is a content-heavy tool call we should stream
-                    if let (key, _) = detectContentField(buffer) {
+                    // Check if this is a content-heavy tool call we should stream.
+                    // Only meaningful for JSON-bodied dialects; LFM2's argument
+                    // syntax is `content='...'` and cannot be sniffed this way.
+                    if parsesJSONBody, let (key, _) = detectContentField(buffer) {
                         if let (path, toolName) = extractPathAndArgs(buffer, contentKey: key) {
                             // Per-call UUID-suffixed name with 0o700 dir +
                             // 0o600 file defeats predictable-path symlink
@@ -444,6 +526,32 @@ public final class StreamingToolCallWriter: @unchecked Sendable {
         }
 
         return ""
+    }
+
+    private func trailingPossibleTagPrefix(in text: String, forAny tags: [String]) -> String {
+        var best = ""
+        for tag in tags {
+            let candidate = trailingPossibleTagPrefix(in: text, for: tag)
+            if candidate.count > best.count {
+                best = candidate
+            }
+        }
+        return best
+    }
+
+    private func earliestTagOccurrence(in text: String, tags: [String]) -> (tag: String, range: Range<String.Index>)? {
+        var best: (tag: String, range: Range<String.Index>)?
+        for tag in tags {
+            guard let range = text.range(of: tag) else { continue }
+            if let currentBest = best {
+                if range.lowerBound < currentBest.range.lowerBound {
+                    best = (tag, range)
+                }
+            } else {
+                best = (tag, range)
+            }
+        }
+        return best
     }
 
     private func detectContentField(_ buffer: String) -> (key: String, afterKey: String.Index)? {

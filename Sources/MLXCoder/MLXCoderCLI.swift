@@ -54,8 +54,17 @@ struct TestAbsorber: ParsableArguments, Sendable {
 // MARK: - Shared model arguments
 
 struct ModelArguments: ParsableArguments, Sendable {
+    static let defaultModelPath = "mlx-community/Qwen3.5-9B-5bit"
+    static let defaultDraftModelPath = "mlx-community/Qwen3.5-9B-MTP-4bit"
+
     @Option(name: .long, help: "Path to the model directory")
-    var model: String = "~/models/Qwen/Qwen3.5-9B-4bit"
+    var model: String = defaultModelPath
+
+    @Option(name: .long, help: "Draft model for speculative decoding (MTP). When omitted, it's auto-enabled only for the default --model. Set to empty string to disable.")
+    var draftModel: String?
+
+    @Option(name: .long, help: "Number of draft tokens proposed per speculative decoding round")
+    var numDraftTokens: Int = 2
 
     @Option(name: .long, help: "Workspace root directory for tool operations")
     var workspace: String = "."
@@ -123,11 +132,14 @@ struct ModelArguments: ParsableArguments, Sendable {
     @Flag(name: .long, help: "Show verbose output including thinking blocks")
     var verbose: Bool = false
 
+    @Flag(name: .long, help: "Show a per-turn prompt-cache indicator (tokens reused from the previous turn's KV cache vs. freshly prefilled) to validate cross-turn caching")
+    var promptCacheStats: Bool = false
+
     @Option(name: .long, help: "Initial working mode (agent or plan)")
     var mode: String = "plan"
 
-    @Option(name: .long, help: "Frontend to use: legacy (StreamRenderer) or tui (SwiftCoderTUI). Default: legacy.")
-    var ui: String = "legacy"
+    @Option(name: .long, help: "Frontend to use: tui (SwiftCoderTUI) or legacy (StreamRenderer). Default: tui.")
+    var ui: String = "tui"
 
     @Option(name: .long, help: "Seconds of silence before voice recording stops automatically (default: 2.0)")
     var voiceSilenceTimeout: Double = 2.0
@@ -139,4 +151,26 @@ struct ModelArguments: ParsableArguments, Sendable {
     var resolvedVoiceLocale: Locale? { voiceLocale.map { Locale(identifier: $0) } }
 
     @OptionGroup var testAbsorber: TestAbsorber
+
+    /// Returns the draft model path that should be used for the selected model.
+    /// - If `--draft-model` is explicitly provided, honor it (including empty string to disable).
+    /// - If omitted, auto-enable default draft only for the default main model.
+    func resolvedDraftModelPath(for selectedModel: String) -> String? {
+        if isDraftModelExplicitlyProvided {
+            let value = draftModel?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            return value.isEmpty ? nil : value
+        }
+        return selectedModel == Self.defaultModelPath ? Self.defaultDraftModelPath : nil
+    }
+
+    var isDraftModelExplicitlyProvided: Bool {
+        isLongOptionExplicitlyProvided("--draft-model")
+    }
+
+    private func isLongOptionExplicitlyProvided(_ optionName: String) -> Bool {
+        let optionPrefix = "\(optionName)="
+        return ProcessInfo.processInfo.arguments.contains { argument in
+            argument == optionName || argument.hasPrefix(optionPrefix)
+        }
+    }
 }

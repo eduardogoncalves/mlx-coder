@@ -28,14 +28,29 @@ import Darwin
 /// - `LoopDetectionService.swift` — Pure loop detection utility
 public actor AgentLoop {
 
+    public struct DraftModelHandle: @unchecked Sendable {
+        public let model: any LanguageModel
+        public init(model: any LanguageModel) {
+            self.model = model
+        }
+    }
+
     // MARK: - Stored Properties
 
     var modelContainer: ModelContainer?
+    var draftModel: DraftModelHandle?
     let registry: ToolRegistry
+    /// Stable identifier for this conversation, sent as `session_id` on remote
+    /// (OpenRouter) requests so all generations in one run are grouped together
+    /// for tracing multi-step agent chains.
+    let sessionId: String = UUID().uuidString
     var permissions: PermissionEngine
     var frontend: any AgentFrontend
     /// When true, AgentCore emits debug-level status events.
     let verbose: Bool
+    /// When true, emit a per-turn prompt-cache indicator (reused vs. freshly
+    /// prefilled token counts) so cross-turn KV reuse can be validated live.
+    let promptCacheStats: Bool
     let auditLogger: ToolAuditLogger?
     public internal(set) var history: ConversationHistory
     let maxToolIterations: Int
@@ -43,6 +58,11 @@ public actor AgentLoop {
     var sessionApprovedToolCommands: Set<String> = []
     var useSandbox: Bool
     var modelPath: String
+
+    /// Interpreted view of `modelPath`. `modelPath` is the carrier (it round-trips
+    /// through `InferenceBackend(modelPath:)`); strings prefixed with `<provider>:`
+    /// are online providers, everything else is a local MLX model path.
+    public var backend: InferenceBackend { InferenceBackend(modelPath: modelPath) }
     let memoryLimit: Int?
     let cacheLimit: Int?
     let dryRun: Bool
@@ -64,6 +84,7 @@ public actor AgentLoop {
     var skipGitOrchestrationInitialization: Bool = false
     
     // Tracking parameters to avoid unnecessary reloads
+    var toolCallDialect: ToolCallDialect = .qwen
     var loadedModelPath: String?
     var loadedMemoryLimit: Int?
     var loadedCacheLimit: Int?
@@ -73,6 +94,14 @@ public actor AgentLoop {
     var loadedTurboQuantBits: Int?
     var pendingReload: Bool = false
     var pendingImages: [URL] = []
+
+    /// Persistent cross-turn KV (prompt) cache for the plain-text generation path.
+    /// Holds the previous turn's KV cache plus the exact tokens it represents so
+    /// each turn only prefills the new suffix. Lives here (rather than as a local
+    /// in `generateResponse`) so the cache survives between turns; all reads and
+    /// mutations happen inside the `ModelContainer.perform` closure — see
+    /// `PromptCacheStore` for the Sendable rationale.
+    let promptCache = PromptCacheStore()
 
     public internal(set) var mode: WorkingMode = .plan
     public internal(set) var thinkingLevel: ThinkingLevel = .low
@@ -87,8 +116,15 @@ public actor AgentLoop {
     /// Number of most-recent conversation turns to always keep verbatim during compaction.
     let contextKeepRecentTurns: Int = 6
 
+    /// A steering message queued for injection between turns, tagged with its origin so the
+    /// drain knows whether to inject it as a human user turn or an agent-authored control notice.
+    struct QueuedSteering: Sendable {
+        let message: String
+        let origin: Message.Origin
+    }
+
     /// Messages injected between turns during the current run (checked before each generation step).
-    var steeringQueue: [String] = []
+    var steeringQueue: [QueuedSteering] = []
     /// Messages queued for automatic processing after the current run finishes.
     var followUpQueue: [String] = []
 
@@ -109,12 +145,13 @@ public actor AgentLoop {
     // MARK: - Initializer
 
     public init(
-        modelContainer: ModelContainer,
+        modelContainer: ModelContainer?,
         registry: ToolRegistry,
         permissions: PermissionEngine,
         generationConfig: GenerationEngine.Config,
         frontend: any AgentFrontend,
         verbose: Bool = false,
+        promptCacheStats: Bool = false,
         systemPrompt: String,
         modelPath: String,
         workspace: String = ".",
@@ -130,18 +167,29 @@ public actor AgentLoop {
         promptSectionTokenEstimates: [PromptSection: Int] = [:],
         maxToolIterations: Int = 20,
         memoryLimit: Int? = nil,
-        cacheLimit: Int? = nil
+        cacheLimit: Int? = nil,
+        draftModel: DraftModelHandle? = nil
     ) {
         self.modelContainer = modelContainer
+        self.draftModel = draftModel
         self.registry = registry
         self.permissions = permissions
         self.currentGenerationConfig = generationConfig
         self.frontend = frontend
         self.verbose = verbose
+        self.promptCacheStats = promptCacheStats
         self.history = ConversationHistory(systemPrompt: systemPrompt)
+        // Surface prompt-cache lifecycle (cleared / initialized) in the terminal.
+        // Captured by value so the store — which lives past `init` — never touches
+        // `self`; `AgentFrontend` is `Sendable`, so this is safe from the closure.
+        let cacheLogFrontend = frontend
+        self.promptCache.log = { message in
+            cacheLogFrontend.emitStatus(message)
+        }
         self.auditLogger = auditLogger
         self.maxToolIterations = maxToolIterations
         self.modelPath = modelPath
+        self.toolCallDialect = ToolCallDialect.detect(modelPath: modelPath)
         self.workspace = workspace
         self.projectWorkspaceRoot = permissions.workspaceRoot
         self.buildCheckManager = BuildCheckManager()
@@ -265,6 +313,10 @@ public actor AgentLoop {
 
         var iterations = 0
         var fileModificationToolsExecuted = false
+        var turnTotalPromptTokens = 0
+        var turnTotalCompletionTokens = 0
+        var turnTotalElapsed: TimeInterval = 0
+        var hasTurnStats = false
         var modifiedFilePaths = Set<String>()
         var lastReadFileSignature: String?
         var sameReadFileStreak = 0
@@ -279,7 +331,7 @@ public actor AgentLoop {
             await applyDeterministicContextCompactionIfNeeded(reason: "before_generation")
 
             // Generate response
-            let generationResult: (text: String, writer: StreamingToolCallWriter)
+            let generationResult: (text: String, writer: StreamingToolCallWriter, startedThinking: Bool, turnStats: (promptTokens: Int, completionTokens: Int, elapsed: TimeInterval, tokensPerSecond: Double?)?)
             do {
                 generationResult = try await generateResponse()
             } catch is CancellationError {
@@ -294,6 +346,10 @@ public actor AgentLoop {
                         && (error as NSError).code == 9
                     if isContextOverflow {
                         frontend.emitStatus("⚠️  Context too large — forcing compaction before retry.")
+                        // Abandon in-flight recovery artifacts so the emergency
+                        // compaction is unblocked (it skips while transient messages
+                        // exist) and so malformed attempts never enter a summary.
+                        history.purgeTransient()
                         await applyDeterministicContextCompactionIfNeeded(reason: "context_overflow_recovery")
                     }
                     pendingImages = images
@@ -309,27 +365,102 @@ public actor AgentLoop {
 
             let response = generationResult.text
             let writer = generationResult.writer
+            let startedThinking = generationResult.startedThinking
+            if let stats = generationResult.turnStats {
+                turnTotalPromptTokens += stats.promptTokens
+                turnTotalCompletionTokens += stats.completionTokens
+                turnTotalElapsed += stats.elapsed
+                hasTurnStats = true
+            }
 
             // Get streamed tool calls from the writer
             let streamedCalls = writer.drainCompletedCalls()
             let failedStreamedCalls = writer.drainFailedCalls()
+            // If generation ended while a content stream was in progress (model
+            // hit max_tokens mid-write), recover the partial bytes from the tmp
+            // file so we don't force a full regeneration.
+            let truncatedStream = writer.drainTruncatedStream()
 
             // Parse tool calls from text and remove ones already captured via streaming.
-            let parsedToolCalls = ToolCallParser.parse(response)
+            let parsedToolCalls = ToolCallParser.parse(
+                response,
+                dialect: toolCallDialect,
+                startsThinking: startedThinking
+            )
             let toolCalls = deduplicateToolCalls(parsed: parsedToolCalls, streamed: streamedCalls)
+
+            // Try to recover a truncated streamed write before we declare the
+            // tool call malformed. write_file and append_file tolerate an
+            // incremental commit, so we save what was streamed and instruct
+            // the model to finish the file with an append_file call instead
+            // of regenerating the whole thing.
+            if let truncated = truncatedStream,
+               truncated.bytesWritten > 0,
+               truncated.toolName == "write_file" || truncated.toolName == "append_file" {
+                await recoverTruncatedStreamedWrite(
+                    truncated: truncated,
+                    response: response,
+                    fileModificationToolsExecuted: &fileModificationToolsExecuted,
+                    modifiedFilePaths: &modifiedFilePaths
+                )
+                continue
+            } else if let truncated = truncatedStream {
+                // Not a recoverable tool — discard the partial tmp file so it
+                // doesn't accumulate, then fall through to the malformed path.
+                try? FileManager.default.removeItem(at: truncated.contentFile)
+            }
+
+            // Detect bare-JSON responses with no tool-call markers as malformed
+            // too. Smaller models (e.g. LFM2) sometimes reach for a free-form
+            // `{"todo":..., "commands":[...]}`-style blob instead of using our
+            // wire format. Accepting it silently would let the agent stall.
+            let responseLooksLikeBareJSONToolCall = toolCalls.isEmpty
+                && streamedCalls.isEmpty
+                && Self.responseIsBareJSON(response, startsThinking: startedThinking)
+
             let hasMalformedToolCall = !failedStreamedCalls.isEmpty ||
-                (toolCalls.isEmpty && streamedCalls.isEmpty && ToolCallParser.containsToolCall(response))
+                (toolCalls.isEmpty && streamedCalls.isEmpty && ToolCallParser.containsToolCall(response, dialect: toolCallDialect, startsThinking: startedThinking))
+                || responseLooksLikeBareJSONToolCall
 
             if toolCalls.isEmpty && streamedCalls.isEmpty {
                 if hasMalformedToolCall {
-                    history.addAssistant(response)
-                    steeringQueue.append("Your previous tool call was malformed and could not be parsed. Re-emit only the tool call in valid JSON using the exact <tool_call>{\"name\":\"tool_name\",\"arguments\":{...}}</tool_call> format. Do not add explanation text.")
+                    // Rejected generation attempt — kept in context so the model can
+                    // recover on the retry, but marked transient so it is purged from
+                    // persistent history once the turn produces a valid path.
+                    history.addAssistant(response, transient: true)
+                    frontend.emitStatus(
+                        "Malformed tool call detected; retrying with strict JSON tool-call format.",
+                        severity: .warning
+                    )
+                    let example: String
+                    switch toolCallDialect {
+                    case .qwen:
+                        example = "<tool_call>{\"name\":\"tool_name\",\"arguments\":{...}}</tool_call>"
+                    case .lfm2:
+                        example = "<|tool_call_start|>[tool_name(param='value')]<|tool_call_end|>"
+                    }
+                    let bareJSONNote = responseLooksLikeBareJSONToolCall
+                        ? " Your last response was a bare JSON object — that is NOT a tool call and will never execute. Discard that shape entirely."
+                        : ""
+                    steeringQueue.append(.init(message: "Your previous tool call was malformed and could not be parsed.\(bareJSONNote) Re-emit only the tool call using the exact \(example) format. Use one of the tool names listed in the system prompt. Do not add explanation text, code fences, or any JSON outside the tool-call markers.", origin: .automated))
                     continue
                 }
 
                 // No tool calls — this is the final response
                 history.addAssistant(response)
-                
+
+                // Turn completed successfully: drop the ephemeral recovery artifacts
+                // (malformed attempts, failed tool-call iterations, automated steering)
+                // accumulated during it, so only the successful execution path persists.
+                let hadTransient = history.purgeTransient()
+                if hadTransient {
+                    // The ChatML prompt for the next turn will be shorter (failed
+                    // iterations removed). Invalidate the KV cache so the next turn
+                    // re-prefills from the clean history rather than relying on
+                    // trim/checkpoint to reconcile the divergence.
+                    promptCache.invalidate(reason: "transient turn artifacts purged — history diverged")
+                }
+
                 // Check builds if write/edit tools were executed in agent/coding mode
                 if fileModificationToolsExecuted && mode == .agent && taskType == .coding {
                     await performBuildCheckIfNeeded(modifiedPaths: modifiedFilePaths)
@@ -360,8 +491,27 @@ public actor AgentLoop {
                     }
                 }
 
+                // Emit accumulated token stats for the whole turn (all rounds summed).
+                if hasTurnStats {
+                    let tps = turnTotalElapsed > 0
+                        ? Double(turnTotalCompletionTokens) / turnTotalElapsed : nil
+                    frontend.emitStatus(AgentLoop.formatGenerationStats(
+                        promptTokens: turnTotalPromptTokens,
+                        completionTokens: turnTotalCompletionTokens,
+                        elapsed: turnTotalElapsed,
+                        tokensPerSecond: tps
+                    ))
+                }
+
+                // Audible + visible completion cue for terminal users.
+                frontend.emitStatus("Turn complete.\u{0007}", severity: .success)
                 return
             }
+
+            // Record the history boundary before this iteration's assistant message so
+            // we can retroactively mark the whole iteration transient if any tool fails.
+            let iterationStartIndex = history.messages.count
+            var iterationAnyToolFailed = false
 
             // Add the assistant's response (including tool calls) to history
             history.addAssistant(response)
@@ -371,13 +521,21 @@ public actor AgentLoop {
                 frontend.emit(.toolCallStarted(ToolCallSnapshot(name: streamedCall.toolName, arguments: stringifyArgs(["path": streamedCall.path, "content": "[streamed to tmp]"]))))
                 let streamResult = await handleStreamedToolCall(streamedCall)
                 frontend.emit(.toolCallResult(makeDisplaySnapshot(toolName: streamedCall.toolName, result: streamResult)))
-                
+                if streamResult.isError { iterationAnyToolFailed = true }
+
                 // Track file modifications
                 if !streamResult.isError {
                     fileModificationToolsExecuted = true
                     modifiedFilePaths.insert(streamedCall.path)
+                    // A streamed write/edit changed a file on disk, so a follow-up
+                    // read_file of the same path is a legitimate re-read of new
+                    // content — not a loop. Streamed calls bypass executeToolCall,
+                    // which is where read-loop state is normally reset, so clear it
+                    // here to avoid a false "Detected repeated read loop".
+                    lastReadFileSignature = nil
+                    sameReadFileStreak = 0
                 }
-                
+
                 let userGoal = history.latestUserMessage ?? ""
                 let toolResponse = try await makeToolResponseForHistory(
                     toolName: streamedCall.toolName,
@@ -400,6 +558,7 @@ public actor AgentLoop {
                     fileModificationToolsExecuted: &fileModificationToolsExecuted,
                     modifiedFilePaths: &modifiedFilePaths
                 )
+                if result.isError { iterationAnyToolFailed = true }
 
                 let userGoal = history.latestUserMessage ?? ""
                 let toolResponse = try await makeToolResponseForHistory(
@@ -411,23 +570,91 @@ public actor AgentLoop {
                 history.addToolResponse(toolResponse, toolCallId: call.name)
             }
 
+            // If any tool in this iteration failed, mark the whole iteration (assistant
+            // message + all tool responses) as transient. The model still sees them
+            // during the current turn for recovery context, but purgeTransient() will
+            // remove them when the turn completes so only the successful path persists.
+            if iterationAnyToolFailed {
+                history.markTransient(from: iterationStartIndex)
+            }
+
             // After processing all tool calls for this turn, drain the steering queue.
             // Steering messages redirect the agent on the next generation turn.
             if !steeringQueue.isEmpty {
                 let pending = steeringQueue
                 steeringQueue.removeAll()
-                for msg in pending {
-                    frontend.emitStatus("↩️  Steering: \(msg)")
-                    history.addUser(msg)
-                    await hooks.emit(.steeringInjected(message: msg))
+                for item in pending {
+                    frontend.emitStatus("↩️  Steering: \(item.message)")
+                    switch item.origin {
+                    case .human:     history.addUser(item.message)
+                    case .automated: history.addAutomated(item.message)
+                    }
+                    await hooks.emit(.steeringInjected(message: item.message))
                 }
             }
         }
 
+        // Turn is ending (iteration cap reached); still drop transient recovery
+        // artifacts so they don't leak into persistent history.
+        let hadTransientAtCap = history.purgeTransient()
+        if hadTransientAtCap {
+            promptCache.invalidate(reason: "transient turn artifacts purged — history diverged")
+        }
         frontend.emitError("Exceeded maximum tool iterations (\(maxToolIterations))")
     }
 
     // MARK: - Private Helpers (used only by processUserMessage)
+
+    /// Commits a partially-streamed write to its target path, records the
+    /// recovery as an assistant turn + tool response, and steers the model to
+    /// append the remainder instead of regenerating the entire content on the
+    /// next turn. Mutates the file-modification trackers on success.
+    private func recoverTruncatedStreamedWrite(
+        truncated: TruncatedStreamedToolCall,
+        response: String,
+        fileModificationToolsExecuted: inout Bool,
+        modifiedFilePaths: inout Set<String>
+    ) async {
+        history.addAssistant(response)
+        frontend.emitStatus(
+            "Generation truncated mid-write — recovering \(truncated.bytesWritten) bytes for \(truncated.path).",
+            severity: .warning
+        )
+
+        frontend.emit(.toolCallStarted(ToolCallSnapshot(
+            name: truncated.toolName,
+            arguments: stringifyArgs([
+                "path": truncated.path,
+                "content": "[streamed to tmp - truncated]"
+            ])
+        )))
+
+        let commit = await commitTruncatedStreamedWrite(truncated)
+        frontend.emit(.toolCallResult(makeDisplaySnapshot(toolName: truncated.toolName, result: commit.result)))
+
+        if !commit.result.isError {
+            fileModificationToolsExecuted = true
+            modifiedFilePaths.insert(truncated.path)
+        }
+
+        let userGoal = history.latestUserMessage ?? ""
+        if let toolResponse = try? await makeToolResponseForHistory(
+            toolName: truncated.toolName,
+            result: commit.result,
+            userGoal: userGoal
+        ) {
+            history.addToolResponse(toolResponse, toolCallId: truncated.toolName)
+        }
+
+        guard !commit.result.isError else { return }
+
+        let tailHint = commit.tail.isEmpty ? "" : "\n\nThe file currently ends with:\n```\n\(commit.tail)\n```"
+        let steeringMessage = "Your previous \(truncated.toolName) call to \(truncated.path) was cut off after \(truncated.bytesWritten) bytes because the token budget ran out mid-content. The partial content was already saved to disk — do NOT regenerate it. To finish the file, call append_file with path \"\(truncated.path)\" and only the REMAINING content needed to complete it.\(tailHint)"
+
+        frontend.emitStatus("↩️  Steering: \(steeringMessage)")
+        history.addAutomated(steeringMessage)
+        await hooks.emit(.steeringInjected(message: steeringMessage))
+    }
 
     /// Initializes git orchestration for coding tasks.
     private func initializeGitOrchestration(userMessage: String) async {
@@ -611,7 +838,8 @@ public actor AgentLoop {
                 kvGroupSize: currentGenerationConfig.kvGroupSize,
                 quantizedKVStart: currentGenerationConfig.quantizedKVStart,
                 longContextThreshold: currentGenerationConfig.longContextThreshold,
-                turboQuantBits: currentGenerationConfig.turboQuantBits
+                turboQuantBits: currentGenerationConfig.turboQuantBits,
+                numDraftTokens: currentGenerationConfig.numDraftTokens
             )
             self.pendingReload = true
         }
@@ -753,13 +981,13 @@ public actor AgentLoop {
                 if let normalizedPath = blockedRepeatedReadNormalizedPath,
                    !readLoopSteeredPaths.contains(normalizedPath) {
                     readLoopSteeredPaths.insert(normalizedPath)
-                    steeringQueue.append("You are repeatedly calling read_file for '\(blockedPath)'. Reuse prior read output from history, or read a different file/line range only if needed.")
+                    steeringQueue.append(.init(message: "You are repeatedly calling read_file for '\(blockedPath)'. Reuse prior read output from history, or read a different file/line range only if needed.", origin: .automated))
                 }
             } else if let blockedSignature = blockedRepeatedReadOnlySignature {
                 result = .error("Detected repeated \(call.name) loop with the same arguments. Reuse prior tool output in history and continue without re-running it.")
                 if !readOnlyLoopSteeredSignatures.contains(blockedSignature) {
                     readOnlyLoopSteeredSignatures.insert(blockedSignature)
-                    steeringQueue.append("You are repeatedly calling \(call.name) with identical arguments. Reuse the existing tool output and move to the final answer.")
+                    steeringQueue.append(.init(message: "You are repeatedly calling \(call.name) with identical arguments. Reuse the existing tool output and move to the final answer.", origin: .automated))
                 }
             } else {
                 // Apply automatic parameter correction before execution
@@ -790,7 +1018,7 @@ public actor AgentLoop {
                 if !missingRequiredArgs.isEmpty {
                     let joined = missingRequiredArgs.joined(separator: ", ")
                     result = .error("Missing required argument(s) for \(call.name): \(joined)")
-                    steeringQueue.append("Your last \(call.name) call was invalid. Include required argument(s): \(joined).")
+                    steeringQueue.append(.init(message: "Your last \(call.name) call was invalid. Include required argument(s): \(joined).", origin: .automated))
                 } else if isDestructive && dryRun {
                     result = .success("Dry-run mode: skipped execution of destructive tool '\(call.name)'. Arguments: \(correctionResult.correctedArguments)")
                 } else if let tool = resolvedTool {
@@ -912,6 +1140,44 @@ extension AgentLoop {
     /// terminal adapter.
     public func swapFrontend(_ newFrontend: any AgentFrontend) {
         self.frontend = newFrontend
+    }
+
+    /// True when the assistant response (after stripping any think block) is
+    /// essentially just a JSON object or array — i.e. the model emitted
+    /// free-form structured output instead of an actual tool call. Used to
+    /// nudge weaker models back to the dialect's wire format on retry.
+    static func responseIsBareJSON(_ response: String, startsThinking: Bool) -> Bool {
+        var text = response
+        if startsThinking, let closeRange = text.range(of: ToolCallPattern.thinkClose) {
+            text = String(text[closeRange.upperBound...])
+        } else {
+            text = ToolCallParser.stripThinking(text)
+        }
+
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // Strip a single ```json … ``` fence so models that wrap their JSON
+        // in a code fence still get caught.
+        let candidate: String
+        if trimmed.hasPrefix("```") {
+            let lines = trimmed.split(separator: "\n", omittingEmptySubsequences: false)
+            guard lines.count >= 3, lines.last?.trimmingCharacters(in: .whitespaces) == "```" else {
+                return false
+            }
+            candidate = lines.dropFirst().dropLast().joined(separator: "\n")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        } else {
+            candidate = trimmed
+        }
+
+        guard let first = candidate.first, first == "{" || first == "[" else {
+            return false
+        }
+        guard let data = candidate.data(using: .utf8),
+              let _ = try? JSONSerialization.jsonObject(with: data) else {
+            return false
+        }
+        return true
     }
 }
 

@@ -108,12 +108,19 @@ enum URLFetchValidator {
 public struct WebFetchTool: Tool {
     public let name = "web_fetch"
     public let description = """
-        Fetch content from a URL.
+        Fetch content from a URL. The full page is downloaded, pre-processed (optional HTML \
+        stripping) and stored in an on-disk cache; only a bounded window of at most \
+        \(WebFetchTool.defaultMaxOutputLength) characters is returned per call to keep the context small.
         • text_only: true  — strips HTML tags, CSS, and scripts; returns clean readable text \
         (recommended for most pages; greatly reduces context size).
         • query             — additionally extract a specific answer from the page using the LLM \
         (combine with text_only for best results).
-        • If neither is set, returns raw content truncated at \(WebFetchTool.defaultMaxOutputLength) chars.
+        • If the page is larger than one window, the returned truncation marker reports the exact \
+        next offset. Call web_fetch again with the SAME url (and same text_only) plus that offset to \
+        read the next chunk. Continuation reads are served from the disk cache — no new network \
+        request is made — so you can read a large JSON/page in order without losing or inventing data.
+        • fresh: true       — bypass the cache and re-download from the network (use only when the \
+        page may have changed since it was first fetched).
         """
     public let parameters = JSONSchema(
         type: "object",
@@ -123,12 +130,20 @@ public struct WebFetchTool: Tool {
                 description: "When true, strip all HTML markup (tags, CSS, scripts) and return plain readable text. Recommended for web pages when you need the content rather than the markup structure."),
             "query": PropertySchema(type: "string",
                 description: "Specific question or information to extract from the page via LLM. If empty, returns the full text (after optional HTML stripping)."),
+            "offset": PropertySchema(type: "integer",
+                description: "Character offset to start reading from (default: 0). Use to continue reading a page that was truncated: pass the next offset reported in the truncation marker. The chunk is served from the disk cache. Ignored when query is set."),
+            "fresh": PropertySchema(type: "boolean",
+                description: "When true, ignore any cached copy and re-download from the network (default: false). Use only when you need an up-to-date version of a page that may have changed."),
             "timeout": PropertySchema(type: "integer", description: "Timeout in seconds (default: 15)"),
         ],
         required: ["url"]
     )
 
-    public static let defaultMaxOutputLength = 50_000
+    // Per-call window returned to the model. The full page is always cached; this
+    // only bounds how much reaches the main context at once. Kept moderate so a
+    // typical JSON API response fits in one or two chunks with correct, absolute
+    // offset-based continuation, rather than being silently clipped downstream.
+    public static let defaultMaxOutputLength = 12_000
 
     private let maxOutputLength: Int
     private let modelContainer: ModelContainer?
@@ -169,20 +184,26 @@ extension WebFetchTool: ProgressReportingTool {
 
         let query = arguments["query"] as? String
         let textOnly = arguments["text_only"] as? Bool ?? false
+        let offset = max(0, arguments["offset"] as? Int ?? 0)
+        let fresh = arguments["fresh"] as? Bool ?? false
 
         let timeout = arguments["timeout"] as? Int ?? 15
 
         // --- Cache lookup ---
+        // Continuation reads (offset > 0) and repeated reads are served from the
+        // on-disk cache so the model can page through a large page without issuing
+        // a new network request. `fresh: true` bypasses the cache to force a
+        // re-download when the page may have changed.
         let cache = WebFetchCache.shared
 
         // If text_only and a pre-stripped copy exists, use it immediately
-        if textOnly, let cached = cache.textContent(for: urlString) {
+        if !fresh, textOnly, let cached = cache.textContent(for: urlString) {
             reportProgress("cache hit (text) — skipping network request")
-            return try await resolveResult(text: cached, query: query, reportProgress: reportProgress)
+            return try await resolveResult(text: cached, query: query, offset: offset, reportProgress: reportProgress)
         }
 
         // If a raw copy exists, we can skip the network request entirely
-        if let cachedRaw = cache.rawContent(for: urlString) {
+        if !fresh, let cachedRaw = cache.rawContent(for: urlString) {
             reportProgress("cache hit (raw) — skipping network request")
             if textOnly {
                 let isHTML = cachedRaw.prefix(512).lowercased().contains("<!doctype html")
@@ -193,11 +214,11 @@ extension WebFetchTool: ProgressReportingTool {
                     // Persist the stripped copy so next call is even faster
                     cache.save(raw: cachedRaw, text: stripped, for: urlString)
                     return try await resolveResult(
-                        text: stripped, query: query, reportProgress: reportProgress)
+                        text: stripped, query: query, offset: offset, reportProgress: reportProgress)
                 }
             }
             return try await resolveResult(
-                text: cachedRaw, query: query, reportProgress: reportProgress)
+                text: cachedRaw, query: query, offset: offset, reportProgress: reportProgress)
         }
 
         // --- Network fetch ---
@@ -244,26 +265,48 @@ extension WebFetchTool: ProgressReportingTool {
             cache.save(raw: rawText, text: strippedText, for: urlString)
 
             let text = strippedText ?? rawText
-            return try await resolveResult(text: text, query: query, reportProgress: reportProgress)
+            return try await resolveResult(text: text, query: query, offset: offset, reportProgress: reportProgress)
         } catch {
             return .error("Fetch failed: \(error.localizedDescription)")
         }
     }
 
-    // Applies truncation limits to build the final ToolResult.
-    private func buildResult(text: String) -> ToolResult {
-        if text.count > maxOutputLength {
-            let truncated = String(text.prefix(maxOutputLength))
-            let omitted = text.count - maxOutputLength
-            return ToolResult(content: truncated, truncationMarker: "[... \(omitted) characters omitted ...]")
+    // Applies truncation limits to build the final ToolResult, optionally
+    // serving a window of the full content starting at `offset`. When more
+    // content remains after the returned window, the truncation marker reports
+    // the next offset so the model can continue reading the cached page.
+    private func buildResult(text: String, offset: Int = 0) -> ToolResult {
+        let total = text.count
+        let safeOffset = min(max(0, offset), total)
+
+        if safeOffset >= total {
+            // Offset is at or past the end — nothing left to read.
+            guard total > 0 else { return .success(text) }
+            return .success("[offset \(offset) is at or beyond the end of the page (\(total) characters total); no more content to read]")
         }
-        return .success(text)
+
+        let window = text.dropFirst(safeOffset)
+        if window.count > maxOutputLength {
+            let truncated = String(window.prefix(maxOutputLength))
+            let nextOffset = safeOffset + maxOutputLength
+            let omitted = total - nextOffset
+            let marker = "[... \(omitted) characters omitted (showing \(safeOffset)–\(nextOffset) of \(total)). "
+                + "To continue reading this page, call web_fetch again with the same url and offset: \(nextOffset) ...]"
+            return ToolResult(content: truncated, truncationMarker: marker)
+        }
+
+        // Final (or only) chunk fits within the limit.
+        if safeOffset > 0 {
+            return .success("[showing \(safeOffset)–\(total) of \(total) characters — end of page]\n\(String(window))")
+        }
+        return .success(String(window))
     }
 
     // Runs optional LLM query extraction, then applies size limits.
     private func resolveResult(
         text: String,
         query: String?,
+        offset: Int = 0,
         reportProgress: @escaping ToolProgressHandler
     ) async throws -> ToolResult {
         if let query = query, !query.isEmpty, let container = modelContainer, let config = generationConfig {
@@ -271,10 +314,11 @@ extension WebFetchTool: ProgressReportingTool {
             reportProgress("extracting relevant information")
             let extracted = try await extractWithLLM(text: text, query: query, container: container, config: config)
             reportProgress("finalizing result")
+            // Query extraction already condenses the page, so offset does not apply.
             return buildResult(text: "Extracted information for query '\(query)':\n\n\(extracted)")
         }
         reportProgress("finalizing result")
-        return buildResult(text: text)
+        return buildResult(text: text, offset: offset)
     }
 
     private func extractWithLLM(text: String, query: String, container: ModelContainer, config: GenerationEngine.Config) async throws -> String {
@@ -297,7 +341,8 @@ extension WebFetchTool: ProgressReportingTool {
             frequencyContextSize: config.frequencyContextSize,
             kvBits: config.kvBits,
             kvGroupSize: config.kvGroupSize,
-            quantizedKVStart: config.quantizedKVStart
+            quantizedKVStart: config.quantizedKVStart,
+            numDraftTokens: config.numDraftTokens
         )
         let prompt = """
         [INSTRUCTION]

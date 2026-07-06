@@ -75,6 +75,11 @@ public enum AgentEvent: Sendable {
 
     /// `<think>` lifecycle nested inside generation.
     case thinkingActivity(ActivityLifecycle)
+
+    /// Fired once per turn when the prompt token count is known (after
+    /// tokenisation, before the first generated token). Used to display
+    /// the ↑ count in the processing spinner.
+    case promptTokensKnown(Int)
 }
 
 // MARK: - Snapshots

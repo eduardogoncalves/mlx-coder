@@ -29,7 +29,9 @@ public struct ToolResultCondensationConfig: Sendable {
 }
 
 enum ToolResultCondensationPolicy {
-    private static let neverCondenseTools: Set<String> = ["todo", "list_dir", "dir_list"]
+    // read_skill is exempt: skill instructions must reach the model verbatim,
+    // and the tool already bounds its own output via pagination.
+    private static let neverCondenseTools: Set<String> = ["todo", "list_dir", "dir_list", "read_skill"]
 
     static func joinedToolOutput(result: ToolResult) -> String {
         var text = result.content
