@@ -350,6 +350,25 @@ public actor KnowledgeStore {
         }
     }
     
+    /// Update the content of an existing entry by ID.
+    public func update(id: UUID, content: String) throws {
+        guard let db else { throw StoreError.databaseNotOpen }
+        let newHash = sha256(content)
+        let sql = "UPDATE knowledge SET content = ?, content_hash = ? WHERE id = ?;"
+        var stmt: OpaquePointer?
+        defer { sqlite3_finalize(stmt) }
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+            throw StoreError.sqliteError("Failed to prepare update", sqlite3_errcode(db))
+        }
+        sqlite3_bind_text(stmt, 1, content, -1, _swift_sqlite_transient)
+        sqlite3_bind_text(stmt, 2, newHash, -1, _swift_sqlite_transient)
+        sqlite3_bind_text(stmt, 3, id.uuidString, -1, _swift_sqlite_transient)
+        guard sqlite3_step(stmt) == SQLITE_DONE else {
+            throw StoreError.sqliteError("Failed to update entry", sqlite3_errcode(db))
+        }
+        if sqlite3_changes(db) == 0 { throw StoreError.notFound }
+    }
+
     /// Get database statistics.
     public func stats() throws -> (entryCount: Int, dbSizeBytes: Int64) {
         guard let db else {

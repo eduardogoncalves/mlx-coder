@@ -93,7 +93,6 @@ public enum SwiftCoderTUIAppConfigBuilder {
                 AppConfig.CommandConfig(name: "/login",   description: "Add or update a remote provider in config.json"),
                 AppConfig.CommandConfig(name: "/logout",  description: "Remove a configured remote provider"),
                 AppConfig.CommandConfig(name: "/retry",   description: "Re-run the last prompt"),
-                AppConfig.CommandConfig(name: "/status",  description: "Show session status"),
                 AppConfig.CommandConfig(name: "/quit",    description: "Quit the application"),
             ],
             defaultModelIndex: defaultModelIndex,

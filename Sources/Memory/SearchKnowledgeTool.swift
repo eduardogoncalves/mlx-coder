@@ -83,7 +83,7 @@ public struct SearchKnowledgeTool: Tool {
         formatter.formatOptions = [.withFullDate]
 
         for entry in entries {
-            lines.append("[\(entry.type.rawValue)] \(formatter.string(from: entry.createdAt))")
+            lines.append("[\(entry.type.rawValue)] \(formatter.string(from: entry.createdAt))  id:\(entry.id.uuidString)")
             lines.append(entry.content)
             if !entry.tags.isEmpty {
                 lines.append("Tags: \(entry.tags.joined(separator: ", "))")

@@ -139,8 +139,18 @@ public struct ToolCallParser: Sendable {
             bodyString = String(text[openRange.upperBound..<closeRange.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
             nextSearchIndex = closeRange.upperBound
         } else {
-            bodyString = String(text[openRange.upperBound..<text.endIndex]).trimmingCharacters(in: .whitespacesAndNewlines)
-            nextSearchIndex = text.endIndex
+            // No closing tag — check if another opening tag follows immediately (model emitted
+            // multiple calls without closing tags). Use the next open tag as an implicit
+            // boundary so all calls in the response are parsed rather than lumped together.
+            let openToken = dialect.toolCallOpen
+            let nextOpenRange = text.range(of: openToken, range: openRange.upperBound..<text.endIndex)
+            if let nextOpenRange {
+                bodyString = String(text[openRange.upperBound..<nextOpenRange.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
+                nextSearchIndex = nextOpenRange.lowerBound
+            } else {
+                bodyString = String(text[openRange.upperBound..<text.endIndex]).trimmingCharacters(in: .whitespacesAndNewlines)
+                nextSearchIndex = text.endIndex
+            }
         }
 
         switch dialect {

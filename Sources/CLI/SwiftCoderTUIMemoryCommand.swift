@@ -13,6 +13,8 @@ enum TUIMemoryCommandParser {
         ("undo", "Delete last entry"),
         ("status", "Entry counts and DB stats"),
         ("snippet", "Generate work summary"),
+        ("remove", "Remove a memory entry (interactive picker)"),
+        ("edit", "Edit a memory entry (interactive picker + inline edit)"),
     ]
 
     // Second-level argument/option suggestions
@@ -63,7 +65,7 @@ enum TUIMemoryCommandParser {
 
 struct TUIMemorySlashCommand: SlashCommand {
     let name: String = "memory"
-    let description: String? = "Memory subsystem (/memory, /memory <save|log|search|list|undo|status|snippet>)"
+    let description: String? = "Memory subsystem (/memory, /memory <save|log|search|list|undo|status|snippet|remove|edit>)"
 
     func argumentCompletions(prefix: String) -> [AutocompleteItem] {
         let typed = prefix.trimmingCharacters(in: .whitespacesAndNewlines)

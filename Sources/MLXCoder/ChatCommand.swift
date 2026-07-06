@@ -917,7 +917,7 @@ func printREPLHelp() {
       \u{001B}[32m/voice-locale [id]\u{001B}[0m Set STT language (no arg = list all available locales)
       \u{001B}[32mCtrl+J, Option+Enter, \\+Enter\u{001B}[0m Insert newline in input box
       \u{001B}[32mCommand+V\u{001B}[0m      Paste text into input box (multiline supported)
-      \u{001B}[32m/memory <cmd>\u{001B}[0m  Memory commands: save, log, search, list, undo, status, snippet
+      \u{001B}[32m/memory <cmd>\u{001B}[0m  Memory commands: save, log, search, list, undo, status, snippet, remove, edit
       \u{001B}[32mEsc\u{001B}[0m            Cancel current generation
       \u{001B}[32mShift+Tab\u{001B}[0m      Cycle modes (default starts at Plan low):
                      Plan (low) → Plan (high) → General (fast) →
@@ -995,6 +995,8 @@ func handleMemoryCommand(
             "  /memory undo                              Delete last entry",
             "  /memory status                            Entry counts and DB stats",
             "  /memory snippet [--today|--week]          Generate work summary",
+            "  /memory remove                            Remove an entry (interactive picker)",
+            "  /memory edit                              Edit an entry (interactive picker + inline edit)",
         ])))
         return
     }
@@ -1044,7 +1046,7 @@ func handleMemoryCommand(
         
     case "status":
         await handleMemoryStatus(store: store, frontend: frontend)
-        
+
     case "snippet":
         let windowArg = parts.count >= 3 ? String(parts[2]) : nil
         await handleMemorySnippet(window: windowArg, workspaceRoot: workspaceRoot, store: store, frontend: frontend)
@@ -1052,6 +1054,95 @@ func handleMemoryCommand(
     default:
         frontend.emit(.memoryEvent(.error("Unknown memory subcommand: \(subcommand)")))
     }
+}
+
+// MARK: - Interactive Memory Remove
+
+@MainActor
+func handleMemoryInteractiveRemove(
+    workspaceRoot: String,
+    frontend: SwiftCoderTUIFrontend,
+    renderer: Renderer
+) async {
+    let store = KnowledgeStore.shared
+    do { try await store.initialize() } catch {
+        await renderer.printScrollLine("\(DesignSystem.brightRed)✗ Memory store error: \(error)\(DesignSystem.reset)")
+        return
+    }
+    let entries: [KnowledgeEntry]
+    do { entries = try await store.list(projectRoot: workspaceRoot, limit: 50) } catch {
+        await renderer.printScrollLine("\(DesignSystem.brightRed)✗ Failed to list entries: \(error)\(DesignSystem.reset)")
+        return
+    }
+    guard !entries.isEmpty else {
+        await renderer.printScrollLine("  No memory entries to remove.")
+        return
+    }
+
+    let options = entries.map {
+        "[\($0.type.rawValue)] \(String($0.content.prefix(70)).replacingOccurrences(of: "\n", with: " "))"
+    }
+    let pickerReq = OptionSelectRequest(prompt: "Select entry to remove:", options: options, escSelectsLastOption: false)
+    let pickerResp = await frontend.request(.optionSelect(pickerReq))
+    guard case .optionSelect(let idx) = pickerResp, let idx else {
+        await renderer.printScrollLine("  Cancelled.")
+        return
+    }
+    let entry = entries[idx]
+
+    let preview = String(entry.content.prefix(60)).replacingOccurrences(of: "\n", with: " ")
+    let confirmReq = OptionSelectRequest(
+        prompt: "Remove: \"\(preview)\"?",
+        options: ["Yes, delete this entry", "Cancel"],
+        escSelectsLastOption: true
+    )
+    let confirmResp = await frontend.request(.optionSelect(confirmReq))
+    guard case .optionSelect(let confirmIdx) = confirmResp, confirmIdx == 0 else {
+        await renderer.printScrollLine("  Cancelled.")
+        return
+    }
+
+    do {
+        try await store.delete(id: entry.id)
+        await renderer.printScrollLine("  \(DesignSystem.dim)✓ Entry removed.\(DesignSystem.reset)")
+    } catch {
+        await renderer.printScrollLine("\(DesignSystem.brightRed)✗ Remove failed: \(error)\(DesignSystem.reset)")
+    }
+}
+
+// MARK: - Interactive Memory Edit
+
+@MainActor
+func handleMemoryInteractiveEdit(
+    workspaceRoot: String,
+    frontend: SwiftCoderTUIFrontend,
+    renderer: Renderer
+) async -> KnowledgeEntry? {
+    let store = KnowledgeStore.shared
+    do { try await store.initialize() } catch {
+        await renderer.printScrollLine("\(DesignSystem.brightRed)✗ Memory store error: \(error)\(DesignSystem.reset)")
+        return nil
+    }
+    let entries: [KnowledgeEntry]
+    do { entries = try await store.list(projectRoot: workspaceRoot, limit: 50) } catch {
+        await renderer.printScrollLine("\(DesignSystem.brightRed)✗ Failed to list entries: \(error)\(DesignSystem.reset)")
+        return nil
+    }
+    guard !entries.isEmpty else {
+        await renderer.printScrollLine("  No memory entries to edit.")
+        return nil
+    }
+
+    let options = entries.map {
+        "[\($0.type.rawValue)] \(String($0.content.prefix(70)).replacingOccurrences(of: "\n", with: " "))"
+    }
+    let pickerReq = OptionSelectRequest(prompt: "Select entry to edit:", options: options, escSelectsLastOption: false)
+    let pickerResp = await frontend.request(.optionSelect(pickerReq))
+    guard case .optionSelect(let idx) = pickerResp, let idx else {
+        await renderer.printScrollLine("  Cancelled.")
+        return nil
+    }
+    return entries[idx]
 }
 
 func handleMemorySave(message: String, workspaceRoot: String, store: KnowledgeStore, frontend: any AgentFrontend) async {

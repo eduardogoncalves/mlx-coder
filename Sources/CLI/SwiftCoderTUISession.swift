@@ -4,7 +4,7 @@
 //
 // Scope of this initial pass:
 //   • Full-screen TUI shell (welcome, footer, scroll area)
-//   • Slash-commands `/clear`, `/quit`, `/help`, `/status` handled locally
+//   • Slash-commands `/clear`, `/quit`, `/help` handled locally
 //   • All other input goes to AgentLoop.processUserMessage, with output
 //     streamed via SwiftCoderTUIFrontend
 //   • Approval modal driven by Renderer.requestApproval (best-effort —
@@ -137,6 +137,12 @@ public func runSwiftCoderTUISession(
     // /login wizard state. While non-.idle, free-text input is captured by the
     // wizard and never forwarded to AgentLoop.
     var loginWizardStep: LoginWizardStep = .idle
+
+    // Memory edit mode — when non-nil, all keystrokes are captured by the
+    // inline editor and never forwarded to autocomplete or AgentLoop paths.
+    // Mirrors the loginWizardStep pattern; all access is @MainActor-isolated.
+    var pendingEditEntry: KnowledgeEntry? = nil
+    var memoryFlowTask: Task<Void, Never>? = nil
 
     // Voice input session state. `voiceProvider` is the same instance wired
     // into `AppConfig.voiceInputProvider` in `ChatCommand`, captured here so
@@ -350,6 +356,58 @@ public func runSwiftCoderTUISession(
                 await renderer.setInputBuffer("")
                 await renderer.renderFooter()
                 await renderer.printScrollLine("  Cancelled.")
+            default:
+                break
+            }
+            continue
+        }
+
+        // Memory edit mode — intercept all keystrokes while user edits an entry.
+        // Mirrors the loginWizardStep pattern: all input captured here, never
+        // forwarded to history navigation, model-cycle, or AgentLoop paths.
+        if pendingEditEntry != nil {
+            switch key {
+            case .character(let ch):
+                await renderer.appendChar(ch)
+                await renderer.renderFooter()
+            case .backspace, .delete:
+                await renderer.deleteChar()
+                await renderer.renderFooter()
+            case .arrowLeft:
+                await renderer.moveCursorLeft()
+                await renderer.renderFooter()
+            case .arrowRight:
+                await renderer.moveCursorRight()
+                await renderer.renderFooter()
+            case .paste(let pasted):
+                await renderer.insertText(pasted)
+                await renderer.renderFooter()
+            case .enter:
+                let newContent = (await renderer.submitInput() ?? "")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                let editEntry = pendingEditEntry!
+                pendingEditEntry = nil
+                await renderer.setStatusNotice(nil)
+                await renderer.renderFooter()
+                guard !newContent.isEmpty else {
+                    await renderer.printScrollLine("  Edit cancelled (empty content).")
+                    break
+                }
+                let store = KnowledgeStore.shared
+                do {
+                    try await store.initialize()
+                    try await store.update(id: editEntry.id, content: newContent)
+                    await renderer.printScrollLine("  \(DesignSystem.dim)✓ Entry updated.\(DesignSystem.reset)")
+                } catch {
+                    await renderer.printScrollLine("\(DesignSystem.brightRed)✗ Update failed: \(error)\(DesignSystem.reset)")
+                }
+                await renderer.renderFooter()
+            case .escape, .ctrlC:
+                pendingEditEntry = nil
+                await renderer.setStatusNotice(nil)
+                await renderer.setInputBuffer("")
+                await renderer.renderFooter()
+                await renderer.printScrollLine("  Edit cancelled.")
             default:
                 break
             }
@@ -576,8 +634,17 @@ public func runSwiftCoderTUISession(
                         await renderer.updateAutocomplete()
                         await renderer.renderFooter()
                     }
+                    continue
                 }
-                continue
+                // .plain result: auto-submit if the completed input is a slash command
+                // (e.g. "/model local" selected from palette → execute immediately).
+                // Non-command completions (e.g. @file in a message body) still require
+                // an explicit second Enter so the user can continue composing.
+                let completedInput = await renderer.getInputBuffer()
+                if !completedInput.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("/") {
+                    continue
+                }
+                // Fall through to the submit path below.
             }
             let prompt = (await renderer.submitInput()) ?? ""
             let trimmed = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -758,8 +825,45 @@ public func runSwiftCoderTUISession(
                 continue
             }
             if commandInput.hasPrefix("/memory") {
-                await handleMemoryCommand(trimmed: commandInput, workspaceRoot: workspaceRoot, frontend: frontend)
-                await renderer.renderFooter()
+                let sub = String(commandInput.dropFirst("/memory".count))
+                    .trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                if sub == "remove" || sub == "edit" {
+                    if await renderer.getIsGenerating() {
+                        await renderer.printScrollLine("\(DesignSystem.brightRed)✗ Cannot edit/remove entries while generating. Press Esc first.\(DesignSystem.reset)")
+                        await renderer.renderFooter()
+                    } else {
+                        let isEdit = sub == "edit"
+                        memoryFlowTask?.cancel()
+                        memoryFlowTask = Task { @MainActor in
+                            defer { memoryFlowTask = nil }
+                            if isEdit {
+                                if let entry = await handleMemoryInteractiveEdit(
+                                    workspaceRoot: workspaceRoot,
+                                    frontend: frontend,
+                                    renderer: renderer
+                                ) {
+                                    pendingEditEntry = entry
+                                    await renderer.setInputBuffer(entry.content)
+                                    await renderer.moveCursorToEnd()
+                                    await renderer.setStatusNotice("Editing memory entry — press Enter to save, Esc to cancel")
+                                    await renderer.renderFooter()
+                                } else {
+                                    await renderer.renderFooter()
+                                }
+                            } else {
+                                await handleMemoryInteractiveRemove(
+                                    workspaceRoot: workspaceRoot,
+                                    frontend: frontend,
+                                    renderer: renderer
+                                )
+                                await renderer.renderFooter()
+                            }
+                        }
+                    }
+                } else {
+                    await handleMemoryCommand(trimmed: commandInput, workspaceRoot: workspaceRoot, frontend: frontend)
+                    await renderer.renderFooter()
+                }
                 continue
             }
             if commandInput.hasPrefix("/steer") {
@@ -995,6 +1099,8 @@ public func runSwiftCoderTUISession(
     voiceSpinnerTask = nil
     voiceTask?.cancel()
     voiceTask = nil
+    memoryFlowTask?.cancel()
+    memoryFlowTask = nil
     await flushPendingTypedChunk(&pendingTypedChunk, renderer: renderer)
     await renderer.flushStreamLine()
     await renderer.teardownScreen()
@@ -1212,7 +1318,7 @@ private func helpLines() -> [String] {
         "  /caffeinate [on|off|busy|<dur>]  prevent system sleep (e.g. /caffeinate 2h)",
         "  /clear   clear the conversation",
         "  /help    this message",
-        "  /memory  memory commands (save/log/search/list/undo/status/snippet)",
+        "  /memory  memory commands (save/log/search/list/undo/status/snippet/remove/edit)",
         "  /context show context usage",
         "  /skills  list discovered skills",
         "  /model   open model chooser; /model <name|id|number> to switch",
