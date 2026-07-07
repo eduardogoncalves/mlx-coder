@@ -88,6 +88,12 @@ patch_mlx_swift_lm_for_swift6() {
         return
     fi
 
+    # 3.31.4+ uses #if compiler(>=6.2) guard with nonisolated(unsafe) in the else branch — no patch needed
+    if grep -q 'nonisolated(unsafe) private let context = CIContext(' "$target_file"; then
+        log "mlx-swift-lm already handles Swift 6 concurrency via compiler version guard"
+        return
+    fi
+
     fail "Could not find expected CIContext declaration to patch in ${target_file}"
 }
 
@@ -122,6 +128,7 @@ build_arch() {
         -destination "platform=macOS,arch=${target_arch}" \
         -derivedDataPath "$derived_data" \
         -clonedSourcePackagesDirPath "$PACKAGE_CHECKOUTS_DIR" \
+        -skipPackagePluginValidation \
         -resolvePackageDependencies \
         ${quiet_flag[@]+"${quiet_flag[@]}"} >&2; then
         fail "xcodebuild failed while resolving package dependencies for architecture ${target_arch}"
@@ -136,6 +143,7 @@ build_arch() {
         -destination "platform=macOS,arch=${target_arch}" \
         -derivedDataPath "$derived_data" \
         -clonedSourcePackagesDirPath "$PACKAGE_CHECKOUTS_DIR" \
+        -skipPackagePluginValidation \
         -disableAutomaticPackageResolution \
         -onlyUsePackageVersionsFromResolvedFile \
         ${quiet_flag[@]+"${quiet_flag[@]}"} \
