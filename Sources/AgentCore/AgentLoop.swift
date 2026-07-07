@@ -950,12 +950,19 @@ public actor AgentLoop {
             return deniedResult
         }
         
+        // Resolve early so permission prompts are never shown for hallucinated tool names.
+        let resolvedTool = await registry.tool(named: call.name)
+
         // Check if tool is allowed in current mode
-        let isDestructive = isDestructiveToolCall(call)
+        let isDestructive = resolvedTool != nil && isDestructiveToolCall(call)
         let allowReadOnlyBashInPlanMode = mode == .plan && isReadOnlyBashCall(call)
-        
+
         let approval: (approved: Bool, suggestion: String?)
-        if call.name == "plan_file" && mode == .plan {
+        if resolvedTool == nil {
+            // Unknown tool — auto-approve so execution reaches the "Unknown tool" error
+            // branch without prompting the user over a hallucinated call.
+            approval = (true, nil)
+        } else if call.name == "plan_file" && mode == .plan {
             approval = (true, nil)
         } else if call.name == "plan_file" {
             approval = await askForToolApproval(name: call.name, arguments: call.arguments, isPlanMode: false)
@@ -1010,7 +1017,6 @@ public actor AgentLoop {
                     )
                 }
 
-                let resolvedTool = await registry.tool(named: call.name)
                 let missingRequiredArgs = LoopDetectionService.missingRequiredArgumentNames(
                     required: resolvedTool?.parameters.required,
                     arguments: correctionResult.correctedArguments

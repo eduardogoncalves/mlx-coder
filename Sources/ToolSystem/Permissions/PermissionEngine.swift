@@ -94,7 +94,7 @@ public struct PermissionEngine: Sendable {
     }
 
     /// Resolve a path to an absolute, normalized, symlink-resolved location.
-    private func resolveAbsolutePath(_ path: String) -> String {
+    public func resolveAbsolutePath(_ path: String) -> String {
         let expanded = NSString(string: path).expandingTildeInPath
         let effectiveRoot = effectiveWorkspaceRoot
         let resolved = expanded.hasPrefix("/") ? expanded : effectiveRoot + "/" + expanded

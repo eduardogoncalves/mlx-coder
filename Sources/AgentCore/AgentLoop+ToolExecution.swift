@@ -77,12 +77,12 @@ extension AgentLoop {
         let directKeys = ["path", "file_path", "filePath", "search_path", "directory", "dir", "workspace"]
         for key in directKeys {
             if let value = arguments[key] as? String, !value.isEmpty {
-                return value
+                return permissions.resolveAbsolutePath(value)
             }
         }
 
         if let paths = arguments["paths"] as? [String], let first = paths.first, !first.isEmpty {
-            return first
+            return permissions.resolveAbsolutePath(first)
         }
 
         return nil
