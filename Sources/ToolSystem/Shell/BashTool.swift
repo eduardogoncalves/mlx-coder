@@ -30,12 +30,22 @@ public struct BashTool: Tool {
     private let permissions: PermissionEngine
     private let maxOutputLines: Int
     private let useSandbox: Bool
-    private let sandboxEngine = SandboxEngine()
+    private let sandboxEngine: SandboxEngine
 
-    public init(permissions: PermissionEngine, maxOutputLines: Int = 500, useSandbox: Bool = false) {
+    /// - Parameter networkPolicy: Controls whether sandboxed commands may open
+    ///   outbound network connections. Defaults to `.allow` to preserve legacy
+    ///   behaviour (package managers/builds often need network during a
+    ///   sandboxed run); pass `.deny` to block network egress inside the sandbox.
+    public init(
+        permissions: PermissionEngine,
+        maxOutputLines: Int = 500,
+        useSandbox: Bool = false,
+        networkPolicy: SandboxEngine.NetworkPolicy = .allow
+    ) {
         self.permissions = permissions
         self.maxOutputLines = maxOutputLines
         self.useSandbox = useSandbox
+        self.sandboxEngine = SandboxEngine(networkPolicy: networkPolicy)
     }
 
     public func execute(arguments: [String: Any]) async throws -> ToolResult {

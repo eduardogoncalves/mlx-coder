@@ -147,49 +147,75 @@ public enum SymlinkEscapeGuard {
         }
 
         for scanRoot in scanRoots {
+            // `.skipsHiddenFiles` is intentionally omitted so that hidden
+            // dotfile symlinks (e.g. `.secret -> /etc/passwd`) are included in
+            // the sweep — closing the gap where a command creates such a link
+            // via an interpreter and bypasses the pre-execution `ln` parser.
+            // To avoid the cost of descending into hidden VCS/build metadata
+            // dirs exposed by this change, we prune them explicitly below.
             guard let enumerator = fm.enumerator(
                 at: scanRoot,
-                includingPropertiesForKeys: [.isSymbolicLinkKey],
-                options: [.skipsHiddenFiles],
+                includingPropertiesForKeys: [.isSymbolicLinkKey, .isDirectoryKey],
+                options: [],
                 errorHandler: { _, _ in true }
             ) else {
                 continue
             }
 
             for case let url as URL in enumerator {
-                // Skip well-known large build/dependency directories to avoid
-                // per-command overhead on big workspaces. Symlinks inside these
-                // trees are managed by the package manager, not the agent.
-                if knownHeavyDirectories.contains(url.lastPathComponent) {
-                    enumerator.skipDescendants()
+                let name = url.lastPathComponent
+
+                // Evaluate symlink status FIRST so that a hidden file that
+                // happens to be a symlink is caught before the descent-pruning
+                // logic below has a chance to skip it.
+                let values = try? url.resourceValues(
+                    forKeys: [.isSymbolicLinkKey, .isDirectoryKey]
+                )
+
+                if values?.isSymbolicLink == true {
+                    // Resolve the symlink one step (so we get the literal target).
+                    guard let destination = try? fm.destinationOfSymbolicLink(
+                        atPath: url.path
+                    ) else { continue }
+
+                    let resolved = resolveTarget(
+                        destination,
+                        basePath: url.deletingLastPathComponent().path
+                    )
+
+                    if !pathIsInside(resolved, root: normalizedRoot) {
+                        try? fm.removeItem(at: url)
+                    }
+                    // Symlinks are leaves from the enumerator's perspective;
+                    // no descent decision needed.
                     continue
                 }
 
-                let values = try? url.resourceValues(forKeys: [.isSymbolicLinkKey])
-                guard values?.isSymbolicLink == true else { continue }
-
-                // Resolve the symlink one step (so we get the literal target).
-                guard let destination = try? fm.destinationOfSymbolicLink(
-                    atPath: url.path
-                ) else { continue }
-
-                let resolved = resolveTarget(
-                    destination,
-                    basePath: url.deletingLastPathComponent().path
-                )
-
-                if !pathIsInside(resolved, root: normalizedRoot) {
-                    try? fm.removeItem(at: url)
+                // For non-symlink entries, prune descent into well-known large
+                // build/dependency directories and VCS/build metadata dirs
+                // (the latter are newly exposed because we dropped .skipsHiddenFiles).
+                if values?.isDirectory == true,
+                   knownSkippedDirectories.contains(name) {
+                    enumerator.skipDescendants()
                 }
             }
         }
     }
 
-    /// Well-known directories that are managed by external package managers and
-    /// are unlikely to contain agent-created symlinks. Skipping them avoids
-    /// significant per-command overhead on large workspaces.
-    private static let knownHeavyDirectories: Set<String> = [
-        "node_modules", "Pods", "DerivedData", "dist", "vendor"
+    /// Directories skipped during the post-execution symlink sweep.
+    ///
+    /// This set merges two concerns:
+    /// - **Package-manager trees** (`node_modules`, `Pods`, …): managed by
+    ///   external tools; unlikely to hold agent-created symlinks; can be huge.
+    /// - **VCS / build metadata dirs** (`.git`, `.build`, `.swiftpm`, …):
+    ///   previously hidden from the enumerator by `.skipsHiddenFiles`; now that
+    ///   we removed that flag (to catch hidden dotfile symlinks), we prune them
+    ///   explicitly to avoid expensive, unnecessary descent.
+    private static let knownSkippedDirectories: Set<String> = [
+        // Package-manager trees
+        "node_modules", "Pods", "DerivedData", "dist", "vendor",
+        // VCS / build metadata (dotdirs now visited without .skipsHiddenFiles)
+        ".git", ".hg", ".svn", ".build", ".swiftpm",
     ]
 
     /// Extract unique workspace-relative directory paths explicitly referenced
