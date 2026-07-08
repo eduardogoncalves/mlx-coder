@@ -202,6 +202,39 @@ public actor ToolRegistry {
         return dialect.formatToolsBlock(toolsJSON: toolsString)
     }
 
+    /// Returns tool schemas as `[[String: any Sendable]]` for use with `ToolCallProcessor`.
+    /// Same OpenAI format as `generateOpenAIToolDefinitionsJSON`, but as a typed dictionary
+    /// so it can be passed directly to `ToolCallProcessor(format:tools:)`.
+    public func toolSchemasForProcessor(filter: ToolPromptFilter = .unfiltered) -> [[String: any Sendable]] {
+        guard let data = try? generateOpenAIToolDefinitionsJSON(filter: filter),
+              let array = (try? JSONSerialization.jsonObject(with: data)) as? [[String: Any]]
+        else { return [] }
+        return array.compactMap { Self.jsonDictToSendable($0) }
+    }
+
+    private static func jsonDictToSendable(_ dict: [String: Any]) -> [String: any Sendable]? {
+        var result: [String: any Sendable] = [:]
+        for (key, value) in dict {
+            guard let sv = jsonValueToSendable(value) else { continue }
+            result[key] = sv
+        }
+        return result
+    }
+
+    private static func jsonValueToSendable(_ value: Any) -> (any Sendable)? {
+        if let b = value as? Bool   { return b }
+        if let i = value as? Int    { return i }
+        if let d = value as? Double { return d }
+        if let s = value as? String { return s }
+        if let arr = value as? [Any] {
+            return arr.compactMap { jsonValueToSendable($0) }
+        }
+        if let dict = value as? [String: Any] {
+            return jsonDictToSendable(dict)
+        }
+        return nil
+    }
+
     private func filteredTools(for filter: ToolPromptFilter) -> [(String, any Tool)] {
         var selected: [(String, any Tool)]
 

@@ -382,10 +382,9 @@ public actor AgentLoop {
             let truncatedStream = writer.drainTruncatedStream()
 
             // Parse tool calls from text and remove ones already captured via streaming.
-            let parsedToolCalls = ToolCallParser.parse(
-                response,
-                dialect: toolCallDialect,
-                startsThinking: startedThinking
+            let parsedToolCalls = await parseToolCallsUsingProcessor(
+                response: response,
+                startedThinking: startedThinking
             )
             let toolCalls = deduplicateToolCalls(parsed: parsedToolCalls, streamed: streamedCalls)
 
@@ -846,6 +845,53 @@ public actor AgentLoop {
     }
 
     /// Deduplicates parsed tool calls against streamed tool calls.
+    /// Parse tool calls from `response` using `ToolCallProcessor` (mlx-swift-lm) as the
+    /// primary path, with `ToolCallParser` as a fallback for JSON the processor rejects
+    /// but our sanitiser can recover (e.g. literal newlines inside string values).
+    ///
+    /// Using the processor gives us:
+    /// - Whitelist validation against the registered tool schemas
+    /// - Type-aware argument coercion (string `"42"` → Int)
+    /// - Automatic double-decode for models that stringify the arguments object
+    private func parseToolCallsUsingProcessor(
+        response: String,
+        startedThinking: Bool
+    ) async -> [ToolCallParser.ParsedToolCall] {
+        let promptFilter = AgentLoop.buildToolPromptFilter(mode: mode, taskType: taskType)
+        let schemas = await registry.toolSchemasForProcessor(filter: promptFilter)
+
+        let format: ToolCallFormat = switch toolCallDialect {
+        case .qwen: .json
+        case .lfm2: .lfm2
+        }
+
+        let processor = ToolCallProcessor(format: format, tools: schemas.isEmpty ? nil : schemas)
+
+        // ToolCallProcessor doesn't suppress tags inside <think>…</think>.
+        // Mirror ToolCallParser's logic: if thinking is unclosed (no </think>), all
+        // remaining content is still internal monologue — return empty immediately.
+        // Only strip closed thinking blocks before feeding to the processor.
+        if startedThinking && !response.contains(ToolCallPattern.thinkClose) {
+            return []
+        }
+        let text = startedThinking ? ToolCallParser.stripThinking(response) : response
+        _ = processor.processChunk(text)
+        processor.processEOS()
+
+        if !processor.toolCalls.isEmpty {
+            return processor.toolCalls.map { call in
+                ToolCallParser.ParsedToolCall(
+                    name: call.function.name,
+                    arguments: call.function.arguments.mapValues { $0.anyValue }
+                )
+            }
+        }
+
+        // Fallback: processor found nothing — retry with the hand-rolled parser whose
+        // sanitiser can recover JSON with literal newlines and trailing-brace truncation.
+        return ToolCallParser.parse(response, dialect: toolCallDialect, startsThinking: startedThinking)
+    }
+
     private func deduplicateToolCalls(
         parsed: [ToolCallParser.ParsedToolCall],
         streamed: [StreamedToolCall]
