@@ -69,7 +69,8 @@ final class DoctorChecksTests: XCTestCase {
             workspaceRoot: tempDir.path,
             runtimeConfig: RuntimeConfig(),
             cliMCPConfig: nil,
-            includeHomeSkills: false
+            includeHomeSkills: false,
+            userConfigPathOverride: tempDir.appendingPathComponent("no-such-config.json").path
         )
 
         XCTAssertEqual(payload.workspace, tempDir.path)
