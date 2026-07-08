@@ -418,8 +418,13 @@ public actor GitService {
         let cwd = resolveWorkingDirectory(workingDirectory)
         let shell = Process()
         shell.executableURL = URL(fileURLWithPath: "/bin/zsh")
-        shell.arguments = ["-lc", command]
+        // Use "-c" (not "-lc") so that login profiles (~/.zprofile, ~/.zshrc)
+        // are never sourced. Combined with the scrubbed environment below this
+        // prevents DYLD_*, LD_*, IFS, and other injected variables from
+        // reaching the verification command (mirrors BashTool.safeEnvironment).
+        shell.arguments = ["-c", command]
         shell.currentDirectoryURL = URL(fileURLWithPath: cwd)
+        shell.environment = safeEnvironment()
 
         let stdout = Pipe()
         let stderr = Pipe()
@@ -443,6 +448,11 @@ public actor GitService {
         process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
         process.arguments = args
         process.currentDirectoryURL = URL(fileURLWithPath: cwd)
+        // Git honours several sensitive env vars (GIT_EXEC_PATH, LD_PRELOAD,
+        // DYLD_INSERT_LIBRARIES, etc.). Use a scrubbed environment that blocks
+        // loader-injection variables while preserving the auth passthrough
+        // (SSH agent socket, GIT_SSH*, askpass) that remote push/pull needs.
+        process.environment = gitEnvironment()
 
         let standardOutput = Pipe()
         let standardError = Pipe()
@@ -488,6 +498,66 @@ public actor GitService {
             return nil
         }
         return URL(filePath: match.path).standardized.path()
+    }
+
+    /// Returns a scrubbed, whitelisted environment for all child processes.
+    ///
+    /// Mirrors the isolation strategy used by BashTool.safeEnvironment.
+    /// Starting from an empty dictionary ensures that no DYLD_*, LD_*, IFS,
+    /// or other injected loader/shell variables leak into child processes.
+    /// Only a minimal allow-list of keys is copied from the parent environment,
+    /// then PATH is unconditionally replaced with a known-safe value so that
+    /// git and shell built-ins can still be located without relying on
+    /// attacker-controlled PATH entries.
+    private func safeEnvironment() -> [String: String] {
+        let parent = ProcessInfo.processInfo.environment
+        let allowedKeys = ["PATH", "HOME", "USER", "LANG", "LC_ALL", "TERM"]
+
+        // Start empty — guarantees no DYLD_*/LD_* bleed-through.
+        var env: [String: String] = [:]
+        for key in allowedKeys {
+            if let value = parent[key] {
+                env[key] = value
+            }
+        }
+
+        // Override PATH with a known-safe set of directories regardless of
+        // what the parent process had set.
+        env["PATH"] = "/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+
+        return env
+    }
+
+    /// Environment for `git` subprocesses. Starts from the scrubbed base (no
+    /// DYLD_*/LD_*/IFS bleed-through, safe PATH) and then re-adds the subset of
+    /// parent variables that remote operations legitimately need — the SSH agent
+    /// socket, SSH/askpass helpers, and user-set `GIT_*` configuration — so
+    /// `push`/`pull`/`fetch` over SSH or credential-helper HTTPS keep working.
+    /// None of the re-added keys can influence the dynamic loader, so the
+    /// injection hardening from `safeEnvironment()` is preserved.
+    private func gitEnvironment() -> [String: String] {
+        var env = safeEnvironment()
+        let parent = ProcessInfo.processInfo.environment
+
+        // Auth/transport passthrough keys that are safe (not loader variables).
+        let authKeys = [
+            "SSH_AUTH_SOCK", "SSH_AGENT_PID", "SSH_ASKPASS", "DISPLAY",
+            "GIT_SSH", "GIT_SSH_COMMAND", "GIT_ASKPASS", "GIT_TERMINAL_PROMPT",
+        ]
+        for key in authKeys {
+            if let value = parent[key] {
+                env[key] = value
+            }
+        }
+
+        // Pass through user-set GIT_* configuration (author/committer identity,
+        // config overrides, etc.) except GIT_EXEC_PATH, which can redirect git
+        // to attacker-supplied helper binaries.
+        for (key, value) in parent where key.hasPrefix("GIT_") && key != "GIT_EXEC_PATH" {
+            env[key] = value
+        }
+
+        return env
     }
 
     private func resolveWorkingDirectory(_ workingDirectory: String?) -> String {
