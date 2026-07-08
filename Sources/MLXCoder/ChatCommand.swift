@@ -162,6 +162,7 @@ struct ChatCommand: AsyncParsableCommand {
             workspaceRoot: absWorkspace,
             approvalMode: permissions.approvalMode.rawValue
         )
+        warnIfUnsafeCommandExecution(renderer: renderer, sandboxEnabled: effectiveSandbox, permissions: permissions)
 
         // Build generation config earlier for ToolRegistry
         let config = GenerationEngine.Config(

@@ -188,6 +188,7 @@ struct RunCommand: AsyncParsableCommand {
             workspaceRoot: absWorkspace,
             approvalMode: permissions.approvalMode.rawValue
         )
+        warnIfUnsafeCommandExecution(renderer: renderer, sandboxEnabled: effectiveSandbox, permissions: permissions)
 
         let registry = ToolRegistry()
         let runtimeMCPConfigs = runtimeMCPServerConfigs(

@@ -194,6 +194,20 @@ func resolvedSandbox(cliSandbox: Bool, runtimeConfig: RuntimeConfig) -> Bool {
     return runtimeConfig.defaultSandbox ?? cliSandbox
 }
 
+/// Emit a one-time security warning when shell commands can run with full user
+/// privileges and nothing gates them: no sandbox, an allow-all command list, and
+/// the `yolo` approval mode (which auto-approves every tool call). When the
+/// approval mode still prompts before destructive actions (`default`/`auto-edit`)
+/// we stay silent, since the user already confirms each command interactively.
+func warnIfUnsafeCommandExecution(renderer: StreamRenderer, sandboxEnabled: Bool, permissions: PermissionEngine) {
+    guard !sandboxEnabled,
+          permissions.allowedCommands.contains("*"),
+          permissions.approvalMode == .yolo else {
+        return
+    }
+    renderer.printStatus("⚠️  Security: shell commands run unsandboxed with full user privileges and 'yolo' auto-approves every tool call. Consider --sandbox or an approval mode (default/auto-edit) that prompts before destructive actions.")
+}
+
 func resolvedDryRun(cliDryRun: Bool, runtimeConfig: RuntimeConfig) -> Bool {
     if cliDryRun == true {
         return true
