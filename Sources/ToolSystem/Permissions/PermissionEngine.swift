@@ -74,7 +74,36 @@ public struct PermissionEngine: Sendable {
     public init(
         workspaceRoot: String,
         allowedCommands: [String] = ["*"],
-        deniedCommands: [String] = ["rm -rf /", "sudo *", "shutdown *", "reboot *"],
+        // NOTE: Command denylisting is best-effort defense-in-depth, NOT a security
+        // boundary. fnmatch patterns are trivially bypassed via quoting, env
+        // indirection, shell chaining, base64, alternate binaries, etc. Real
+        // isolation comes from running with `--sandbox` and/or an approval mode
+        // that gates each command. These patterns only catch the obvious,
+        // unchained footguns and tolerate the common bypasses of the original
+        // intent (flag reordering, path-prefixed binaries, root globs).
+        deniedCommands: [String] = [
+            // Privilege escalation — anywhere in the command (also `/usr/bin/sudo`).
+            "*sudo *", "*doas *",
+            // Recursive force-delete of an absolute/home root ("rm -rf /",
+            // "rm -rf /*", "rm -fr /etc", "rm -rf ~", …) in either -r/-f ordering.
+            // Relative deletes ("rm -rf build", "rm -rf ./out") are intentionally
+            // NOT matched so normal cleanup keeps working.
+            "*rm -rf /*", "*rm -fr /*",
+            "*rm -r -f /*", "*rm -f -r /*",
+            "*rm -rf ~*", "*rm -fr ~*",
+            "*rm -rf --no-preserve-root*", "*rm -fr --no-preserve-root*",
+            // Power-state changes — invoked as the command (bare or via absolute
+            // path), not merely mentioned as an argument to another tool.
+            "shutdown", "shutdown *", "*/shutdown", "*/shutdown *",
+            "reboot", "reboot *", "*/reboot", "*/reboot *",
+            "halt", "halt *", "*/halt", "*/halt *",
+            "poweroff", "poweroff *", "*/poweroff", "*/poweroff *",
+            // Filesystem / raw-device destruction.
+            "*mkfs*",
+            "*dd *of=/dev/*",
+            "*diskutil *erase*",
+            "*> /dev/sd*", "*> /dev/disk*", "*> /dev/rdisk*",
+        ],
         approvalMode: ApprovalMode = .default,
         policy: PolicyDocument? = nil,
         ignoredPathPatterns: [String] = []
@@ -107,7 +136,11 @@ public struct PermissionEngine: Sendable {
         let effectiveRoot = effectiveWorkspaceRoot
         let finalPath = resolveAbsolutePath(path)
 
-        guard finalPath.hasPrefix(effectiveRoot) else {
+        // Match the root exactly or require a trailing separator. A bare
+        // `hasPrefix(effectiveRoot)` would also accept sibling directories that
+        // merely share the prefix (e.g. `/Users/x/proj-secrets` for a workspace
+        // `/Users/x/proj`), allowing writes/search to escape the workspace.
+        guard finalPath == effectiveRoot || finalPath.hasPrefix(effectiveRoot + "/") else {
             throw PermissionError.pathOutsideWorkspace(
                 path: finalPath,
                 workspaceRoot: effectiveRoot
