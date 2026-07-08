@@ -15,7 +15,16 @@ func approvalDecisionModeTransition(
 ) -> ApprovalDecisionModeTransition? {
     switch decision {
     case .switchToAgentAndAllow:
-        return ApprovalDecisionModeTransition(workingMode: .agent, taskType: currentTaskType)
+        // Leaving PLAN mode via the block prompt must land in a normal agent
+        // mode with per-tool approvals — never autopilot. If the session was
+        // carrying the autopilot task type (.general, e.g. PLAN was entered
+        // from autopilot via `/plan`, which preserves taskType), collapse it to
+        // .coding so "Switch to AGENT mode and allow" doesn't silently
+        // auto-approve every subsequent tool call. Coding/reasoning are
+        // preserved. This matches the `/plan` toggle's own exit, which forces
+        // .coding when leaving PLAN.
+        let resolvedTaskType: AgentLoop.TaskType = currentTaskType == .general ? .coding : currentTaskType
+        return ApprovalDecisionModeTransition(workingMode: .agent, taskType: resolvedTaskType)
     case .allowAllAutopilot:
         return ApprovalDecisionModeTransition(workingMode: .agent, taskType: .general)
     default:
