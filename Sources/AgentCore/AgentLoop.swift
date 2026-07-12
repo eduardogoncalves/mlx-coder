@@ -327,8 +327,24 @@ public actor AgentLoop {
         var hasRetriedFailedTurn = false
 
         while iterations < maxToolIterations {
-            iterations += 1
             await applyDeterministicContextCompactionIfNeeded(reason: "before_generation")
+
+            // Flush any pending steering messages before generating. The post-execution
+            // drain below handles the normal path, but the malformed-tool-call path uses
+            // `continue` to skip it — so we drain here too to guarantee the model sees
+            // the correction prompt on its next attempt.
+            if !steeringQueue.isEmpty {
+                let pending = steeringQueue
+                steeringQueue.removeAll()
+                for item in pending {
+                    frontend.emitStatus("↩️  Steering: \(item.message)")
+                    switch item.origin {
+                    case .human:     history.addUser(item.message)
+                    case .automated: history.addAutomated(item.message)
+                    }
+                    await hooks.emit(.steeringInjected(message: item.message))
+                }
+            }
 
             // Generate response
             let generationResult: (text: String, writer: StreamingToolCallWriter, startedThinking: Bool, turnStats: (promptTokens: Int, completionTokens: Int, elapsed: TimeInterval, tokensPerSecond: Double?)?)
@@ -444,6 +460,7 @@ public actor AgentLoop {
                         ? " Your last response was a bare JSON object — that is NOT a tool call and will never execute. Discard that shape entirely."
                         : ""
                     steeringQueue.append(.init(message: "Your previous tool call was malformed and could not be parsed.\(bareJSONNote) Re-emit only the tool call using the exact \(example) format. Use one of the tool names listed in the system prompt. Do not add explanation text, code fences, or any JSON outside the tool-call markers.", origin: .automated))
+                    iterations += 1
                     continue
                 }
 
@@ -517,12 +534,18 @@ public actor AgentLoop {
             // Add the assistant's response (including tool calls) to history
             history.addAssistant(response)
 
-            // Handle streamed tool calls first (content already written to .tmp files)
-            for streamedCall in streamedCalls {
+            // Handle streamed tool calls first (content already written to .tmp files).
+            // Stop at the first failure: remaining calls are deferred and the model is
+            // steered to fix the failed call before re-emitting the skipped ones.
+            var streamedCallFailed = false
+            for (streamIndex, streamedCall) in streamedCalls.enumerated() {
                 frontend.emit(.toolCallStarted(ToolCallSnapshot(name: streamedCall.toolName, arguments: stringifyArgs(["path": streamedCall.path, "content": "[streamed to tmp]"]))))
                 let streamResult = await handleStreamedToolCall(streamedCall)
                 frontend.emit(.toolCallResult(makeDisplaySnapshot(toolName: streamedCall.toolName, result: streamResult)))
-                if streamResult.isError { iterationAnyToolFailed = true }
+                if streamResult.isError {
+                    iterationAnyToolFailed = true
+                    streamedCallFailed = true
+                }
 
                 // Track file modifications
                 if !streamResult.isError {
@@ -544,31 +567,59 @@ public actor AgentLoop {
                     userGoal: userGoal
                 )
                 history.addToolResponse(toolResponse, toolCallId: streamedCall.toolName)
+
+                if streamedCallFailed {
+                    // Collect remaining unexecuted calls (rest of streamed + all parsed).
+                    let deferredNames = streamedCalls[(streamIndex + 1)...].map(\.toolName)
+                        + toolCalls.map(\.name)
+                    if !deferredNames.isEmpty {
+                        let list = deferredNames.map { "'\($0)'" }.joined(separator: ", ")
+                        steeringQueue.append(.init(
+                            message: "Tool '\(streamedCall.toolName)' failed (see result above). The following tool calls were deferred and not executed: [\(list)]. Fix '\(streamedCall.toolName)' first, then re-emit the deferred calls in your next response.",
+                            origin: .automated
+                        ))
+                    }
+                    break
+                }
             }
 
-            // Execute each tool call from text parsing
-            for call in toolCalls {
-                let result = await executeToolCall(
-                    call: call,
-                    lastReadFileSignature: &lastReadFileSignature,
-                    sameReadFileStreak: &sameReadFileStreak,
-                    readLoopSteeredPaths: &readLoopSteeredPaths,
-                    lastReadOnlyToolSignature: &lastReadOnlyToolSignature,
-                    sameReadOnlyToolStreak: &sameReadOnlyToolStreak,
-                    readOnlyLoopSteeredSignatures: &readOnlyLoopSteeredSignatures,
-                    fileModificationToolsExecuted: &fileModificationToolsExecuted,
-                    modifiedFilePaths: &modifiedFilePaths
-                )
-                if result.isError { iterationAnyToolFailed = true }
+            // Execute each tool call from text parsing, stopping at the first failure.
+            // If a streamed call already failed, all parsed calls are also deferred.
+            if !streamedCallFailed {
+                for (callIndex, call) in toolCalls.enumerated() {
+                    let result = await executeToolCall(
+                        call: call,
+                        lastReadFileSignature: &lastReadFileSignature,
+                        sameReadFileStreak: &sameReadFileStreak,
+                        readLoopSteeredPaths: &readLoopSteeredPaths,
+                        lastReadOnlyToolSignature: &lastReadOnlyToolSignature,
+                        sameReadOnlyToolStreak: &sameReadOnlyToolStreak,
+                        readOnlyLoopSteeredSignatures: &readOnlyLoopSteeredSignatures,
+                        fileModificationToolsExecuted: &fileModificationToolsExecuted,
+                        modifiedFilePaths: &modifiedFilePaths
+                    )
 
-                let userGoal = history.latestUserMessage ?? ""
-                let toolResponse = try await makeToolResponseForHistory(
-                    toolName: call.name,
-                    result: result,
-                    userGoal: userGoal
-                )
+                    let userGoal = history.latestUserMessage ?? ""
+                    let toolResponse = try await makeToolResponseForHistory(
+                        toolName: call.name,
+                        result: result,
+                        userGoal: userGoal
+                    )
+                    history.addToolResponse(toolResponse, toolCallId: call.name)
 
-                history.addToolResponse(toolResponse, toolCallId: call.name)
+                    if result.isError {
+                        iterationAnyToolFailed = true
+                        let deferredNames = toolCalls[(callIndex + 1)...].map(\.name)
+                        if !deferredNames.isEmpty {
+                            let list = deferredNames.map { "'\($0)'" }.joined(separator: ", ")
+                            steeringQueue.append(.init(
+                                message: "Tool '\(call.name)' failed (see result above). The following tool calls were deferred and not executed: [\(list)]. Fix '\(call.name)' first, then re-emit the deferred calls in your next response.",
+                                origin: .automated
+                            ))
+                        }
+                        break
+                    }
+                }
             }
 
             // If any tool in this iteration failed, mark the whole iteration (assistant
@@ -577,6 +628,9 @@ public actor AgentLoop {
             // remove them when the turn completes so only the successful path persists.
             if iterationAnyToolFailed {
                 history.markTransient(from: iterationStartIndex)
+                iterations += 1
+            } else {
+                iterations = 0
             }
 
             // After processing all tool calls for this turn, drain the steering queue.
