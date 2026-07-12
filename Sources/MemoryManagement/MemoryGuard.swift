@@ -51,21 +51,37 @@ public struct MemoryGuard: Sendable {
     /// Create budget from detected chip info.
     public static func budgetFor(chip: ChipDetector.ChipInfo) -> Budget {
         let totalGB = chip.totalMemoryGB
+        let gb = 1_073_741_824.0
         if totalGB <= 8 {
             return .m1_8gb
         } else if totalGB <= 16 {
+            // M1/M2 16GB, M3/M4 16GB — 70% of RAM.
+            let total = Int(totalGB * 0.70 * gb)
             return Budget(
-                totalBytes:   Int(totalGB * 0.7 * 1_073_741_824), // 70% of RAM
+                totalBytes:   total,
                 modelBytes:   4_000_000_000,
                 cacheBytes:   2_000_000_000,
-                runtimeBytes: Int(totalGB * 0.7 * 1_073_741_824) - 6_000_000_000
+                runtimeBytes: max(0, total - 6_000_000_000)
+            )
+        } else if totalGB <= 32 {
+            // M5 24GB, M4 Pro/Max 24-32GB — 75% of RAM.
+            // More aggressive: these chips have high-bandwidth unified memory and macOS
+            // typically uses only ~4-5 GB of background footprint.
+            let total = Int(totalGB * 0.75 * gb)
+            return Budget(
+                totalBytes:   total,
+                modelBytes:   6_000_000_000,
+                cacheBytes:   6_000_000_000,  // larger MLX buffer cache for longer contexts
+                runtimeBytes: max(0, total - 12_000_000_000)
             )
         } else {
+            // 36GB+ (M4 Max 36GB, M5 Pro/Max, etc.) — 80% of RAM.
+            let total = Int(totalGB * 0.80 * gb)
             return Budget(
-                totalBytes:   Int(totalGB * 0.6 * 1_073_741_824), // 60% of RAM
-                modelBytes:   4_000_000_000,
-                cacheBytes:   4_000_000_000,
-                runtimeBytes: Int(totalGB * 0.6 * 1_073_741_824) - 8_000_000_000
+                totalBytes:   total,
+                modelBytes:   10_000_000_000,
+                cacheBytes:   8_000_000_000,
+                runtimeBytes: max(0, total - 18_000_000_000)
             )
         }
     }
