@@ -160,6 +160,10 @@ public struct ToolCallParser: Sendable {
             }
         case .lfm2:
             results.append(contentsOf: LFM2ToolCallBodyParser.parse(bodyString))
+        case .glm4:
+            if let call = parseGLM4Body(bodyString) {
+                results.append(call)
+            }
         }
 
         return nextSearchIndex..<text.endIndex
@@ -195,6 +199,44 @@ public struct ToolCallParser: Sendable {
             return nil
         }
         return String(text[openRange.upperBound..<closeRange.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Parses GLM4's native XML format: `name<arg_key>k</arg_key><arg_value>v</arg_value>…`
+    private static func parseGLM4Body(_ body: String) -> ParsedToolCall? {
+        let argKeyOpen  = "<arg_key>"
+        let argKeyClose = "</arg_key>"
+        let argValOpen  = "<arg_value>"
+        let argValClose = "</arg_value>"
+
+        // Tool name is everything before the first <arg_key> (or the whole body if no args).
+        let toolName: String
+        var rest: Substring
+        if let firstKey = body.range(of: argKeyOpen) {
+            toolName = String(body[body.startIndex..<firstKey.lowerBound])
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            rest = body[firstKey.lowerBound...]
+        } else {
+            // No arguments — bare tool name.
+            toolName = body.trimmingCharacters(in: .whitespacesAndNewlines)
+            rest = ""
+        }
+
+        guard !toolName.isEmpty else { return nil }
+
+        var arguments: [String: Any] = [:]
+        var searchStr = String(rest)
+
+        while let keyOpen = searchStr.range(of: argKeyOpen),
+              let keyClose = searchStr.range(of: argKeyClose, range: keyOpen.upperBound..<searchStr.endIndex),
+              let valOpen  = searchStr.range(of: argValOpen,  range: keyClose.upperBound..<searchStr.endIndex),
+              let valClose = searchStr.range(of: argValClose, range: valOpen.upperBound..<searchStr.endIndex) {
+            let key   = String(searchStr[keyOpen.upperBound..<keyClose.lowerBound])
+            let value = String(searchStr[valOpen.upperBound..<valClose.lowerBound])
+            arguments[key] = looseToolCallValue(from: value)
+            searchStr = String(searchStr[valClose.upperBound...])
+        }
+
+        return ParsedToolCall(name: toolName, arguments: arguments)
     }
 
     private static func parseJSON(_ jsonString: String) -> ParsedToolCall? {

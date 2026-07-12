@@ -8,11 +8,14 @@ public enum ToolCallDialect: Sendable, Equatable {
     case qwen
     /// LFM2 — `<|tool_call_start|>[name(arg='value', ...)]<|tool_call_end|>`.
     case lfm2
+    /// GLM4 (THUDM/ChatGLM) — `<tool_call>name<arg_key>k</arg_key><arg_value>v</arg_value>…</tool_call>`.
+    case glm4
 
     public var toolCallOpen: String {
         switch self {
         case .qwen: return "<tool_call>"
         case .lfm2: return "<|tool_call_start|>"
+        case .glm4: return "<tool_call>"
         }
     }
 
@@ -20,6 +23,7 @@ public enum ToolCallDialect: Sendable, Equatable {
         switch self {
         case .qwen: return "</tool_call>"
         case .lfm2: return "<|tool_call_end|>"
+        case .glm4: return "</tool_call>"
         }
     }
 
@@ -29,6 +33,7 @@ public enum ToolCallDialect: Sendable, Equatable {
         switch self {
         case .qwen: return true
         case .lfm2: return false
+        case .glm4: return false
         }
     }
 
@@ -37,6 +42,9 @@ public enum ToolCallDialect: Sendable, Equatable {
         let lower = modelPath.lowercased()
         if lower.contains("lfm2") || lower.contains("lfm-2") || lower.contains("lfm2.5") {
             return .lfm2
+        }
+        if lower.contains("glm-4") || lower.contains("glm4") || lower.contains("chatglm") {
+            return .glm4
         }
         return .qwen
     }
@@ -85,6 +93,25 @@ public enum ToolCallDialect: Sendable, Equatable {
             When no tool call is needed, respond with plain natural-language text (no JSON wrapper).
             After tool results return, continue your reasoning toward the final answer.
             """
+        case .glm4:
+            return """
+            When you need to use a tool, respond with the tool call in this format:
+            \(toolCallOpen)tool_name<arg_key>param_name</arg_key><arg_value>param_value</arg_value>\(toolCallClose)
+
+            For multiple arguments, chain additional <arg_key>/<arg_value> pairs:
+            \(toolCallOpen)tool_name<arg_key>param1</arg_key><arg_value>value1</arg_value><arg_key>param2</arg_key><arg_value>value2</arg_value>\(toolCallClose)
+
+            The tool name goes DIRECTLY after \(toolCallOpen) with NO space or JSON wrapper.
+            Do NOT use JSON inside \(toolCallOpen)…\(toolCallClose). Do NOT add prose before or after the tool call.
+
+            Concrete examples:
+              \(toolCallOpen)list_dir<arg_key>path</arg_key><arg_value>.</arg_value>\(toolCallClose)
+              \(toolCallOpen)read_file<arg_key>path</arg_key><arg_value>README.md</arg_value>\(toolCallClose)
+              \(toolCallOpen)bash<arg_key>command</arg_key><arg_value>ls -la</arg_value>\(toolCallClose)
+
+            You can call multiple tools in a single response by emitting multiple \(toolCallOpen)…\(toolCallClose) blocks.
+            After tool results are returned, continue your reasoning.
+            """
         }
     }
 
@@ -97,6 +124,8 @@ public enum ToolCallDialect: Sendable, Equatable {
             return "\(ToolCallPattern.toolsOpen)\n\(toolsJSON)\n\(ToolCallPattern.toolsClose)"
         case .lfm2:
             return "List of tools: \(toolsJSON)"
+        case .glm4:
+            return "\(ToolCallPattern.toolsOpen)\n\(toolsJSON)\n\(ToolCallPattern.toolsClose)"
         }
     }
 }

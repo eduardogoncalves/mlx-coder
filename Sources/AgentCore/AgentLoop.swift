@@ -437,6 +437,8 @@ public actor AgentLoop {
                         example = "<tool_call>{\"name\":\"tool_name\",\"arguments\":{...}}</tool_call>"
                     case .lfm2:
                         example = "<|tool_call_start|>[tool_name(param='value')]<|tool_call_end|>"
+                    case .glm4:
+                        example = "<tool_call>tool_name<arg_key>param</arg_key><arg_value>value</arg_value></tool_call>"
                     }
                     let bareJSONNote = responseLooksLikeBareJSONToolCall
                         ? " Your last response was a bare JSON object — that is NOT a tool call and will never execute. Discard that shape entirely."
@@ -870,6 +872,7 @@ public actor AgentLoop {
         let format: ToolCallFormat = switch toolCallDialect {
         case .qwen: .json
         case .lfm2: .lfm2
+        case .glm4: .glm4
         }
 
         let processor = ToolCallProcessor(format: format, tools: schemas.isEmpty ? nil : schemas)
