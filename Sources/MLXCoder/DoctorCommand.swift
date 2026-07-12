@@ -192,6 +192,7 @@ func buildDoctorPayload(
     runtimeConfig: RuntimeConfig,
     cliMCPConfig: MCPClient.ServerConfig?,
     includeHomeSkills: Bool = true,
+    userConfigPathOverride: String? = nil,
     commandAvailable: (String) -> Bool = isCommandAvailable
 ) -> DoctorPayload {
     var checks: [DoctorCheck] = []
@@ -204,7 +205,8 @@ func buildDoctorPayload(
         checks.append(DoctorCheck(name: "workspace", status: .fail, message: "Workspace root does not exist or is not a directory."))
     }
 
-    let userConfigPath = fileManager.homeDirectoryForCurrentUser.path + "/.mlx-coder/config.json"
+    let userConfigPath = userConfigPathOverride
+        ?? (fileManager.homeDirectoryForCurrentUser.path + "/.mlx-coder/config.json")
     let workspaceConfigPath = workspaceRoot + "/.mlx-coder-config.json"
     let userExists = fileManager.fileExists(atPath: userConfigPath)
     let workspaceExists = fileManager.fileExists(atPath: workspaceConfigPath)

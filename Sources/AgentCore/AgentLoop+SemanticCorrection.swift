@@ -73,7 +73,14 @@ extension AgentLoop {
         Return ONLY the exact text from the file that should be replaced. Do not explain, do not add markdown. Return the exact string as it appears in the file, preserving all whitespace and indentation.
         """
 
-        // Generate correction with minimal tokens
+        // Generate correction with minimal tokens.
+        // All penalties are disabled: the GPU penalty kernels run reductions
+        // whose output size must differ from input size. On very short
+        // correction sequences (or when a context size is 0) MLX asserts
+        // (out.size() != in.size()) in reduce.cpp and calls abort(), which
+        // cannot be caught by withError. Inheriting the main config's
+        // frequencyPenalty/frequencyContextSize triggers this path.
+        // Penalty quality is irrelevant for a ~512-token correction pass.
         let correctionConfig = GenerationEngine.Config(
             maxTokens: 512,
             temperature: 0.1,
@@ -81,12 +88,12 @@ extension AgentLoop {
             topK: 5,
             minP: 0.0,
             repetitionPenalty: 1.0,
-            repetitionContextSize: currentGenerationConfig.repetitionContextSize,
+            repetitionContextSize: 0,
             presencePenalty: 0.0,
-            presenceContextSize: currentGenerationConfig.presenceContextSize,
-            frequencyPenalty: currentGenerationConfig.frequencyPenalty,
-            frequencyContextSize: currentGenerationConfig.frequencyContextSize,
-            kvBits: currentGenerationConfig.kvBits,
+            presenceContextSize: 0,
+            frequencyPenalty: 0.0,
+            frequencyContextSize: 0,
+            kvBits: nil, // maybeQuantizeKVCache + direct cache.update() = fatalError
             kvGroupSize: currentGenerationConfig.kvGroupSize,
             quantizedKVStart: currentGenerationConfig.quantizedKVStart,
             longContextThreshold: currentGenerationConfig.longContextThreshold,

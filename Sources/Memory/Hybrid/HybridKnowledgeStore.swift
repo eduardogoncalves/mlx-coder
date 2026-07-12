@@ -175,6 +175,34 @@ public actor HybridKnowledgeStore {
             knowledgeKind: input.knowledgeKind,
             contentHash: contentHash
         ) {
+            // Identical content but a strictly higher confidence supersedes the
+            // stored version (an "upgrade"), preserving provenance via
+            // supersedesID — mirrors the near-duplicate branch below. Equal or
+            // lower confidence is a plain duplicate (just refresh updated_at).
+            if input.confidence > existing.confidence {
+                let now = Date()
+                let expiresAt: Date? = input.ttl.map { now.addingTimeInterval($0) }
+                let embedding = try await embedder.embed(input.content)
+                // Mark the old row superseded BEFORE inserting the new active
+                // row: the dedup unique index covers (…, content_hash, status),
+                // so two active rows with identical content would collide.
+                try setStatus(id: existing.id, status: .superseded)
+                let newID = try insertDocument(
+                    input: input,
+                    normalizedContent: normalizedContent,
+                    contentHash: contentHash,
+                    supersedesID: existing.id,
+                    version: existing.version + 1,
+                    createdAt: now,
+                    expiresAt: expiresAt
+                )
+                try writeMetadata(docID: newID, input: input)
+                try insertFTS(rowID: newID, content: input.content,
+                              tags: input.tags, entities: input.entities)
+                try writeEmbedding(docID: newID, vector: embedding)
+                let uuid = try fetchUUID(id: newID)
+                return .superseded(oldID: existing.id, newID: newID, uuid: uuid)
+            }
             try? touch(id: existing.id)
             return .duplicate(id: existing.id, uuid: existing.uuid)
         }

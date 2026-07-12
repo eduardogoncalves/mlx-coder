@@ -1,25 +1,28 @@
 # mlx-coder
 
-A Swift terminal agent for Apple Silicon that loads LLMs **in-process** via [MLX-Swift](https://github.com/ml-explore/mlx-swift) — no HTTP server, no external API calls.
+A Swift terminal agent for Apple Silicon that loads LLMs **in-process** via [MLX-Swift](https://github.com/ml-explore/mlx-swift) — no HTTP server, no external API calls for local models.
 
-mlx-coder is built to run local LLM workflows on macOS with a native MLX app architecture that minimizes runtime overhead. In many common setups, teams run both a separate inference API process (for example llama.cpp or LM Studio) and a separate Node.js agent process; mlx-coder keeps inference and agent orchestration in one process so more memory remains available for model weights and longer context windows.
+mlx-coder is built to run local LLM workflows on macOS with a native MLX app architecture that minimizes runtime overhead. In many common setups, teams run both a separate inference API process (for example llama.cpp or LM Studio) and a separate Node.js agent process; mlx-coder keeps inference and agent orchestration in one process so more memory remains available for model weights and longer context windows. Remote OpenAI-compatible providers (OpenRouter, LM Studio, vLLM, mlx-lm.server, …) are also supported and can be mixed with local models in the same session.
 
 ## Why mlx-coder (Compared to Typical Hosted Coding Agents)
 
 - **Local-first, in-process inference**: runs model execution directly in the app process via MLX instead of relying on a separate model service.
 - **Smaller local AI runtime footprint**: by avoiding an always-on external inference server and extra API/network layers, more system memory remains available for the model weights and larger context windows.
+- **Provider-agnostic remote models**: connect any OpenAI-compatible endpoint (OpenRouter, LM Studio, vLLM, …) alongside local models; switch with `/model` during a session.
+- **Persistent KV (prompt) cache**: cross-turn KV cache reuse avoids re-prefilling the full prompt on every turn, cutting latency on long conversations.
 - **Built-in sandbox + policy + approvals**: combines macOS seatbelt sandboxing, approval modes, and per-tool/per-path policy controls.
 - **Audited tool lifecycle**: emits permission, pre-tool, post-tool, compression, steering-injection, follow-up, and context-transform events with audit-log visibility.
 - **Delegated task isolation**: supports specialist task profiles, isolated work directories, cleanup controls, and strict delegated-input validation.
 - **Operational diagnostics**: includes `doctor` and `list-tools --strict` for CI-friendly readiness checks.
 - **Integrated tool transports**: supports MCP over HTTP and command-based stdio, plus built-in LSP tools including safe apply-mode rename flows.
+- **Agent memory**: SQLite-backed knowledge store persists facts, plans, and decisions across sessions and injects them deterministically at session start.
 
 ## Requirements
 
 - **macOS 15+** (Sequoia or later)
 - **Apple Silicon** (M1 or later)
 - **Swift 6.3.1** / Xcode 16.4+
-- A local MLX model directory (default: `~/models/Qwen/Qwen3.5-9B-4bit`)
+- A local MLX model or a configured remote provider (default local model: `mlx-community/Qwen3.5-9B-5bit` — downloaded automatically from Hugging Face Hub on first use)
 
 ## Building
 
@@ -35,6 +38,12 @@ Clone the repository and build the release binary:
 ```bash
 git clone https://github.com/your-user/mlx-coder.git
 cd mlx-coder
+scripts/release.sh -b
+```
+
+Alternatively, build directly with xcodebuild:
+
+```bash
 xcodebuild -scheme MLXCoder -configuration Release -destination 'platform=macOS' -derivedDataPath .build/xcode
 ```
 
@@ -65,8 +74,6 @@ Verify the installation:
 mlx-coder --version
 ```
 
-You should see `0.1.0` printed to the terminal.
-
 > **Tip:** If you prefer a user-local install without `sudo`, you can copy to `~/.local/bin/` instead (make sure it is in your `PATH`):
 >
 > ```bash
@@ -75,9 +82,25 @@ You should see `0.1.0` printed to the terminal.
 > cp -R .build/xcode/Build/Products/Release/mlx-swift_Cmlx.bundle ~/.local/bin/
 > ```
 
+## Updating
+
+Check for a newer release and optionally install it in one step:
+
+```bash
+mlx-coder update
+```
+
+Options:
+
+```bash
+mlx-coder update --check           # check for updates without downloading
+mlx-coder update --yes             # skip the confirmation prompt
+mlx-coder update --json            # machine-readable output
+```
+
 ## Usage
 
-mlx-coder provides six subcommands: **chat** (interactive REPL), **run** (single prompt), **list-tools** (tool discovery), **show-audit** (audit log inspection), **show-config** (merged runtime settings), and **doctor** (environment and configuration checks).
+mlx-coder provides seven subcommands: **chat** (interactive REPL), **run** (single prompt), **list-tools** (tool discovery), **show-audit** (audit log inspection), **show-config** (merged runtime settings), **doctor** (environment and configuration checks), and **update** (self-update).
 
 ### Interactive Chat
 
@@ -97,7 +120,7 @@ With custom options:
 
 ```bash
 mlx-coder chat \
-  --model ~/models/Qwen/Qwen3.5-9B-4bit \
+  --model mlx-community/Qwen3.5-9B-5bit \
   --workspace ~/my-project \
   --max-tokens 8192 \
   --temperature 0.7 \
@@ -147,6 +170,13 @@ CI-friendly strict mode (non-zero exit if MCP discovery fails):
 mlx-coder list-tools --strict --json
 ```
 
+Filter or exclude specific MCP servers:
+
+```bash
+mlx-coder list-tools --mcp-include docs,local-mcp
+mlx-coder list-tools --mcp-exclude staging
+```
+
 `list-tools` now includes discovered skills metadata and explicit `task` capabilities (supported profiles and isolation options).
 
 ### Audit Log Inspection
@@ -193,21 +223,33 @@ mlx-coder doctor --strict --json
 
 | Option | Default | Description |
 | --- | --- | --- |
-| `--model` | `~/models/Qwen/Qwen3.5-9B-4bit` | Path to the local MLX model directory |
+| `--model` | `mlx-community/Qwen3.5-9B-5bit` | Local MLX model directory or Hub ID, or `<providerID>:<modelID>` for remote |
+| `--draft-model` | auto (paired with default model) | Draft model for speculative decoding (MTP). Set to empty string to disable. |
+| `--num-draft-tokens` | `2` | Tokens proposed per speculative decoding round |
 | `--workspace` | `.` (current directory) | Workspace root for tool operations |
 | `--max-tokens` | `4096` | Maximum tokens to generate per turn |
 | `--temperature` | `0.6` | Sampling temperature |
 | `--top-p` | `1.0` | Top-p (nucleus) sampling |
 | `--kv-bits` | Auto (per chip profile) | KV cache quantization bits |
+| `--kv-group-size` | Auto (per chip profile) | KV cache quantization group size |
+| `--quantized-kv-start` | `0` | First transformer layer to apply KV quantization |
+| `--turbo-quant-bits` | unset | TurboQuant KV cache compression bits (mutually exclusive with `--kv-bits`) |
 | `--sandbox/--no-sandbox` | `--sandbox` | Enable/disable macOS seatbelt sandboxing |
+| `--shadow-context/--no-shadow-context` | `--shadow-context` | Summarize large tool outputs before storing them in history |
 | `--approval-mode` | `default` | Destructive tool approvals: `default`, `auto-edit`, `yolo` |
 | `--dry-run` | `false` | Skip execution of destructive tools while showing intended actions |
+| `--mode` | `plan` | Initial working mode: `plan` or `agent` |
 | `--policy-file` | `.mlx-coder-policy.json` in workspace | Optional per-tool/per-path allow/deny policy document |
 | `--audit-log-path` | `~/.mlx-coder/audit.log.jsonl` | Optional audit log file location |
 | `--mcp-endpoint` | unset | Optional MCP HTTP JSON-RPC endpoint |
 | `--mcp-name` | `remote` | MCP tool prefix namespace |
 | `--mcp-timeout` | `30` | MCP request timeout in seconds |
+| `--mcp-include` | unset | Comma-separated MCP server names to include (overrides config allow list) |
+| `--mcp-exclude` | unset | Comma-separated MCP server names to exclude |
 | `--verbose` | `false` | Show verbose output including thinking blocks |
+| `--prompt-cache-stats` | `false` | Show per-turn KV cache reuse statistics |
+| `--auto-save-history` | unset | Auto-save markdown transcript on exit |
+| `--auto-save-history-json` | unset | Auto-save JSON transcript on exit |
 | `--voice` | `false` | (`run` only) Record voice prompt via Speech Recognition instead of `--prompt` |
 | `--voice-silence-timeout` | `2.0` | Seconds of silence before voice recording stops automatically |
 | `--voice-locale` | device locale | BCP 47 locale tag for speech recognition, e.g. `en-US`, `fr-FR` |
@@ -237,6 +279,17 @@ Inside `mlx-coder chat`, these session commands are available:
 - `/load-history-json [path]` loads a JSON transcript into the current session
 - `/plan` and `/agent` switch working modes
 - `/sandbox` toggles sandbox mode for shell tools
+- `/model` opens the model chooser (local and remote); `/model <name|id|#>` switches directly
+- `/model free` shows only free OpenRouter models in the picker; `/model all` clears the filter
+- `/effort [level]` sets the reasoning (thinking) level: `off`, `minimal`, `low`, `medium`, `high`
+- `/login` adds or updates a remote provider in `~/.mlx-coder/config.json` via a multi-step wizard
+- `/logout [id]` removes a configured remote provider
+- `/memory` opens the memory subsystem (see [Agent Memory](#agent-memory))
+- `/caffeinate [on|off|busy|<duration>]` prevents the system from sleeping (e.g. `/caffeinate 2h`)
+- `/steer [msg]` queues a steering message to be injected before the next generation round; `/steer` alone lists queued messages
+- `/followup [msg]` queues a follow-up prompt for after the current turn completes
+- `! <cmd>` runs a shell command and adds output to the transcript/context
+- `!! <cmd>` runs a shell command without adding output to the transcript
 
 ### Voice Input (macOS only)
 
@@ -277,7 +330,124 @@ mlx-coder chat \
   --auto-save-history-json session-final.json
 ```
 
-JSON transcripts are now exported as a versioned envelope (`version` + `messages`) and remain backward-compatible when loading older array-only transcripts.
+JSON transcripts are exported as a versioned envelope (`version` + `messages`) and remain backward-compatible when loading older array-only transcripts.
+
+## Remote Models
+
+mlx-coder supports any OpenAI-compatible inference endpoint alongside local MLX models. Examples: OpenRouter, LM Studio, vLLM, mlx-lm.server, or an internal gateway.
+
+### Configuring providers
+
+Providers are stored in `~/.mlx-coder/config.json` under a `providers` array. This file is created automatically on first run with a commented-out sample. Edit it manually or use `/login` inside a `chat` session:
+
+```json
+{
+  "providers": [
+    {
+      "name": "OpenRouter",
+      "baseURL": "https://openrouter.ai/api/v1",
+      "apiKey": "sk-or-your-key-here"
+    },
+    {
+      "name": "LM Studio",
+      "baseURL": "http://127.0.0.1:1234/v1"
+    }
+  ]
+}
+```
+
+`apiKey` is optional — omit it for keyless local servers. The `name` field is slugified into a stable `id` (e.g. `"LM Studio"` → `lm-studio`) used in model carrier strings and cache paths.
+
+The file is JSONC-compatible: `//` line comments and `/* */` block comments are stripped before parsing.
+
+### Using a remote model
+
+Pass a `<providerID>:<modelID>` carrier to `--model`:
+
+```bash
+mlx-coder chat --model openrouter:qwen/qwen3-235b
+mlx-coder run --model lm-studio:lmstudio-community/Qwen2.5-7B-Instruct-GGUF --prompt "Hello"
+```
+
+Or switch interactively with `/model` inside a session:
+
+```bash
+/model              # open the local / remote chooser
+/model remote       # browse providers
+/model remote openrouter          # list cached OpenRouter models
+/model remote openrouter refresh  # fetch the latest model list from the API
+```
+
+### Managing providers interactively
+
+```bash
+/login              # multi-step wizard: name → URL → API key
+/logout             # opens a picker to choose a provider to remove
+/logout openrouter  # remove directly by id
+```
+
+## Prompt Caching
+
+mlx-coder maintains a persistent KV cache across turns. On each turn the prompt token sequence is diffed against the previous turn's cached tokens; the matching prefix is reused and only the new suffix is prefilled. This eliminates most redundant prefill work on long conversations.
+
+To monitor cache effectiveness, pass `--prompt-cache-stats`:
+
+```bash
+mlx-coder chat --prompt-cache-stats
+```
+
+Each turn will display a cache indicator showing the number of tokens reused versus freshly prefilled.
+
+The cache is invalidated automatically when the model is switched, the conversation is cleared, or the token sequence diverges beyond recovery. Mamba hybrid models are also supported via a checkpoint-based fallback that sidesteps the non-trimmable KV state constraint.
+
+## Agent Memory
+
+mlx-coder includes a SQLite-backed knowledge store (`~/.mlx-coder/knowledge.db`) that persists facts, plans, decisions, patterns, and gotchas across sessions. At session start, the most relevant entries are injected into the system prompt so the agent can resume without losing context.
+
+### Entry types
+
+| Type | Description | TTL |
+| --- | --- | --- |
+| `session_state` | In-progress work, current focus | 48 h |
+| `plan` | Multi-step plans and roadmaps | permanent |
+| `decision` | Architecture or approach decisions | permanent |
+| `gotcha` | Pitfalls and non-obvious constraints | permanent |
+| `pattern` | Recurring code patterns or conventions | permanent |
+
+### Restore algorithm
+
+On startup the retriever fills up to a ~2000-token budget across five tiers:
+1. `session_state` entries from the last 48 h (surface-match preferred)
+2. `plan` entries (up to 2)
+3. `decision` entries (up to 3)
+4. `gotcha` + `pattern` entries (up to 4 combined)
+5. Cross-project entries from other workspace roots (up to 2)
+
+Within each tier, entries are ranked by surface match → branch match → recency → id.
+
+### LLM tools
+
+The agent can manage the knowledge store autonomously:
+
+- `log_knowledge` — add, update, or remove an entry (actions: `add`, `update`, `remove`)
+- `search_knowledge` — full-text and tag search across stored entries
+
+### `/memory` commands
+
+Inside `mlx-coder chat` you can inspect and edit memory directly:
+
+```
+/memory             open the memory command palette
+/memory save        persist the current session state
+/memory log         log a new entry (opens an inline form)
+/memory search      search entries by keyword or tag
+/memory list        list all entries
+/memory status      show database stats and storage path
+/memory snippet     generate a snippet from current context
+/memory undo        delete the last logged entry
+/memory remove      remove a specific entry by id
+/memory edit        edit an existing entry's content
+```
 
 ## Permission Policy File
 
@@ -323,17 +493,24 @@ Rules:
 
 ## Runtime Config Hierarchy
 
-mlx-coder now loads runtime defaults from:
+mlx-coder loads runtime defaults from:
 
 - User config: `~/.mlx-coder/config.json`
 - Workspace config: `.mlx-coder-config.json`
 
-Workspace values override user values by key, and MCP servers override by `name`.
+Workspace values override user values by key; MCP servers merge by `name`; approval mode and sandbox flags always pick the **more restrictive** of the two. The user config also stores `providers` (remote model endpoints) in the same file.
 
-Example:
+Example `~/.mlx-coder/config.json`:
 
 ```json
 {
+  "providers": [
+    {
+      "name": "OpenRouter",
+      "baseURL": "https://openrouter.ai/api/v1",
+      "apiKey": "sk-or-your-key-here"
+    }
+  ],
   "defaultApprovalMode": "auto-edit",
   "defaultSandbox": true,
   "defaultDryRun": false,
@@ -380,18 +557,24 @@ vendor/*
 
 ## Built-in Tools
 
-mlx-coder registers **14 tools** that the LLM can invoke autonomously:
+mlx-coder registers **28 tools** that the LLM can invoke autonomously:
 
-| Category   | Tools                                                    |
-| ---------- | -------------------------------------------------------- |
-| Filesystem | `ReadFile`, `WriteFile`, `EditFile`, `Patch`, `ListDir`, `ReadMany` |
-| Search     | `Glob`, `Grep`, `CodeSearch`                             |
-| Shell      | `Bash`                                                   |
-| Agents     | `Task`, `Todo`                                           |
-| Web        | `WebFetch`, `WebSearch`                                  |
-| LSP (.NET) | `LSPDiagnostics`, `LSPHover`, `LSPReferences`, `LSPDefinition`, `LSPCompletion`, `LSPSignatureHelp`, `LSPDocumentSymbols`, `LSPRename` (`apply=true` writes edits) |
+| Category | Tools |
+| --- | --- |
+| Filesystem | `read_file`, `read_many`, `write_file`, `edit_file`, `append_file`, `patch`, `list_dir` |
+| Planning | `plan_file` |
+| Search | `glob`, `grep`, `code_search` |
+| Shell | `bash` |
+| Agents | `task`, `todo` |
+| Skills | `read_skill` |
+| Web | `web_fetch`, `web_search` |
+| Memory | `log_knowledge`, `search_knowledge` |
+| LoRA | `project_expert_lora` |
+| LSP (.NET) | `lsp_diagnostics`, `lsp_hover`, `lsp_references`, `lsp_definition`, `lsp_completion`, `lsp_signature_help`, `lsp_document_symbols`, `lsp_rename` (`apply=true` writes edits) |
 
 All filesystem operations are constrained to `--workspace`, and shell behavior is governed by sandbox + approval + policy settings.
+
+`web_fetch` supports paginated reading via an `offset` parameter — when a page exceeds the output limit, the result includes a continuation marker with the next offset to pass on the following call. Continuation reads are served from an in-process disk cache, so the page is only fetched once.
 
 ### Task Tool Profiles
 
@@ -424,6 +607,15 @@ Additional delegated input validation:
 - tool-name deduplication is case-insensitive while preserving provided names for delegation compatibility
 - `description` is trimmed, must be non-empty, and is capped to 4000 characters
 - optional arguments are type-checked (`profile` string, `isolate` boolean, `isolation_directory` string, `cleanup_isolation` boolean)
+
+### Tool Call Dialects
+
+mlx-coder auto-detects the tool call format from the model path:
+
+- **Qwen** (default): XML-style `<tool_call>…</tool_call>` blocks
+- **LFM2** (Liquid AI): Python-style `<|tool_call_start|>[name(arg='value')]<|tool_call_end|>` blocks
+
+Detection is based on the model path or Hub ID. The correct dialect is selected automatically; no configuration is required.
 
 ## License
 

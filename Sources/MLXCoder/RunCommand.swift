@@ -156,7 +156,7 @@ struct RunCommand: AsyncParsableCommand {
             kvGroupSize: args.kvGroupSize ?? profile.kvGroupSize,
             quantizedKVStart: args.quantizedKVStart ?? profile.quantizedKVStart,
             longContextThreshold: profile.longContextThreshold,
-            turboQuantBits: args.turboQuantBits,
+            turboQuantBits: args.turboQuantBits ?? profile.turboQuantBits,
             numDraftTokens: args.numDraftTokens
         )
         
@@ -188,6 +188,7 @@ struct RunCommand: AsyncParsableCommand {
             workspaceRoot: absWorkspace,
             approvalMode: permissions.approvalMode.rawValue
         )
+        warnIfUnsafeCommandExecution(renderer: renderer, sandboxEnabled: effectiveSandbox, permissions: permissions)
 
         let registry = ToolRegistry()
         let runtimeMCPConfigs = runtimeMCPServerConfigs(

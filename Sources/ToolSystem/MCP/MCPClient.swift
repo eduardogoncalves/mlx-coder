@@ -200,6 +200,11 @@ public struct MCPClient: Sendable {
     }
 
     private static func httpRPCRequest(url: URL, config: ServerConfig, method: String, params: [String: Any]) async throws -> [String: Any] {
+        // NOTE: No SSRF host restriction here. Unlike web_fetch (whose URL comes
+        // from untrusted model/tool output), MCP endpoints are configured by the
+        // user in ~/.mlx-coder/config.json, and local MCP servers on loopback
+        // (127.0.0.1 / localhost) are the normal, intended case — so the
+        // loopback/private-range blocks used for web_fetch must not apply here.
 
         let payload: [String: Any] = [
             "jsonrpc": "2.0",

@@ -162,6 +162,7 @@ struct ChatCommand: AsyncParsableCommand {
             workspaceRoot: absWorkspace,
             approvalMode: permissions.approvalMode.rawValue
         )
+        warnIfUnsafeCommandExecution(renderer: renderer, sandboxEnabled: effectiveSandbox, permissions: permissions)
 
         // Build generation config earlier for ToolRegistry
         let config = GenerationEngine.Config(
@@ -172,7 +173,7 @@ struct ChatCommand: AsyncParsableCommand {
             kvGroupSize: args.kvGroupSize ?? profile.kvGroupSize,
             quantizedKVStart: args.quantizedKVStart ?? profile.quantizedKVStart,
             longContextThreshold: profile.longContextThreshold,
-            turboQuantBits: args.turboQuantBits,
+            turboQuantBits: args.turboQuantBits ?? profile.turboQuantBits,
             numDraftTokens: args.numDraftTokens
         )
 

@@ -25,6 +25,19 @@ final class ApprovalDecisionModeTransitionTests: XCTestCase {
         )
     }
 
+    func testSwitchToAgentAndAllowFromAutopilotLandsInCodingNotAutopilot() {
+        // Entering PLAN from autopilot preserves the .general task type; a
+        // plan-block "Switch to AGENT mode and allow" must NOT leave the user in
+        // autopilot (agent + general = auto-approve everything). It should
+        // collapse to .coding so per-tool approvals stay in effect.
+        let transition = approvalDecisionModeTransition(for: .switchToAgentAndAllow, currentTaskType: .general)
+
+        XCTAssertEqual(
+            transition,
+            ApprovalDecisionModeTransition(workingMode: .agent, taskType: .coding)
+        )
+    }
+
     func testNonModeChangingApprovalsDoNotTransitionModes() {
         XCTAssertNil(approvalDecisionModeTransition(for: .allowOnce, currentTaskType: .coding))
         XCTAssertNil(approvalDecisionModeTransition(for: .allowAlwaysForCommand, currentTaskType: .coding))

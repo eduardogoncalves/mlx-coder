@@ -327,8 +327,24 @@ public actor AgentLoop {
         var hasRetriedFailedTurn = false
 
         while iterations < maxToolIterations {
-            iterations += 1
             await applyDeterministicContextCompactionIfNeeded(reason: "before_generation")
+
+            // Flush any pending steering messages before generating. The post-execution
+            // drain below handles the normal path, but the malformed-tool-call path uses
+            // `continue` to skip it — so we drain here too to guarantee the model sees
+            // the correction prompt on its next attempt.
+            if !steeringQueue.isEmpty {
+                let pending = steeringQueue
+                steeringQueue.removeAll()
+                for item in pending {
+                    frontend.emitStatus("↩️  Steering: \(item.message)")
+                    switch item.origin {
+                    case .human:     history.addUser(item.message)
+                    case .automated: history.addAutomated(item.message)
+                    }
+                    await hooks.emit(.steeringInjected(message: item.message))
+                }
+            }
 
             // Generate response
             let generationResult: (text: String, writer: StreamingToolCallWriter, startedThinking: Bool, turnStats: (promptTokens: Int, completionTokens: Int, elapsed: TimeInterval, tokensPerSecond: Double?)?)
@@ -382,10 +398,9 @@ public actor AgentLoop {
             let truncatedStream = writer.drainTruncatedStream()
 
             // Parse tool calls from text and remove ones already captured via streaming.
-            let parsedToolCalls = ToolCallParser.parse(
-                response,
-                dialect: toolCallDialect,
-                startsThinking: startedThinking
+            let parsedToolCalls = await parseToolCallsUsingProcessor(
+                response: response,
+                startedThinking: startedThinking
             )
             let toolCalls = deduplicateToolCalls(parsed: parsedToolCalls, streamed: streamedCalls)
 
@@ -438,11 +453,14 @@ public actor AgentLoop {
                         example = "<tool_call>{\"name\":\"tool_name\",\"arguments\":{...}}</tool_call>"
                     case .lfm2:
                         example = "<|tool_call_start|>[tool_name(param='value')]<|tool_call_end|>"
+                    case .glm4:
+                        example = "<tool_call>tool_name<arg_key>param</arg_key><arg_value>value</arg_value></tool_call>"
                     }
                     let bareJSONNote = responseLooksLikeBareJSONToolCall
                         ? " Your last response was a bare JSON object — that is NOT a tool call and will never execute. Discard that shape entirely."
                         : ""
                     steeringQueue.append(.init(message: "Your previous tool call was malformed and could not be parsed.\(bareJSONNote) Re-emit only the tool call using the exact \(example) format. Use one of the tool names listed in the system prompt. Do not add explanation text, code fences, or any JSON outside the tool-call markers.", origin: .automated))
+                    iterations += 1
                     continue
                 }
 
@@ -516,12 +534,18 @@ public actor AgentLoop {
             // Add the assistant's response (including tool calls) to history
             history.addAssistant(response)
 
-            // Handle streamed tool calls first (content already written to .tmp files)
-            for streamedCall in streamedCalls {
+            // Handle streamed tool calls first (content already written to .tmp files).
+            // Stop at the first failure: remaining calls are deferred and the model is
+            // steered to fix the failed call before re-emitting the skipped ones.
+            var streamedCallFailed = false
+            for (streamIndex, streamedCall) in streamedCalls.enumerated() {
                 frontend.emit(.toolCallStarted(ToolCallSnapshot(name: streamedCall.toolName, arguments: stringifyArgs(["path": streamedCall.path, "content": "[streamed to tmp]"]))))
                 let streamResult = await handleStreamedToolCall(streamedCall)
                 frontend.emit(.toolCallResult(makeDisplaySnapshot(toolName: streamedCall.toolName, result: streamResult)))
-                if streamResult.isError { iterationAnyToolFailed = true }
+                if streamResult.isError {
+                    iterationAnyToolFailed = true
+                    streamedCallFailed = true
+                }
 
                 // Track file modifications
                 if !streamResult.isError {
@@ -543,31 +567,59 @@ public actor AgentLoop {
                     userGoal: userGoal
                 )
                 history.addToolResponse(toolResponse, toolCallId: streamedCall.toolName)
+
+                if streamedCallFailed {
+                    // Collect remaining unexecuted calls (rest of streamed + all parsed).
+                    let deferredNames = streamedCalls[(streamIndex + 1)...].map(\.toolName)
+                        + toolCalls.map(\.name)
+                    if !deferredNames.isEmpty {
+                        let list = deferredNames.map { "'\($0)'" }.joined(separator: ", ")
+                        steeringQueue.append(.init(
+                            message: "Tool '\(streamedCall.toolName)' failed (see result above). The following tool calls were deferred and not executed: [\(list)]. Fix '\(streamedCall.toolName)' first, then re-emit the deferred calls in your next response.",
+                            origin: .automated
+                        ))
+                    }
+                    break
+                }
             }
 
-            // Execute each tool call from text parsing
-            for call in toolCalls {
-                let result = await executeToolCall(
-                    call: call,
-                    lastReadFileSignature: &lastReadFileSignature,
-                    sameReadFileStreak: &sameReadFileStreak,
-                    readLoopSteeredPaths: &readLoopSteeredPaths,
-                    lastReadOnlyToolSignature: &lastReadOnlyToolSignature,
-                    sameReadOnlyToolStreak: &sameReadOnlyToolStreak,
-                    readOnlyLoopSteeredSignatures: &readOnlyLoopSteeredSignatures,
-                    fileModificationToolsExecuted: &fileModificationToolsExecuted,
-                    modifiedFilePaths: &modifiedFilePaths
-                )
-                if result.isError { iterationAnyToolFailed = true }
+            // Execute each tool call from text parsing, stopping at the first failure.
+            // If a streamed call already failed, all parsed calls are also deferred.
+            if !streamedCallFailed {
+                for (callIndex, call) in toolCalls.enumerated() {
+                    let result = await executeToolCall(
+                        call: call,
+                        lastReadFileSignature: &lastReadFileSignature,
+                        sameReadFileStreak: &sameReadFileStreak,
+                        readLoopSteeredPaths: &readLoopSteeredPaths,
+                        lastReadOnlyToolSignature: &lastReadOnlyToolSignature,
+                        sameReadOnlyToolStreak: &sameReadOnlyToolStreak,
+                        readOnlyLoopSteeredSignatures: &readOnlyLoopSteeredSignatures,
+                        fileModificationToolsExecuted: &fileModificationToolsExecuted,
+                        modifiedFilePaths: &modifiedFilePaths
+                    )
 
-                let userGoal = history.latestUserMessage ?? ""
-                let toolResponse = try await makeToolResponseForHistory(
-                    toolName: call.name,
-                    result: result,
-                    userGoal: userGoal
-                )
+                    let userGoal = history.latestUserMessage ?? ""
+                    let toolResponse = try await makeToolResponseForHistory(
+                        toolName: call.name,
+                        result: result,
+                        userGoal: userGoal
+                    )
+                    history.addToolResponse(toolResponse, toolCallId: call.name)
 
-                history.addToolResponse(toolResponse, toolCallId: call.name)
+                    if result.isError {
+                        iterationAnyToolFailed = true
+                        let deferredNames = toolCalls[(callIndex + 1)...].map(\.name)
+                        if !deferredNames.isEmpty {
+                            let list = deferredNames.map { "'\($0)'" }.joined(separator: ", ")
+                            steeringQueue.append(.init(
+                                message: "Tool '\(call.name)' failed (see result above). The following tool calls were deferred and not executed: [\(list)]. Fix '\(call.name)' first, then re-emit the deferred calls in your next response.",
+                                origin: .automated
+                            ))
+                        }
+                        break
+                    }
+                }
             }
 
             // If any tool in this iteration failed, mark the whole iteration (assistant
@@ -576,6 +628,9 @@ public actor AgentLoop {
             // remove them when the turn completes so only the successful path persists.
             if iterationAnyToolFailed {
                 history.markTransient(from: iterationStartIndex)
+                iterations += 1
+            } else {
+                iterations = 0
             }
 
             // After processing all tool calls for this turn, drain the steering queue.
@@ -811,41 +866,96 @@ public actor AgentLoop {
         return nil
     }
 
-    /// Checks for long context and triggers KV quantization if needed.
+    /// Checks for long context and enables TurboQuant KV cache compression if not already active.
+    ///
+    /// Standard mlx-lm `kvBits` quantization is stripped before each generation call because
+    /// `QuantizedKVCache.update()` crashes several model types (Gemma2, DeepseekV3, etc.).
+    /// TurboQuant is the safe alternative: it decompresses back to float16 so every model
+    /// sees normal KV arrays, and it creates per-generation caches without needing a reload.
     private func checkAndApplyLongContextQuantization() {
         let currentTokens = history.estimatedTokenCount
-        if currentTokens > currentGenerationConfig.longContextThreshold
-            && (currentGenerationConfig.kvBits == nil || currentGenerationConfig.kvBits! > 4)
-            && !modelPath.lowercased().contains("gemma-4")
-        {
-            frontend.emitStatus("\u{001B}[33m[Warning]\u{001B}[0m Long context detected (\(currentTokens) tokens).")
-            frontend.emitStatus("Switching to 4-bit KV cache to save VRAM...")
-            
-            // Update config to 4-bit
-            self.currentGenerationConfig = GenerationEngine.Config(
-                maxTokens: currentGenerationConfig.maxTokens,
-                temperature: currentGenerationConfig.temperature,
-                topP: currentGenerationConfig.topP,
-                topK: currentGenerationConfig.topK,
-                minP: currentGenerationConfig.minP,
-                repetitionPenalty: currentGenerationConfig.repetitionPenalty,
-                repetitionContextSize: currentGenerationConfig.repetitionContextSize,
-                presencePenalty: currentGenerationConfig.presencePenalty,
-                presenceContextSize: currentGenerationConfig.presenceContextSize,
-                frequencyPenalty: currentGenerationConfig.frequencyPenalty,
-                frequencyContextSize: currentGenerationConfig.frequencyContextSize,
-                kvBits: 4, 
-                kvGroupSize: currentGenerationConfig.kvGroupSize,
-                quantizedKVStart: currentGenerationConfig.quantizedKVStart,
-                longContextThreshold: currentGenerationConfig.longContextThreshold,
-                turboQuantBits: currentGenerationConfig.turboQuantBits,
-                numDraftTokens: currentGenerationConfig.numDraftTokens
-            )
-            self.pendingReload = true
-        }
+        guard currentTokens > currentGenerationConfig.longContextThreshold,
+              currentGenerationConfig.turboQuantBits == nil,
+              !modelPath.lowercased().contains("gemma-4")
+        else { return }
+
+        frontend.emitStatus(
+            "\u{001B}[33m[Long context]\u{001B}[0m \(currentTokens) tokens — "
+            + "enabling TurboQuant KV cache (3-bit) to reduce decode memory bandwidth."
+        )
+        self.currentGenerationConfig = GenerationEngine.Config(
+            maxTokens: currentGenerationConfig.maxTokens,
+            temperature: currentGenerationConfig.temperature,
+            topP: currentGenerationConfig.topP,
+            topK: currentGenerationConfig.topK,
+            minP: currentGenerationConfig.minP,
+            repetitionPenalty: currentGenerationConfig.repetitionPenalty,
+            repetitionContextSize: currentGenerationConfig.repetitionContextSize,
+            presencePenalty: currentGenerationConfig.presencePenalty,
+            presenceContextSize: currentGenerationConfig.presenceContextSize,
+            frequencyPenalty: currentGenerationConfig.frequencyPenalty,
+            frequencyContextSize: currentGenerationConfig.frequencyContextSize,
+            kvBits: currentGenerationConfig.kvBits,
+            kvGroupSize: currentGenerationConfig.kvGroupSize,
+            quantizedKVStart: currentGenerationConfig.quantizedKVStart,
+            longContextThreshold: currentGenerationConfig.longContextThreshold,
+            turboQuantBits: 3,
+            numDraftTokens: currentGenerationConfig.numDraftTokens
+        )
+        // No pendingReload: TurboQuant creates per-generation caches, not at model-load time.
+        // Invalidate the prompt cache: TurboQuant and cross-turn caching are mutually exclusive.
+        promptCache.invalidate(reason: "TurboQuant auto-enabled at long context")
     }
 
     /// Deduplicates parsed tool calls against streamed tool calls.
+    /// Parse tool calls from `response` using `ToolCallProcessor` (mlx-swift-lm) as the
+    /// primary path, with `ToolCallParser` as a fallback for JSON the processor rejects
+    /// but our sanitiser can recover (e.g. literal newlines inside string values).
+    ///
+    /// Using the processor gives us:
+    /// - Whitelist validation against the registered tool schemas
+    /// - Type-aware argument coercion (string `"42"` → Int)
+    /// - Automatic double-decode for models that stringify the arguments object
+    private func parseToolCallsUsingProcessor(
+        response: String,
+        startedThinking: Bool
+    ) async -> [ToolCallParser.ParsedToolCall] {
+        let promptFilter = AgentLoop.buildToolPromptFilter(mode: mode, taskType: taskType)
+        let schemas = await registry.toolSchemasForProcessor(filter: promptFilter)
+
+        let format: ToolCallFormat = switch toolCallDialect {
+        case .qwen: .json
+        case .lfm2: .lfm2
+        case .glm4: .glm4
+        }
+
+        let processor = ToolCallProcessor(format: format, tools: schemas.isEmpty ? nil : schemas)
+
+        // ToolCallProcessor doesn't suppress tags inside <think>…</think>.
+        // Mirror ToolCallParser's logic: if thinking is unclosed (no </think>), all
+        // remaining content is still internal monologue — return empty immediately.
+        // Only strip closed thinking blocks before feeding to the processor.
+        if startedThinking && !response.contains(ToolCallPattern.thinkClose) {
+            return []
+        }
+        let text = startedThinking ? ToolCallParser.stripThinking(response) : response
+        _ = processor.processChunk(text)
+        processor.processEOS()
+
+        if !processor.toolCalls.isEmpty {
+            return processor.toolCalls.map { call in
+                ToolCallParser.ParsedToolCall(
+                    name: call.function.name,
+                    arguments: call.function.arguments.mapValues { $0.anyValue }
+                )
+            }
+        }
+
+        // Fallback: processor found nothing — retry with the hand-rolled parser whose
+        // sanitiser can recover JSON with literal newlines and trailing-brace truncation.
+        return ToolCallParser.parse(response, dialect: toolCallDialect, startsThinking: startedThinking)
+    }
+
     private func deduplicateToolCalls(
         parsed: [ToolCallParser.ParsedToolCall],
         streamed: [StreamedToolCall]
@@ -950,12 +1060,19 @@ public actor AgentLoop {
             return deniedResult
         }
         
+        // Resolve early so permission prompts are never shown for hallucinated tool names.
+        let resolvedTool = await registry.tool(named: call.name)
+
         // Check if tool is allowed in current mode
-        let isDestructive = isDestructiveToolCall(call)
+        let isDestructive = resolvedTool != nil && isDestructiveToolCall(call)
         let allowReadOnlyBashInPlanMode = mode == .plan && isReadOnlyBashCall(call)
-        
+
         let approval: (approved: Bool, suggestion: String?)
-        if call.name == "plan_file" && mode == .plan {
+        if resolvedTool == nil {
+            // Unknown tool — auto-approve so execution reaches the "Unknown tool" error
+            // branch without prompting the user over a hallucinated call.
+            approval = (true, nil)
+        } else if call.name == "plan_file" && mode == .plan {
             approval = (true, nil)
         } else if call.name == "plan_file" {
             approval = await askForToolApproval(name: call.name, arguments: call.arguments, isPlanMode: false)
@@ -1010,7 +1127,6 @@ public actor AgentLoop {
                     )
                 }
 
-                let resolvedTool = await registry.tool(named: call.name)
                 let missingRequiredArgs = LoopDetectionService.missingRequiredArgumentNames(
                     required: resolvedTool?.parameters.required,
                     arguments: correctionResult.correctedArguments

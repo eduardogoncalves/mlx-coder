@@ -1026,7 +1026,16 @@ public func runSwiftCoderTUISession(
             // If a generation is already in flight, queue this prompt as a
             // steering message so AgentCore injects it before the next round.
             // The frontend's spinner-tick task continues uninterrupted.
-            if await renderer.getIsGenerating() {
+            //
+            // Use activeStreamTask != nil rather than renderer.getIsGenerating()
+            // here. The renderer's flag is cleared asynchronously via the event
+            // queue, so there is a window where the stream task has finished
+            // (activeStreamTask = nil via defer) but the renderer still reports
+            // isGenerating = true. Messages submitted in that window would be
+            // queued as steering with no running task to consume them. Checking
+            // activeStreamTask is authoritative: both reads/writes happen on
+            // @MainActor, so there is no race.
+            if activeStreamTask != nil {
                 await agentLoop.steer(effectivePrompt)
                 let pending = await agentLoop.pendingSteeringMessages().count
                 await renderer.setPendingCount(pending)

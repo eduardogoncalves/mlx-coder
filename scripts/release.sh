@@ -116,6 +116,12 @@ patch_mlx_swift_lm_for_swift6() {
     return
   fi
 
+  # 3.31.4+ uses #if compiler(>=6.2) guard with nonisolated(unsafe) in the else branch — no patch needed
+  if grep -q 'nonisolated(unsafe) private let context = CIContext(' "$target_file"; then
+    log_info "mlx-swift-lm already handles Swift 6 concurrency via compiler version guard"
+    return
+  fi
+
   log_warn "Could not find expected CIContext declaration to patch in ${target_file}"
 }
 
@@ -371,6 +377,7 @@ run xcodebuild \
   -configuration Release \
   -destination 'platform=macOS,arch=arm64' \
   -derivedDataPath "${XCODE_DERIVED_DATA}" \
+  -skipPackagePluginValidation \
   -resolvePackageDependencies \
   -quiet
 
@@ -385,6 +392,7 @@ run env "${BUILD_ENV[@]}" \
     -configuration Release \
     -destination 'platform=macOS,arch=arm64' \
     -derivedDataPath "${XCODE_DERIVED_DATA}" \
+    -skipPackagePluginValidation \
     SWIFT_ACTIVE_COMPILATION_CONDITIONS='MLX_PREWARM_SHADERS' \
     -quiet \
     build

@@ -24,7 +24,7 @@ final class SystemPromptRuntimeTests: XCTestCase {
 
         let cwd = FileManager.default.currentDirectoryPath
         XCTAssertTrue(composition.prompt.contains("PROMPT_SECTION:runtime"))
-        XCTAssertTrue(composition.prompt.contains("Current workdir (workspace): \(cwd)"))
+        XCTAssertTrue(composition.prompt.contains("WORKSPACE ROOT: \(cwd)"))
     }
 
     func testRuntimeSectionUsesExplicitWorkspaceRootWhenProvided() async {
@@ -34,7 +34,7 @@ final class SystemPromptRuntimeTests: XCTestCase {
             workspaceRoot: "/tmp/custom-workspace"
         )
 
-        XCTAssertTrue(composition.prompt.contains("Current workdir (workspace): /tmp/custom-workspace"))
+        XCTAssertTrue(composition.prompt.contains("WORKSPACE ROOT: /tmp/custom-workspace"))
     }
 
     func testPlanningModeInjectsPlanningToolsOnly() async {

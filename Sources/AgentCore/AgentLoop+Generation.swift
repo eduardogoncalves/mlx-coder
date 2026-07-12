@@ -49,6 +49,10 @@ extension AgentLoop {
         let shouldUseProcessorPath = isVLM && hasProcessorConfig
         let enableThinking = thinkingLevel != .fast && !isGemma4Model
         let chatML = history.formatChatML(messages: transformedMessages, enableThinking: enableThinking)
+        // Template messages for applyChatTemplate() — model-native prompt formatting.
+        let templateMessages: [[String: any Sendable]] = transformedMessages.map { msg in
+            ["role": msg.role.rawValue, "content": msg.wireContent]
+        }
 
         // For the processor path, capture the Sendable message data to rebuild Chat.Message inside perform.
         // Chat.Message contains CIImage and is not Sendable, so we reconstruct it in the closure.
@@ -89,10 +93,12 @@ extension AgentLoop {
         let draftModel = self.draftModel
         let promptCache = self.promptCache
         let promptCacheStats = self.promptCacheStats
-        let result = try await modelContainer.perform { [currentGenerationConfig, frontend, chatML, imageURLs, vlmMessageData, vlmLastUserIndex, shouldUseProcessorPath, isVLM, dialect, draftModel, promptCache, promptCacheStats] context in
+        let result = try await modelContainer.perform { [currentGenerationConfig, frontend, chatML, templateMessages, enableThinking, imageURLs, vlmMessageData, vlmLastUserIndex, shouldUseProcessorPath, isVLM, dialect, draftModel, promptCache, promptCacheStats] context in
             if Task.isCancelled { throw CancellationError() }
             var hasTokenProcessingEnded = false
             var hasGenerationStarted = false
+            // Updated by the text-path template application below; VLM paths leave it at enableThinking.
+            var actuallyStartedThinking = enableThinking
 
             // Persistent cross-turn KV cache bookkeeping (plain-text path only).
             // These stay nil on every other path, so the defer below is a no-op there.
@@ -148,6 +154,13 @@ extension AgentLoop {
                 generationParameters.presencePenalty = nil
                 generationParameters.frequencyPenalty = nil
             }
+            // Strip kvBits so TokenIterator never calls maybeQuantizeKVCache, which
+            // would replace KVCacheSimple with QuantizedKVCache mid-generation.
+            // QuantizedKVCache.update() is a fatalError in the updated mlx-swift-lm:
+            // models that call cache.update() directly (Gemma2, DeepseekV3, etc.)
+            // crash on the second generated token once the cache is promoted.
+            // TurboQuant and cross-turn caching manage compression independently.
+            generationParameters.kvBits = nil
 
             let input: LMInput
             if let messageData = vlmMessageData {
@@ -195,11 +208,30 @@ extension AgentLoop {
                     input = try AgentLoop.makeSafeTextLMInput(tokens: tokens)
                 }
             } else {
-                let tokens = try AgentLoop.encodeNonEmptyTokens(
-                    primaryText: chatML,
-                    fallbackTexts: ["hi", "a"],
-                    using: tokenizer.encode(text:)
-                )
+                // Use the model's native chat template when available (reads chat_template from
+                // tokenizer_config.json). This handles non-ChatML models (GLM-4, etc.) correctly.
+                // Falls back to the hand-written ChatML formatter when the template is missing or
+                // errors (e.g. unsupported role in the template's Jinja).
+                let additionalCtx: [String: any Sendable] = ["enable_thinking": enableThinking]
+                let tokens: [Int]
+                if let ids = try? tokenizer.applyChatTemplate(
+                    messages: templateMessages, tools: nil, additionalContext: additionalCtx),
+                    !ids.isEmpty {
+                    tokens = ids
+                    // Detect whether the template actually opened a <think> block so that
+                    // StreamParser and the upstream tool-call parser are set correctly.
+                    // Qwen3's template inserts <think>\n when enable_thinking: true; other
+                    // models ignore the variable and never emit <think>.
+                    let tailIds = Array(ids.suffix(12))
+                    let decodedTail = tokenizer.decode(tokenIds: tailIds, skipSpecialTokens: false)
+                    actuallyStartedThinking = decodedTail.contains("<think>")
+                } else {
+                    tokens = try AgentLoop.encodeNonEmptyTokens(
+                        primaryText: chatML,
+                        fallbackTexts: ["hi", "a"],
+                        using: tokenizer.encode(text:))
+                    actuallyStartedThinking = enableThinking
+                }
                 if isVLM {
                     // VLM checkpoint without processor metadata: still text-only here,
                     // but persistent caching stays disabled for this family.
@@ -442,7 +474,7 @@ extension AgentLoop {
             var parser = StreamParser(
                 openTag: ToolCallPattern.thinkOpen,
                 closeTag: ToolCallPattern.thinkClose,
-                startsThinking: enableThinking
+                startsThinking: actuallyStartedThinking
             )
             // VLM and other non-caching paths don't set turnInputTokenCount; fall back
             // to the raw input size (full prompt — no cache on those paths anyway).
@@ -707,11 +739,17 @@ extension AgentLoop {
                 }
             }
 
-            // Strip EOS tokens if they leaked into the text
-            rawResponseText = rawResponseText.replacingOccurrences(of: ToolCallPattern.eosToken, with: "")
+            // Strip EOS/stop strings that may have leaked into the decoded text.
+            // Use the model's actual stop strings rather than the hardcoded <|im_end|>
+            // so non-ChatML models (GLM-4, etc.) are cleaned up correctly.
+            var eosStrings = context.configuration.extraEOSTokens
+            if let eosStr = tokenizer.eosToken { eosStrings.insert(eosStr) }
+            for eos in eosStrings where !eos.isEmpty {
+                rawResponseText = rawResponseText.replacingOccurrences(of: eos, with: "")
+            }
             rawResponseText = rawResponseText.trimmingCharacters(in: .whitespacesAndNewlines)
 
-            return (text: rawResponseText, writer: writer, startedThinking: enableThinking, turnStats: capturedTurnStats)
+            return (text: rawResponseText, writer: writer, startedThinking: actuallyStartedThinking, turnStats: capturedTurnStats)
         }
 
         return result
