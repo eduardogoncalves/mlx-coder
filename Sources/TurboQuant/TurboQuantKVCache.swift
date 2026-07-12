@@ -462,7 +462,13 @@ public func makeTurboQuantCaches(
     keyBits: Int = 3,
     valueBits: Int = 3
 ) -> [any KVCache] {
-    let baseCaches = model.newCache(parameters: parameters)
+    // TurboQuant does its own compression, so force kvBits = nil to prevent
+    // model.newCache from creating QuantizedKVCache layers. QuantizedKVCache
+    // requires updateQuantized() instead of update(), which crashes at runtime
+    // when the standard token iterator calls update() on them.
+    var baseParams = parameters
+    baseParams.kvBits = nil
+    let baseCaches = model.newCache(parameters: baseParams)
     return baseCaches.map { cache in
         cache is KVCacheSimple
             ? TurboQuantKVCache(keyBits: keyBits, valueBits: valueBits)

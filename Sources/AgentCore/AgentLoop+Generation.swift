@@ -148,6 +148,13 @@ extension AgentLoop {
                 generationParameters.presencePenalty = nil
                 generationParameters.frequencyPenalty = nil
             }
+            // Strip kvBits so TokenIterator never calls maybeQuantizeKVCache, which
+            // would replace KVCacheSimple with QuantizedKVCache mid-generation.
+            // QuantizedKVCache.update() is a fatalError in the updated mlx-swift-lm:
+            // models that call cache.update() directly (Gemma2, DeepseekV3, etc.)
+            // crash on the second generated token once the cache is promoted.
+            // TurboQuant and cross-turn caching manage compression independently.
+            generationParameters.kvBits = nil
 
             let input: LMInput
             if let messageData = vlmMessageData {

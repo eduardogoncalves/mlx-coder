@@ -182,7 +182,7 @@ public struct LLMCandidateExtractor: CandidateExtractor {
             presenceContextSize: base.presenceContextSize,
             frequencyPenalty: base.frequencyPenalty,
             frequencyContextSize: base.frequencyContextSize,
-            kvBits: base.kvBits,
+            kvBits: nil, // maybeQuantizeKVCache + direct cache.update() = fatalError
             kvGroupSize: base.kvGroupSize,
             quantizedKVStart: base.quantizedKVStart,
             longContextThreshold: base.longContextThreshold,

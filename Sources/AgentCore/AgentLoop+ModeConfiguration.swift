@@ -196,13 +196,14 @@ extension AgentLoop {
 
     func updatePendingReloadIfNeeded() {
         // Reload only when model loading/runtime-cache parameters changed.
+        // NOTE: turboQuantBits is intentionally excluded — TurboQuant creates per-generation
+        // caches (not at model-load time), so changing it never requires a model reload.
         let needsReload = self.modelPath != self.loadedModelPath ||
             self.memoryLimit != self.loadedMemoryLimit ||
             self.cacheLimit != self.loadedCacheLimit ||
             self.currentGenerationConfig.kvBits != self.loadedKVBits ||
             self.currentGenerationConfig.kvGroupSize != self.loadedKVGroupSize ||
-            self.currentGenerationConfig.quantizedKVStart != self.loadedQuantizedKVStart ||
-            self.currentGenerationConfig.turboQuantBits != self.loadedTurboQuantBits
+            self.currentGenerationConfig.quantizedKVStart != self.loadedQuantizedKVStart
 
         if needsReload {
             self.pendingReload = true

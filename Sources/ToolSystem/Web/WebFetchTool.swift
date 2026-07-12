@@ -529,7 +529,7 @@ extension WebFetchTool: ProgressReportingTool {
             presenceContextSize: config.presenceContextSize,
             frequencyPenalty: config.frequencyPenalty,
             frequencyContextSize: config.frequencyContextSize,
-            kvBits: config.kvBits,
+            kvBits: nil, // maybeQuantizeKVCache + direct cache.update() = fatalError
             kvGroupSize: config.kvGroupSize,
             quantizedKVStart: config.quantizedKVStart,
             numDraftTokens: config.numDraftTokens

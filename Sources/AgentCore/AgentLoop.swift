@@ -810,38 +810,45 @@ public actor AgentLoop {
         return nil
     }
 
-    /// Checks for long context and triggers KV quantization if needed.
+    /// Checks for long context and enables TurboQuant KV cache compression if not already active.
+    ///
+    /// Standard mlx-lm `kvBits` quantization is stripped before each generation call because
+    /// `QuantizedKVCache.update()` crashes several model types (Gemma2, DeepseekV3, etc.).
+    /// TurboQuant is the safe alternative: it decompresses back to float16 so every model
+    /// sees normal KV arrays, and it creates per-generation caches without needing a reload.
     private func checkAndApplyLongContextQuantization() {
         let currentTokens = history.estimatedTokenCount
-        if currentTokens > currentGenerationConfig.longContextThreshold
-            && (currentGenerationConfig.kvBits == nil || currentGenerationConfig.kvBits! > 4)
-            && !modelPath.lowercased().contains("gemma-4")
-        {
-            frontend.emitStatus("\u{001B}[33m[Warning]\u{001B}[0m Long context detected (\(currentTokens) tokens).")
-            frontend.emitStatus("Switching to 4-bit KV cache to save VRAM...")
-            
-            // Update config to 4-bit
-            self.currentGenerationConfig = GenerationEngine.Config(
-                maxTokens: currentGenerationConfig.maxTokens,
-                temperature: currentGenerationConfig.temperature,
-                topP: currentGenerationConfig.topP,
-                topK: currentGenerationConfig.topK,
-                minP: currentGenerationConfig.minP,
-                repetitionPenalty: currentGenerationConfig.repetitionPenalty,
-                repetitionContextSize: currentGenerationConfig.repetitionContextSize,
-                presencePenalty: currentGenerationConfig.presencePenalty,
-                presenceContextSize: currentGenerationConfig.presenceContextSize,
-                frequencyPenalty: currentGenerationConfig.frequencyPenalty,
-                frequencyContextSize: currentGenerationConfig.frequencyContextSize,
-                kvBits: 4, 
-                kvGroupSize: currentGenerationConfig.kvGroupSize,
-                quantizedKVStart: currentGenerationConfig.quantizedKVStart,
-                longContextThreshold: currentGenerationConfig.longContextThreshold,
-                turboQuantBits: currentGenerationConfig.turboQuantBits,
-                numDraftTokens: currentGenerationConfig.numDraftTokens
-            )
-            self.pendingReload = true
-        }
+        guard currentTokens > currentGenerationConfig.longContextThreshold,
+              currentGenerationConfig.turboQuantBits == nil,
+              !modelPath.lowercased().contains("gemma-4")
+        else { return }
+
+        frontend.emitStatus(
+            "\u{001B}[33m[Long context]\u{001B}[0m \(currentTokens) tokens — "
+            + "enabling TurboQuant KV cache (3-bit) to reduce decode memory bandwidth."
+        )
+        self.currentGenerationConfig = GenerationEngine.Config(
+            maxTokens: currentGenerationConfig.maxTokens,
+            temperature: currentGenerationConfig.temperature,
+            topP: currentGenerationConfig.topP,
+            topK: currentGenerationConfig.topK,
+            minP: currentGenerationConfig.minP,
+            repetitionPenalty: currentGenerationConfig.repetitionPenalty,
+            repetitionContextSize: currentGenerationConfig.repetitionContextSize,
+            presencePenalty: currentGenerationConfig.presencePenalty,
+            presenceContextSize: currentGenerationConfig.presenceContextSize,
+            frequencyPenalty: currentGenerationConfig.frequencyPenalty,
+            frequencyContextSize: currentGenerationConfig.frequencyContextSize,
+            kvBits: currentGenerationConfig.kvBits,
+            kvGroupSize: currentGenerationConfig.kvGroupSize,
+            quantizedKVStart: currentGenerationConfig.quantizedKVStart,
+            longContextThreshold: currentGenerationConfig.longContextThreshold,
+            turboQuantBits: 3,
+            numDraftTokens: currentGenerationConfig.numDraftTokens
+        )
+        // No pendingReload: TurboQuant creates per-generation caches, not at model-load time.
+        // Invalidate the prompt cache: TurboQuant and cross-turn caching are mutually exclusive.
+        promptCache.invalidate(reason: "TurboQuant auto-enabled at long context")
     }
 
     /// Deduplicates parsed tool calls against streamed tool calls.

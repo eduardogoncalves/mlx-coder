@@ -148,7 +148,7 @@ public struct LLMReranker: Reranker {
             presenceContextSize: base.presenceContextSize,
             frequencyPenalty: nil,
             frequencyContextSize: base.frequencyContextSize,
-            kvBits: base.kvBits,
+            kvBits: nil, // maybeQuantizeKVCache + direct cache.update() = fatalError
             kvGroupSize: base.kvGroupSize,
             quantizedKVStart: base.quantizedKVStart,
             longContextThreshold: base.longContextThreshold,

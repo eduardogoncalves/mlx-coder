@@ -93,7 +93,7 @@ extension AgentLoop {
             presenceContextSize: 0,
             frequencyPenalty: 0.0,
             frequencyContextSize: 0,
-            kvBits: currentGenerationConfig.kvBits,
+            kvBits: nil, // maybeQuantizeKVCache + direct cache.update() = fatalError
             kvGroupSize: currentGenerationConfig.kvGroupSize,
             quantizedKVStart: currentGenerationConfig.quantizedKVStart,
             longContextThreshold: currentGenerationConfig.longContextThreshold,
