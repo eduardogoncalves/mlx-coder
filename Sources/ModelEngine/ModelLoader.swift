@@ -71,10 +71,10 @@ public final class ModelLoader: Sendable {
         // Start spinner
         let spinnerMessage = usesHubID ? "Checking Hugging Face model..." : "Loading model from disk..."
         let spinner = Spinner(message: spinnerMessage)
-        await spinner.start()
+        spinner.start()
 
         defer {
-            Task { await spinner.stop() }
+            spinner.stop()
         }
 
         // ── Local ~/models cache check ─────────────────────────────────────────
@@ -111,7 +111,7 @@ public final class ModelLoader: Sendable {
                 .appendingPathComponent(String(parts[1]))
 
             if isGitAvailable() {
-                await spinner.updateMessage("Cloning \(path) via git (shallow, no history)...")
+                spinner.updateMessage("Cloning \(path) via git (shallow, no history)...")
                 let cloneSuccess = await gitShallowClone(
                     repoURL: "https://huggingface.co/\(path)",
                     destination: localClonePath,
@@ -122,7 +122,7 @@ public final class ModelLoader: Sendable {
                     usesLocalDirectory = true
                     gitClonedLocally = true
                 } else {
-                    await spinner.updateMessage("Git clone failed, falling back to Hugging Face Hub download...")
+                    spinner.updateMessage("Git clone failed, falling back to Hugging Face Hub download...")
                 }
             }
         }
@@ -148,7 +148,7 @@ public final class ModelLoader: Sendable {
             progressHandler: { progress in
                 guard !skipHubProgress else { return }
                 let message = progressTracker.formattedStatus(for: progress)
-                Task { await spinner.updateMessage(message) }
+                spinner.updateMessage(message)
             }
         )
 
@@ -270,7 +270,7 @@ public final class ModelLoader: Sendable {
         }
 
         // Step 2 — pull LFS objects (the actual weight files)
-        await spinner.updateMessage("Downloading model weights via git-lfs...")
+        spinner.updateMessage("Downloading model weights via git-lfs...")
 
         let lfsProcess = Process()
         lfsProcess.executableURL = URL(filePath: "/usr/bin/env")
@@ -338,7 +338,7 @@ public final class ModelLoader: Sendable {
             let lines = text.components(separatedBy: CharacterSet(charactersIn: "\r\n"))
             if let lastLine = lines.last(where: { !$0.trimmingCharacters(in: .whitespaces).isEmpty }) {
                 let parsed = parseGitProgressLine(lastLine, prefix: prefix)
-                Task { await spinner.updateMessage(parsed) }
+                spinner.updateMessage(parsed)
             }
 
             // Keep only the tail after the last separator to avoid unbounded growth

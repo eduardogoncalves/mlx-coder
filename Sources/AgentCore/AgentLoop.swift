@@ -1141,11 +1141,11 @@ public actor AgentLoop {
                     let showToolSpinner = (call.name == "web_search" || call.name == "web_fetch")
                     let toolSpinner = Spinner(message: "Executing \(call.name)...")
                     if showToolSpinner {
-                        await toolSpinner.start()
+                        toolSpinner.start()
                     }
                     defer {
                         if showToolSpinner {
-                            Task { await toolSpinner.stop(clearLine: true) }
+                            toolSpinner.stop(clearLine: true)
                         }
                     }
 
@@ -1170,7 +1170,7 @@ public actor AgentLoop {
                         if let progressTool = tool as? ProgressReportingTool {
                             result = try await progressTool.execute(arguments: isolatedExecutionArguments) { phase in
                                 if showToolSpinner {
-                                    Task { await toolSpinner.updateMessage("\(call.name): \(phase)") }
+                                    toolSpinner.updateMessage("\(call.name): \(phase)")
                                 }
                             }
                         } else {

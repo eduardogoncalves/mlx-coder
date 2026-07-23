@@ -232,15 +232,13 @@ public final class LegacyTerminalFrontend: AgentFrontend, @unchecked Sendable {
 
     private func startOrUpdateSpinner(message: String) {
         if let s = spinner {
-            Task {
-                await s.updateMessage(message)
-                await s.start()
-            }
+            s.updateMessage(message)
+            s.start()
             return
         }
         let s = Spinner(message: message)
         spinner = s
-        Task { await s.start() }
+        s.start()
     }
 
     private func showSpinner(message: String) {
@@ -256,7 +254,7 @@ public final class LegacyTerminalFrontend: AgentFrontend, @unchecked Sendable {
         pendingSpinnerStopTask = Task {
             try? await Task.sleep(nanoseconds: delay)
             guard !Task.isCancelled else { return }
-            await s.stop(clearLine: true)
+            s.stop(clearLine: true)
         }
     }
 
@@ -264,7 +262,7 @@ public final class LegacyTerminalFrontend: AgentFrontend, @unchecked Sendable {
         pendingSpinnerStopTask?.cancel()
         pendingSpinnerStopTask = nil
         if let s = spinner {
-            Task { await s.stop(clearLine: true) }
+            s.stop(clearLine: true)
         }
     }
 
