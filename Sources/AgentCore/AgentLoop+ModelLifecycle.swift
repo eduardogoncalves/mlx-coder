@@ -61,6 +61,24 @@ extension AgentLoop {
         frontend.emit(.modelLifecycle(.reloaded("Model reloaded successfully")))
     }
 
+    /// Unloads the currently-resident local model (if any) so a `TaskTool`
+    /// sub-agent can load a *different* local role model without two local
+    /// models being resident simultaneously. No-op for online backends.
+    /// Pair with `reacquireLocalModelAfterSubagent()` once the sub-agent finishes.
+    public func releaseLocalModelForSubagent() async {
+        guard !backend.isOnline else { return }
+        modelContainer = nil
+        MLX.Memory.clearCache()
+    }
+
+    /// Reloads `self.modelPath` if it was previously released via
+    /// `releaseLocalModelForSubagent()`. No-op for online backends or if a
+    /// container is already loaded.
+    public func reacquireLocalModelAfterSubagent() async throws {
+        guard !backend.isOnline, modelContainer == nil else { return }
+        try await reloadModel()
+    }
+
     /// Switch to a different model path and immediately reload model and dependent tools.
     public func switchModel(to newModelPath: String) async throws {
         let trimmed = newModelPath.trimmingCharacters(in: .whitespacesAndNewlines)

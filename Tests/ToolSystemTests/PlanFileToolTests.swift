@@ -52,7 +52,32 @@ final class PlanFileToolTests: XCTestCase {
         let result = try await tool.execute(arguments: ["action": "append"])
 
         XCTAssertTrue(result.isError)
-        XCTAssertTrue(result.content.contains("Use 'write' or 'edit'"))
+        XCTAssertTrue(result.content.contains("Use 'read', 'write' or 'edit'"))
+    }
+
+    func testReadReturnsExistingPlanContent() async throws {
+        let workspace = try makeTempWorkspace()
+        defer { try? FileManager.default.removeItem(at: workspace) }
+
+        let planFile = workspace.appendingPathComponent("PLAN.MD")
+        try "# Plan\n\n- [ ] First step\n".write(to: planFile, atomically: true, encoding: .utf8)
+
+        let tool = PlanFileTool(permissions: PermissionEngine(workspaceRoot: workspace.path))
+        let result = try await tool.execute(arguments: ["action": "read"])
+
+        XCTAssertFalse(result.isError)
+        XCTAssertEqual(result.content, "# Plan\n\n- [ ] First step\n")
+    }
+
+    func testReadWithNoPlanYetReturnsFriendlyNoticeNotAnError() async throws {
+        let workspace = try makeTempWorkspace()
+        defer { try? FileManager.default.removeItem(at: workspace) }
+
+        let tool = PlanFileTool(permissions: PermissionEngine(workspaceRoot: workspace.path))
+        let result = try await tool.execute(arguments: ["action": "read"])
+
+        XCTAssertFalse(result.isError, "a missing plan is an expected outcome, not a tool failure")
+        XCTAssertTrue(result.content.contains("No plan has been written yet"))
     }
 
     private func makeTempWorkspace() throws -> URL {

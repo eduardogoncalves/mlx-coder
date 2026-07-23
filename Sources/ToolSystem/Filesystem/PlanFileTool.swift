@@ -2,10 +2,10 @@ import Foundation
 
 public struct PlanFileTool: Tool {
     static let planFileName = "PLAN.MD"
-    private static let validActions = ["write", "edit"]
+    private static let validActions = ["read", "write", "edit"]
 
     public let name = "plan_file"
-    public let description = "Create or update the workspace-root PLAN.MD without leaving plan mode. Valid actions: \(Self.validActionsDescription). Use 'write' to create or replace the full document, and 'edit' for an exact search/replace update."
+    public let description = "Create, read, or update the workspace-root PLAN.MD without leaving plan mode. 'read' checks the current plan (returns an empty-plan notice if none exists yet), 'write' creates or replaces the full document, 'edit' does an exact search/replace update."
     public let parameters = JSONSchema(
         type: "object",
         properties: [
@@ -29,6 +29,15 @@ public struct PlanFileTool: Tool {
         }
 
         switch action {
+        case "read":
+            let result = FileMutationSupport.readContent(from: Self.planFileName, permissions: permissions)
+            // "No plan yet" is an expected, common outcome (e.g. a fresh task)
+            // rather than a failure — don't surface it as a tool error.
+            if result.isError, result.content.hasPrefix("File not found:") {
+                return .success("No plan has been written yet. Use action 'write' to create one.")
+            }
+            return result
+
         case "write":
             guard let content = arguments["content"] as? String else {
                 return .error("Missing required argument: content")

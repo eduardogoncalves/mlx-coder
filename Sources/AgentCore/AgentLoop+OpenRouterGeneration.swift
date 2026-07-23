@@ -62,7 +62,7 @@ extension AgentLoop {
         }
 
         let tools: [OpenRouterToolSpec]
-        if let toolDefsData = try? await registry.generateOpenAIToolDefinitionsJSON(),
+        if let toolDefsData = try? await registry.generateOpenAIToolDefinitionsJSON(filter: currentToolPromptFilter()),
            let decoded = (try? JSONSerialization.jsonObject(with: toolDefsData)) as? [[String: Any]] {
             tools = decoded.map { OpenRouterToolSpec(json: $0) }
         } else {

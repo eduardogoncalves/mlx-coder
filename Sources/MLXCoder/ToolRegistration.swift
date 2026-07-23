@@ -37,16 +37,23 @@ func registerAllTools(
 
     // Agent tools
     await registry.register(TodoTool(workspaceRoot: permissions.workspaceRoot))
+    // `parentAgentLoop` is nil here because the top-level AgentLoop doesn't exist
+    // yet at this point in the startup sequence — remote role delegation (Phase 3)
+    // still works immediately, but local role-model residency swapping (Phase 4)
+    // only activates once the caller re-runs `agentLoop.registerToolsInternal()`
+    // right after constructing the AgentLoop (see ChatCommand.swift/RunCommand.swift).
+    await registry.register(TaskTool(
+        modelContainer: modelContainer,
+        permissions: permissions,
+        generationConfig: config,
+        modelPath: modelPath,
+        useSandbox: useSandbox,
+        parentRegistry: registry,
+        frontend: frontend,
+        roleModels: AgentRoleRegistry.current(workspaceRoot: permissions.workspaceRoot).roleModelMap,
+        parentAgentLoop: nil
+    ))
     if let modelContainer {
-        await registry.register(TaskTool(
-            modelContainer: modelContainer,
-            permissions: permissions,
-            generationConfig: config,
-            modelPath: modelPath,
-            useSandbox: useSandbox,
-            parentRegistry: registry,
-            frontend: frontend
-        ))
         await registry.register(ProjectExpertLoRATool(
             modelContainer: modelContainer,
             workspaceRoot: permissions.workspaceRoot,

@@ -16,7 +16,10 @@ final class TaskToolProfileTests: XCTestCase {
         for name in TaskTool.supportedProfileNames {
             let instructions = TaskTool.baseInstructions(for: name)
             XCTAssertNotNil(instructions, "Expected instructions for profile: \(name)")
-            XCTAssertTrue(instructions?.contains("specialized sub-agent") == true)
+            // Each profile leads with its own single identity statement
+            // ("You are the X agent...") rather than a generic preamble.
+            XCTAssertTrue(instructions?.hasPrefix("You are") == true)
+            XCTAssertTrue(instructions?.contains("Do not ask the user for permission to proceed.") == true)
         }
     }
 
@@ -91,12 +94,14 @@ final class TaskToolProfileTests: XCTestCase {
         XCTAssertNil(error)
     }
 
-    func testSanitizeRequestedToolsRejectsEmptyList() {
+    func testSanitizeRequestedToolsAllowsEmptyList() {
+        // An empty `tools` list is now valid at the sanitize layer — callers fall
+        // back to the profile's default tool preset in validateAndNormalizeArguments.
         switch TaskTool.sanitizeRequestedTools([]) {
-        case .success:
-            XCTFail("Expected empty tool list to fail")
+        case .success(let tools):
+            XCTAssertEqual(tools, [])
         case .failure(.message(let message)):
-            XCTAssertEqual(message, "Task tool requires at least one tool in 'tools'.")
+            XCTFail("Expected empty tool list to succeed, got error: \(message)")
         }
     }
 
@@ -324,6 +329,39 @@ final class TaskToolProfileTests: XCTestCase {
     func testCompactDigestSummaryReturnsFallbackForEmptyInput() {
         let summary = TaskTool.compactDigestSummary(from: "   \n\n   ")
         XCTAssertEqual(summary, "No summary available.")
+    }
+
+    func testFallbackToolActivitySummaryReturnsNilWhenNoToolMessages() {
+        let messages: [Message] = [
+            Message(role: .user, content: "do the thing", toolCallId: nil, origin: .human),
+            Message(role: .assistant, content: "", toolCallId: nil, origin: .human),
+        ]
+        XCTAssertNil(TaskTool.fallbackToolActivitySummary(from: messages))
+    }
+
+    func testFallbackToolActivitySummaryRecoversLastToolOutput() {
+        let messages: [Message] = [
+            Message(role: .user, content: "read the file and report back", toolCallId: nil, origin: .human),
+            Message(role: .assistant, content: "", toolCallId: nil, origin: .human),
+            Message(role: .tool, content: "<!DOCTYPE html><html>...", toolCallId: "read_file", origin: .human),
+        ]
+
+        let summary = TaskTool.fallbackToolActivitySummary(from: messages)
+        XCTAssertNotNil(summary)
+        XCTAssertTrue(summary!.contains("read_file"))
+        XCTAssertTrue(summary!.contains("<!DOCTYPE html>"))
+    }
+
+    func testFallbackToolActivitySummaryTruncatesLongToolOutput() {
+        let longContent = String(repeating: "x", count: 500)
+        let messages: [Message] = [
+            Message(role: .tool, content: longContent, toolCallId: "web_search", origin: .human),
+        ]
+
+        let summary = TaskTool.fallbackToolActivitySummary(from: messages, maxCharactersPerTool: 50)
+        XCTAssertNotNil(summary)
+        XCTAssertTrue(summary!.contains("..."))
+        XCTAssertFalse(summary!.contains(longContent))
     }
 
     func testMakeSubagentDigestIncludesArchiveWhenProvided() {

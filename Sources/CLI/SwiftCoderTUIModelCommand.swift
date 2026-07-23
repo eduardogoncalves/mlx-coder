@@ -12,6 +12,17 @@ enum TUIModelCommandIntent: Equatable {
     case selectExisting(index: Int)      // back-compat: /model <label|#>
     case openFilteredMenu(query: String) // /model <substring> matching >1 model
     case invalidModelName(String)
+
+    // Per-role model assignments (planner/executor/reviewer) — see AgentRoleConfig.swift.
+    case openRoleMenu
+    case openRoleActionMenu(role: String)
+    case openRoleLocalMenu(role: String)
+    case selectRoleLocal(role: String, id: String)
+    case openRoleRemoteProvidersMenu(role: String)
+    case openRoleRemoteModelsMenu(role: String, provider: String)
+    case selectRoleRemote(role: String, provider: String, modelID: String)
+    case clearRole(role: String)
+    case invalidRole(String)
 }
 
 enum TUIModelCommandParser {
@@ -47,6 +58,38 @@ enum TUIModelCommandParser {
                 .dropFirst(tokens[0].count)
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             return id.isEmpty ? .openLocalMenu : .selectLocal(id: id)
+        }
+
+        // Per-role model assignment drill-down.
+        if firstLower == "role" {
+            guard tokens.count > 1 else { return .openRoleMenu }
+            let roleToken = tokens[1].lowercased()
+            guard AgentRolesConfig.roleNames.contains(roleToken) else {
+                return .invalidRole(tokens[1])
+            }
+            guard tokens.count > 2 else { return .openRoleActionMenu(role: roleToken) }
+
+            let verb = tokens[2].lowercased()
+            switch verb {
+            case "clear":
+                return .clearRole(role: roleToken)
+            case "local":
+                if tokens.count == 3 { return .openRoleLocalMenu(role: roleToken) }
+                return .selectRoleLocal(role: roleToken, id: tokens[3...].joined(separator: " "))
+            case "remote":
+                switch tokens.count {
+                case 3:
+                    return .openRoleRemoteProvidersMenu(role: roleToken)
+                case 4:
+                    return .openRoleRemoteModelsMenu(role: roleToken, provider: tokens[3])
+                case 5:
+                    return .selectRoleRemote(role: roleToken, provider: tokens[3], modelID: tokens[4])
+                default:
+                    return .invalidRole(rest)
+                }
+            default:
+                return .invalidRole(rest)
+            }
         }
 
         // Remote drill-down.
@@ -171,6 +214,65 @@ enum TUIModelCommandParser {
         }
     }
 
+    // MARK: - Role menu builders (planner/executor/reviewer)
+
+    static func roleMenuItems(current: AgentRolesConfig) -> [(name: String, desc: String)] {
+        AgentRolesConfig.roleNames.map { role in
+            let assigned = current[role]
+            let desc = assigned.map { "assigned: \($0)" } ?? "using the orchestrator's own model"
+            return (name: "/model role \(role)", desc: "\(role.capitalized) — \(desc)")
+        }
+    }
+
+    static func roleActionMenuItems(role: String, current: String?) -> [(name: String, desc: String)] {
+        var items: [(name: String, desc: String)] = [
+            (name: "/model role \(role) local", desc: "Assign a local MLX model to \(role)"),
+            (name: "/model role \(role) remote", desc: "Assign a remote provider model to \(role)"),
+        ]
+        if current != nil {
+            items.append((name: "/model role \(role) clear", desc: "Clear override — \(role) uses the orchestrator's own model"))
+        }
+        return items
+    }
+
+    static func roleLocalMenuItems(
+        role: String,
+        models: [AppConfig.ModelConfig],
+        current: String?
+    ) -> [(name: String, desc: String)] {
+        let localIDs = models
+            .filter { InferenceBackend(modelPath: $0.id).isLocal }
+            .map(\.id)
+        var seen = Set<String>()
+        let ids = localIDs.filter { seen.insert($0).inserted }
+
+        return ids.map { id in
+            let isCurrent = current?.caseInsensitiveCompare(id) == .orderedSame
+            let desc = isCurrent ? "Currently assigned to \(role)" : "Assign to \(role)"
+            return (name: "/model role \(role) local \(id)", desc: desc)
+        }
+    }
+
+    static func roleRemoteModelsMenuItems(
+        role: String,
+        provider: String,
+        current: String?
+    ) -> [(name: String, desc: String)] {
+        let cached = RemoteModelCache.cachedModels(providerID: provider)
+            .filter { $0.supportsTools }
+
+        return cached.map { model in
+            let carrier = InferenceBackend.remote(providerID: provider, modelID: model.id).modelPath
+            let isCurrent = current?.caseInsensitiveCompare(carrier) == .orderedSame
+                || current?.caseInsensitiveCompare(model.id) == .orderedSame
+            var badges = ""
+            if model.isFree { badges += " [free]" }
+            if let ctx = model.contextLength { badges += " (\(ctx) ctx)" }
+            let desc = isCurrent ? "Currently assigned to \(role)\(badges)" : "Assign to \(role)\(badges)"
+            return (name: "/model role \(role) remote \(provider) \(model.id)", desc: desc)
+        }
+    }
+
     private static func modelIndex(named requested: String, in models: [AppConfig.ModelConfig]) -> Int? {
         models.firstIndex {
             $0.label.caseInsensitiveCompare(requested) == .orderedSame ||
@@ -183,7 +285,7 @@ struct TUIModelSlashCommand: SlashCommand {
     let models: [AppConfig.ModelConfig]
 
     let name: String = "model"
-    let description: String? = "Switch model (/model → local / remote)"
+    let description: String? = "Switch model (/model → local / remote / role)"
 
     func argumentCompletions(prefix: String) -> [AutocompleteItem] {
         let typed = prefix.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -199,6 +301,11 @@ struct TUIModelSlashCommand: SlashCommand {
                 value: "remote",
                 label: "/model remote",
                 description: "Browse remote provider models"
+            ),
+            AutocompleteItem(
+                value: "role",
+                label: "/model role",
+                description: "Assign models to planner/executor/reviewer"
             )
         ].filter { normalized.isEmpty || $0.value.hasPrefix(normalized) }
 

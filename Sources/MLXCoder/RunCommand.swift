@@ -224,7 +224,9 @@ struct RunCommand: AsyncParsableCommand {
             taskType: .general,
             workspaceRoot: absWorkspace,
             skillsMetadata: skillMetadata,
-            dialect: ToolCallDialect.detect(modelPath: selectedModel)
+            dialect: ToolCallDialect.detect(modelPath: selectedModel),
+            usesNativeToolCalling: InferenceBackend(modelPath: selectedModel).isOnline,
+            toolPromptFilterOverride: AgentLoop.orchestratorToolPromptFilter(mode: .plan)
         )
 
         let agentLoop = AgentLoop(
@@ -249,6 +251,11 @@ struct RunCommand: AsyncParsableCommand {
             cacheLimit: budget.cacheBytes,
             draftModel: draftModel
         )
+
+        // Re-register model-container-dependent tools now that a live AgentLoop
+        // exists, so TaskTool gets a `parentAgentLoop` reference for local
+        // role-model residency swapping (see AgentLoop+ModelLifecycle.swift).
+        await agentLoop.registerToolsInternal()
 
         // The AgentLoop actor now holds the container. Release this frame's copy
         // so that a later /model switch can fully reclaim the old model's weights.

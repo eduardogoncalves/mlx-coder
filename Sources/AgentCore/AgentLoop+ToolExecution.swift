@@ -50,21 +50,22 @@ extension AgentLoop {
         await registry.register(LogKnowledgeTool(workspaceRoot: permissions.workspaceRoot))
         await registry.register(SearchKnowledgeTool(workspaceRoot: permissions.workspaceRoot))
 
-        // Tools that REQUIRE a loaded local MLX container (sub-agent spawning,
-        // local web summarization, LoRA-backed expert routing). Skipped on online
-        // backends — those flows would themselves need an HTTP-backed equivalent
-        // before they'd be useful, and TaskTool's parent registry crash would
-        // otherwise fire mid-turn.
+        // `task` works with or without a loaded local container — remote-backend
+        // orchestrators can still delegate to remote-backed roles. Only
+        // container-bound tools (LoRA expert routing, local web summarization)
+        // are skipped when no local model is loaded.
+        await registry.register(TaskTool(
+            modelContainer: modelContainer,
+            permissions: permissions,
+            generationConfig: currentGenerationConfig,
+            modelPath: modelPath,
+            useSandbox: useSandbox,
+            parentRegistry: registry,
+            frontend: frontend,
+            roleModels: AgentRoleRegistry.current(workspaceRoot: permissions.workspaceRoot).roleModelMap,
+            parentAgentLoop: self
+        ))
         if let modelContainer {
-            await registry.register(TaskTool(
-                modelContainer: modelContainer,
-                permissions: permissions,
-                generationConfig: currentGenerationConfig,
-                modelPath: modelPath,
-                useSandbox: useSandbox,
-                parentRegistry: registry,
-                frontend: frontend
-            ))
             await registry.register(ProjectExpertLoRATool(modelContainer: modelContainer, workspaceRoot: permissions.workspaceRoot, modelPath: modelPath, frontend: frontend))
             await registry.register(WebFetchTool(
                 modelContainer: modelContainer,
@@ -89,9 +90,25 @@ extension AgentLoop {
     }
 
     func isDestructiveToolCall(_ call: ToolCallParser.ParsedToolCall) -> Bool {
-        let alwaysDestructiveTools: Set<String> = ["plan_file", "write_file", "edit_file", "append_file", "patch", "bash", "task"]
+        let alwaysDestructiveTools: Set<String> = ["write_file", "edit_file", "append_file", "patch", "bash"]
         if alwaysDestructiveTools.contains(call.name) {
             return true
+        }
+
+        // plan_file's 'read' action is non-mutating (like read_file) and
+        // should not require the same approval as 'write'/'edit'.
+        if call.name == "plan_file" {
+            return (call.arguments["action"] as? String) != "read"
+        }
+
+        // A `task(...)` call is only as destructive as what it delegates to:
+        // the orchestrator must be free to call read-only profiles (planner,
+        // reviewer, codebase_research, ...) without approval — even in PLAN
+        // mode, since that's the only way it can research anything — but
+        // delegating to a profile that can write files or run shell commands
+        // still needs the same approval a direct write_file/bash call would.
+        if call.name == "task" {
+            return TaskTool.isMutatingTaskCall(arguments: call.arguments)
         }
 
         if call.name == "lsp_rename" {
@@ -106,8 +123,11 @@ extension AgentLoop {
         return false
     }
 
-    func isFileModificationToolName(_ name: String) -> Bool {
-        ["plan_file", "write_file", "edit_file", "append_file", "patch"].contains(name)
+    func isFileModificationToolName(_ call: ToolCallParser.ParsedToolCall) -> Bool {
+        if call.name == "plan_file" {
+            return (call.arguments["action"] as? String) != "read"
+        }
+        return ["write_file", "edit_file", "append_file", "patch"].contains(call.name)
     }
 
     func isReadOnlyBashCall(_ call: ToolCallParser.ParsedToolCall) -> Bool {
@@ -216,6 +236,16 @@ extension AgentLoop {
     /// + later append. Other tools (e.g. `edit_file`) need their full payload
     /// before they can be applied and are not handled here.
     func commitTruncatedStreamedWrite(_ call: TruncatedStreamedToolCall) async -> TruncatedWriteCommit {
+        // Same hard guard as executeToolCall/handleStreamedToolCall: the
+        // orchestrator only ever has task/todo/plan_file.
+        if role == nil, !AgentLoop.orchestratorAllowedToolNames.contains(call.toolName) {
+            try? FileManager.default.removeItem(at: call.contentFile)
+            return TruncatedWriteCommit(
+                result: .error("'\(call.toolName)' is not available to you directly — you are the orchestrator and only have task/todo/plan_file. Delegate this work instead, e.g. task(profile: \"executor\", description: \"...\") to write/edit files."),
+                tail: ""
+            )
+        }
+
         let resolvedPath: String
         do {
             resolvedPath = try permissions.validatePath(call.path)
@@ -290,6 +320,16 @@ extension AgentLoop {
     /// Handles a tool call whose content was streamed to a .tmp file during generation.
     /// Shows a diff to the user and applies the change if approved.
     func handleStreamedToolCall(_ call: StreamedToolCall) async -> ToolResult {
+        // Same hard guard as executeToolCall: the orchestrator only ever has
+        // task/todo/plan_file. Streamed write_file/edit_file/append_file calls
+        // bypass executeToolCall entirely (their content is committed here,
+        // straight from the .tmp file the streaming writer produced during
+        // generation), so this path needs its own copy of the guard.
+        if role == nil, !AgentLoop.orchestratorAllowedToolNames.contains(call.toolName) {
+            try? FileManager.default.removeItem(at: call.contentFile)
+            return .error("'\(call.toolName)' is not available to you directly — you are the orchestrator and only have task/todo/plan_file. Delegate this work instead, e.g. task(profile: \"executor\", description: \"...\") to write/edit files.")
+        }
+
         let resolvedPath: String
         do {
             resolvedPath = try permissions.validatePath(call.path)

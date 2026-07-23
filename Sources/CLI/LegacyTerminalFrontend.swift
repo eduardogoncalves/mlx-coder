@@ -27,6 +27,10 @@ public final class LegacyTerminalFrontend: AgentFrontend, @unchecked Sendable {
     private var didRenderAssistantChunkInGeneration = false
     private var pendingSpinnerStopTask: Task<Void, Never>?
     private let spinnerStopDebounceNanoseconds: UInt64 = 120_000_000
+    // Set while a TaskTool-delegated sub-agent (internal agent) is generating,
+    // so the spinner message can show which agent/model is currently active.
+    // At most one is ever active at a time (sub-agents cannot nest further).
+    private var activeSubAgent: (profile: String, modelPath: String)? = nil
 
     public init(renderer: StreamRenderer, interactiveInput: InteractiveInput) {
         self.renderer = renderer
@@ -98,11 +102,39 @@ public final class LegacyTerminalFrontend: AgentFrontend, @unchecked Sendable {
             renderer.printThinkingChunk(text)
 
         case .toolCallStarted(let snapshot):
-            // Re-inflate string args into the [String: Any] shape StreamRenderer expects.
-            let args: [String: Any] = snapshot.arguments.reduce(into: [:]) { $0[$1.key] = $1.value }
+            // The spinner (Spinner.swift) is an independently-ticking
+            // background Task writing raw ANSI directly to stdout every
+            // 80ms. A tool call with no preceding visible assistant text
+            // (very common — the model often goes straight to a tool call,
+            // especially back-to-back calls in a sub-agent's own loop) never
+            // hits the .assistantTextChunk case above, so the spinner was
+            // never told to stop here — it kept ticking concurrently with
+            // `printToolCall`'s own direct prints below, racing for stdout
+            // and leaving the tool-call box printed mid-line wherever the
+            // spinner's last write happened to leave the cursor. Same fix as
+            // .assistantTextChunk: clear + stop before printing.
+            clearCurrentTerminalLine()
+            stopSpinnerImmediately()
+
+            // Re-inflate string args into the [String: Any] shape StreamRenderer
+            // expects. `printToolCall` renders the whole args string with a
+            // single "│ " box prefix, so a multi-line value (e.g. `task`'s
+            // `description`, an unbounded multi-paragraph spec) would print
+            // raw past the box border for every line after the first — flatten
+            // first, same as SwiftCoderTUIFrontend.
+            let args: [String: Any] = snapshot.arguments.reduce(into: [:]) {
+                $0[$1.key] = Self.previewSafeArgumentValue($1.value)
+            }
             renderer.printToolCall(name: snapshot.name, arguments: args)
 
         case .toolCallResult(let snapshot):
+            // Same race as .toolCallStarted above — the tool's own execution
+            // can re-show a spinner (e.g. web_search/web_fetch's per-tool
+            // spinner in AgentLoop+ToolExecution.swift) that's still ticking
+            // when the result comes back.
+            clearCurrentTerminalLine()
+            stopSpinnerImmediately()
+
             let result = ToolResult(
                 content: snapshot.content,
                 truncationMarker: snapshot.truncationMarker,
@@ -111,8 +143,20 @@ public final class LegacyTerminalFrontend: AgentFrontend, @unchecked Sendable {
             renderer.printToolResult(result)
 
         case .status(let status):
-            // Severity is informational only for the legacy renderer —
-            // it has a single printStatus formatting style.
+            // Internal status noise (e.g. tool-call writer debug progress,
+            // most notably "Generating tool call..." fired once per detected
+            // tool call while a local model streams several in one turn —
+            // exactly what sub-agent profiles like codebase_research do) must
+            // not be printed: it races the active spinner's own raw-terminal
+            // redraw (no shared cursor coordination between them) and
+            // corrupts the layout with cascading indentation. SwiftCoderTUIFrontend
+            // already drops these; mirror that here.
+            if status.severity == .debug { return }
+            // Same spinner/direct-print race as .toolCallStarted — status
+            // lines (including "Turn complete."/"Sub-task complete.", the
+            // most common one) can arrive while the spinner is still ticking.
+            clearCurrentTerminalLine()
+            stopSpinnerImmediately()
             if status.text.hasPrefix("Generated ") {
                 // Keep token stats visually separated from streamed assistant text.
                 print()
@@ -201,6 +245,20 @@ public final class LegacyTerminalFrontend: AgentFrontend, @unchecked Sendable {
         case .promptTokensKnown:
             break
 
+        case .subAgentActivity(let activity):
+            switch activity {
+            case .started(let profile, let modelPath):
+                activeSubAgent = (profile, modelPath)
+            case .ended:
+                activeSubAgent = nil
+            }
+            // Refresh the currently-visible spinner (if any) so the label
+            // suffix updates immediately rather than on the next transition.
+            if let s = spinner {
+                let base = thinkingActive ? "Thinking..." : "Generating..."
+                let suffix = activeSubAgent.map { " [\($0.profile) · \($0.modelPath)]" } ?? ""
+                s.updateMessage(base + suffix)
+            }
         }
     }
 
@@ -244,7 +302,8 @@ public final class LegacyTerminalFrontend: AgentFrontend, @unchecked Sendable {
     private func showSpinner(message: String) {
         pendingSpinnerStopTask?.cancel()
         pendingSpinnerStopTask = nil
-        startOrUpdateSpinner(message: message)
+        let suffix = activeSubAgent.map { " [\($0.profile) · \($0.modelPath)]" } ?? ""
+        startOrUpdateSpinner(message: message + suffix)
     }
 
     private func stopSpinnerDebounced() {
@@ -269,5 +328,18 @@ public final class LegacyTerminalFrontend: AgentFrontend, @unchecked Sendable {
     private func clearCurrentTerminalLine() {
         print("\r\u{001B}[2K\r", terminator: "")
         fflush(stdout)
+    }
+
+    /// Collapses a tool-call argument value to a single, bounded-length line
+    /// for the `printToolCall` preview — see the call site for why embedded
+    /// newlines there break the box border.
+    private static func previewSafeArgumentValue(_ value: String, maxCharacters: Int = 160) -> String {
+        let flattened = value
+            .split(whereSeparator: \.isNewline)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+        guard flattened.count > maxCharacters else { return flattened }
+        return String(flattened.prefix(maxCharacters)).trimmingCharacters(in: .whitespaces) + "…"
     }
 }

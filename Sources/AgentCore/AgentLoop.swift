@@ -107,6 +107,19 @@ public actor AgentLoop {
     public internal(set) var thinkingLevel: ThinkingLevel = .low
     public internal(set) var taskType: TaskType = .general
     public internal(set) var currentMode: ModelMode = .planLow
+
+    /// `nil` for the top-level orchestrator instance; the profile name
+    /// (e.g. "planner", "executor", "filesystem") for a `TaskTool`-constructed
+    /// sub-agent. Drives whether the system prompt exposes only orchestration
+    /// tools (`task`, `todo`, `plan_file`) or the sub-agent's own full registry —
+    /// see `currentToolPromptFilter()` in AgentLoop+SystemPrompt.swift.
+    public let role: String?
+
+    /// Absolute/workspace-relative paths modified by tool calls during the
+    /// current turn (both streamed and parsed paths). Reset at the start of each
+    /// turn. Read by `TaskTool` after a sub-agent run so the parent orchestrator
+    /// can bridge file modifications into its own build-check/git flow.
+    public internal(set) var turnModifiedFiles: Set<String> = []
     
     var interactiveInput: InteractiveInput?
     
@@ -168,8 +181,10 @@ public actor AgentLoop {
         maxToolIterations: Int = 20,
         memoryLimit: Int? = nil,
         cacheLimit: Int? = nil,
-        draftModel: DraftModelHandle? = nil
+        draftModel: DraftModelHandle? = nil,
+        role: String? = nil
     ) {
+        self.role = role
         self.modelContainer = modelContainer
         self.draftModel = draftModel
         self.registry = registry
@@ -318,6 +333,11 @@ public actor AgentLoop {
         var turnTotalElapsed: TimeInterval = 0
         var hasTurnStats = false
         var modifiedFilePaths = Set<String>()
+        // Mirror into the instance-level property on every exit path so a
+        // `TaskTool`-invoking parent (or a caller after this run) can read which
+        // files this turn touched — see `turnModifiedFiles` in AgentLoop.swift.
+        turnModifiedFiles = []
+        defer { turnModifiedFiles = modifiedFilePaths }
         var lastReadFileSignature: String?
         var sameReadFileStreak = 0
         var readLoopSteeredPaths = Set<String>()
@@ -466,7 +486,15 @@ public actor AgentLoop {
                     let bareJSONNote = responseLooksLikeBareJSONToolCall
                         ? " Your last response was a bare JSON object — that is NOT a tool call and will never execute. Discard that shape entirely."
                         : ""
-                    steeringQueue.append(.init(message: "Your previous tool call was malformed and could not be parsed.\(bareJSONNote) Re-emit only the tool call using the exact \(example) format. Use one of the tool names listed in the system prompt. Do not add explanation text, code fences, or any JSON outside the tool-call markers.", origin: .automated))
+                    // The orchestrator only has task/todo/plan_file. A malformed
+                    // attempt at one of those is easy to "fix" the wrong way —
+                    // by falling back to a direct tool it doesn't have — so
+                    // reiterate the constraint here rather than let a generic
+                    // format reminder send it in circles.
+                    let orchestratorNote = role == nil
+                        ? " Remember: you are the orchestrator and only have task/todo/plan_file — do not fall back to calling read_file or any other tool directly; fix and re-emit the task(...) call."
+                        : ""
+                    steeringQueue.append(.init(message: "Your previous tool call was malformed and could not be parsed.\(bareJSONNote)\(orchestratorNote) Re-emit only the tool call using the exact \(example) format. Use one of the tool names listed in the system prompt. Do not add explanation text, code fences, or any JSON outside the tool-call markers.", origin: .automated))
                     iterations += 1
                     continue
                 }
@@ -528,8 +556,16 @@ public actor AgentLoop {
                     ))
                 }
 
-                // Audible + visible completion cue for terminal users.
-                frontend.emitStatus("Turn complete.\u{0007}", severity: .success)
+                // Audible + visible completion cue for terminal users — only
+                // for the top-level orchestrator (role == nil). A sub-agent
+                // finishing is an internal step the orchestrator will react
+                // to next, not something the human is waiting on directly, so
+                // it gets a plain status line with no bell/notification.
+                if role == nil {
+                    frontend.emitStatus("Turn complete.\u{0007}", severity: .success)
+                } else {
+                    frontend.emitStatus("Sub-task complete.", severity: .success)
+                }
                 return
             }
 
@@ -927,7 +963,7 @@ public actor AgentLoop {
         response: String,
         startedThinking: Bool
     ) async -> [ToolCallParser.ParsedToolCall] {
-        let promptFilter = AgentLoop.buildToolPromptFilter(mode: mode, taskType: taskType)
+        let promptFilter = currentToolPromptFilter()
         let schemas = await registry.toolSchemasForProcessor(filter: promptFilter)
 
         let format: ToolCallFormat = switch toolCallDialect {
@@ -1010,6 +1046,28 @@ public actor AgentLoop {
         modifiedFilePaths: inout Set<String>
     ) async -> ToolResult {
         frontend.emit(.toolCallStarted(ToolCallSnapshot(name: call.name, arguments: stringifyArgs(call.arguments))))
+
+        // The top-level orchestrator only ever has task/todo/plan_file — everything
+        // else must be delegated. This is a HARD guard, not just a prompt hint:
+        // smaller/local models don't always respect a trimmed tool list, and since
+        // every tool stays registered (so `task` can hand them to sub-agents), an
+        // unguarded call would otherwise execute successfully despite not being
+        // advertised. Only fires for tools that are actually registered — a truly
+        // hallucinated name still falls through to the normal "Unknown tool" path.
+        if role == nil, !AgentLoop.orchestratorAllowedToolNames.contains(call.name), await registry.tool(named: call.name) != nil {
+            let deniedResult = ToolResult.error("'\(call.name)' is not available to you directly — you are the orchestrator and only have task/todo/plan_file. Delegate this work instead, e.g. task(profile: \"executor\", description: \"...\") to read/write files or run shell commands, task(profile: \"planner\", description: \"...\") to research/plan, or task(profile: \"reviewer\", description: \"...\") to review.")
+            frontend.emit(.toolCallResult(makeDisplaySnapshot(toolName: call.name, result: deniedResult, arguments: call.arguments)))
+
+            let userGoal = history.latestUserMessage ?? ""
+            let toolResponse = try! await makeToolResponseForHistory(
+                toolName: call.name,
+                result: deniedResult,
+                userGoal: userGoal
+            )
+            history.addToolResponse(toolResponse, toolCallId: call.name)
+            return deniedResult
+        }
+
         let readLoopState = LoopDetectionService.evaluateReadFileLoop(
             callName: call.name,
             arguments: call.arguments,
@@ -1032,7 +1090,7 @@ public actor AgentLoop {
         let blockedRepeatedReadOnlySignature = readOnlyLoopState.shouldBlock ? readOnlyLoopState.signature : nil
         
         // Track file modifications for build checking
-        let isFileModificationTool = isFileModificationToolName(call.name)
+        let isFileModificationTool = isFileModificationToolName(call)
         
         var result: ToolResult
 
@@ -1074,14 +1132,19 @@ public actor AgentLoop {
         let isDestructive = resolvedTool != nil && isDestructiveToolCall(call)
         let allowReadOnlyBashInPlanMode = mode == .plan && isReadOnlyBashCall(call)
 
+        // plan_file's 'read' action is non-mutating and falls through to the
+        // same auto-approved path as any other read-only tool below; only
+        // 'write'/'edit' get the special plan-mode-friendly handling.
+        let isMutatingPlanFileCall = call.name == "plan_file" && (call.arguments["action"] as? String) != "read"
+
         let approval: (approved: Bool, suggestion: String?)
         if resolvedTool == nil {
             // Unknown tool — auto-approve so execution reaches the "Unknown tool" error
             // branch without prompting the user over a hallucinated call.
             approval = (true, nil)
-        } else if call.name == "plan_file" && mode == .plan {
+        } else if isMutatingPlanFileCall && mode == .plan {
             approval = (true, nil)
-        } else if call.name == "plan_file" {
+        } else if isMutatingPlanFileCall {
             approval = await askForToolApproval(name: call.name, arguments: call.arguments, isPlanMode: false)
         } else if isDestructive {
             await hooks.emit(.permissionRequest(toolName: call.name, isPlanMode: mode == .plan && !allowReadOnlyBashInPlanMode))
@@ -1251,6 +1314,32 @@ public actor AgentLoop {
                 isError: result.isError,
                 resultPreview: result.content
             )
+        }
+
+        // Bridge files a delegated sub-agent modified (task(profile: executor), …)
+        // into this loop's own tracking, so the post-turn build-check and git
+        // merge-approval flow (which only look at `fileModificationToolsExecuted`
+        // / `modifiedFilePaths`) still fire when the actual edits happened one
+        // level down instead of via a direct write/edit/patch call here.
+        if call.name == "task" && !result.isError && approval.approved {
+            let subAgentModifiedFiles = TaskTool.parseModifiedFiles(fromDigest: result.content)
+            if !subAgentModifiedFiles.isEmpty {
+                fileModificationToolsExecuted = true
+                for filepath in subAgentModifiedFiles {
+                    modifiedFilePaths.insert(filepath)
+                }
+
+                if let manager = gitOrchestrationManager, taskType == .coding {
+                    do {
+                        for filepath in subAgentModifiedFiles {
+                            try await manager.onFirstFileModification(filename: filepath)
+                        }
+                        await manager.trackToolExecution(toolName: call.name, modifiedFiles: subAgentModifiedFiles)
+                    } catch {
+                        // Git operations are non-fatal
+                    }
+                }
+            }
         }
 
         return result

@@ -46,7 +46,22 @@ public enum PromptComposer {
             }
         }
 
-        layers.append((.runtime, runtimeSection))
+        // Folded into the same .runtime layer (rather than appended as a
+        // second, separately-wrapped .runtime block afterward) so a prompt
+        // never contains two `<!-- SECTION:runtime -->` pairs for one
+        // logical section — that duplicated wrapper overhead and broke the
+        // one-section-per-name invariant `PromptSection` implies.
+        var runtimeBody = runtimeSection
+        if let maxTokens {
+            let generationGuardrail = """
+            CRITICAL INSTRUCTION: You have a maximum generation limit of \(maxTokens) tokens per turn.
+            If you need to write or generate a file, you MUST build it incrementally.
+            First, use the `write_file` tool to create the file with the minimal valid structure (scaffold).
+            Then, in subsequent turns, add one section at a time using `append_file` or `edit_file`. This ensures high quality and controlled generation.
+            """
+            runtimeBody += "\n\n" + generationGuardrail
+        }
+        layers.append((.runtime, runtimeBody))
 
         if !skillsMetadata.isEmpty {
             let skillsBody = skillsMetadata
@@ -62,7 +77,14 @@ public enum PromptComposer {
             layers.append((.skills, "Available skills metadata:\n\(skillsBody)\n\n\(skillsFooter)"))
         }
 
-        layers.append((.tools, toolsBlock))
+        // Empty for backends with native tool calling (schemas travel in the
+        // API's own `tools` field instead — see AgentLoop+SystemPrompt.swift).
+        // Only add the layer when there's actually something to show; an
+        // empty `<!-- SECTION:tools -->` / `<!-- /SECTION:tools -->`
+        // pair wastes tokens and clutters the prompt for no reason.
+        if !toolsBlock.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            layers.append((.tools, toolsBlock))
+        }
 
         var sectionEstimates: [PromptSection: Int] = [:]
         var promptParts: [String] = []
@@ -73,27 +95,15 @@ public enum PromptComposer {
             sectionEstimates[section] = estimatedTokens(body)
         }
 
-        if let maxTokens {
-            let generationGuardrail = """
-            CRITICAL INSTRUCTION: You have a maximum generation limit of \(maxTokens) tokens per turn.
-            If you need to write or generate a file, you MUST build it incrementally.
-            First, use the `write_file` tool to create the file with the minimal valid structure (scaffold).
-            Then, in subsequent turns, add one section at a time using `append_file` or `edit_file`. This ensures high quality and controlled generation.
-            """
-            let wrapped = wrap(section: .runtime, body: generationGuardrail)
-            promptParts.append(wrapped)
-            sectionEstimates[.runtime, default: 0] += estimatedTokens(generationGuardrail)
-        }
-
         let prompt = promptParts.joined(separator: "\n\n")
         return PromptComposition(prompt: prompt, sectionTokenEstimates: sectionEstimates)
     }
 
     private static func wrap(section: PromptSection, body: String) -> String {
         """
-        <!-- PROMPT_SECTION:\(section.rawValue) -->
+        <!-- SECTION:\(section.rawValue) -->
         \(body)
-        <!-- END_PROMPT_SECTION:\(section.rawValue) -->
+        <!-- /SECTION:\(section.rawValue) -->
         """
     }
 

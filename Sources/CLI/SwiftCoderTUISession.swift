@@ -960,6 +960,28 @@ public func runSwiftCoderTUISession(
                 }
                 continue
             }
+            if let shortcut = TUITaskShortcutParser.parse(commandInput) {
+                if await renderer.getIsGenerating() {
+                    await renderer.printScrollLine("\(DesignSystem.brightRed)✗ /\(shortcut.profile) unavailable while generation is active. Press Esc first.\(DesignSystem.reset)")
+                    continue
+                }
+                let shortcutUserEntry = SessionEntry(role: .user, content: commandInput)
+                await renderer.printScrollLine(shortcutUserEntry.render())
+                await renderer.printScrollLine("\(DesignSystem.dim)[\(shortcut.profile)] Direct sub-agent dispatch (bypassing orchestrator reasoning).\(DesignSystem.reset)")
+                activeStreamTask = Task { @MainActor in
+                    defer { activeStreamTask = nil }
+                    let result = await agentLoop.dispatchTaskShortcut(profile: shortcut.profile, message: shortcut.message)
+                    if result.isError {
+                        await renderer.printScrollLine("\(DesignSystem.brightRed)[\(shortcut.profile)] Sub-agent failed.\(DesignSystem.reset)")
+                    } else {
+                        await renderer.printScrollLine("\(DesignSystem.dim)[\(shortcut.profile)] Done.\(DesignSystem.reset)")
+                    }
+                    await renderer.flushStreamLine()
+                    await renderer.setPendingCount(0)
+                    await renderer.renderFooter()
+                }
+                continue
+            }
             if commandInputLower.hasPrefix("/model") {
                 let modelArg = String(commandInput.dropFirst("/model".count))
                     .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1483,6 +1505,81 @@ private func handleModelCommand(
         }
         let preview = models.prefix(8).map(\.label).joined(separator: ", ")
         await renderer.printScrollLine("  Unknown model '\(name)'. Some available: \(preview)…")
+
+    case .openRoleMenu:
+        let current = AgentRoleRegistry.current(workspaceRoot: agentLoop.projectWorkspaceRoot)
+        await renderer.openCommandPalette(commands: TUIModelCommandParser.roleMenuItems(current: current))
+        await renderer.renderFooter()
+
+    case .openRoleActionMenu(let role):
+        let current = AgentRoleRegistry.current(workspaceRoot: agentLoop.projectWorkspaceRoot)[role]
+        await renderer.openCommandPalette(commands: TUIModelCommandParser.roleActionMenuItems(role: role, current: current))
+        await renderer.renderFooter()
+
+    case .openRoleLocalMenu(let role):
+        let current = AgentRoleRegistry.current(workspaceRoot: agentLoop.projectWorkspaceRoot)[role]
+        let items = TUIModelCommandParser.roleLocalMenuItems(role: role, models: models, current: current)
+        guard !items.isEmpty else {
+            await renderer.printScrollLine("  No local models in ~/models/.")
+            return
+        }
+        await renderer.openCommandPalette(commands: items)
+        await renderer.renderFooter()
+
+    case .selectRoleLocal(let role, let id):
+        await setRoleModel(role: role, carrier: id, agentLoop: agentLoop, renderer: renderer)
+
+    case .openRoleRemoteProvidersMenu(let role):
+        let items = TUIModelCommandParser.remoteProvidersMenuItems().map { item in
+            (name: item.name.replacingOccurrences(of: "/model remote", with: "/model role \(role) remote"), desc: item.desc)
+        }
+        guard !items.isEmpty else {
+            await renderer.printScrollLine("  No remote providers configured. Add them to ~/.mlx-coder/config.json.")
+            return
+        }
+        await renderer.openCommandPalette(commands: items)
+        await renderer.renderFooter()
+
+    case .openRoleRemoteModelsMenu(let role, let provider):
+        let current = AgentRoleRegistry.current(workspaceRoot: agentLoop.projectWorkspaceRoot)[role]
+        let providerName = RemoteProviderRegistry.provider(id: provider)?.name ?? provider
+        let items = TUIModelCommandParser.roleRemoteModelsMenuItems(role: role, provider: provider, current: current)
+        guard !items.isEmpty else {
+            await renderer.printScrollLine("  No cached models for \(providerName). Run /model remote \(provider) refresh first.")
+            return
+        }
+        await renderer.openCommandPalette(commands: items)
+        await renderer.renderFooter()
+
+    case .selectRoleRemote(let role, let provider, let modelID):
+        let carrier = InferenceBackend.remote(providerID: provider, modelID: modelID).modelPath
+        await setRoleModel(role: role, carrier: carrier, agentLoop: agentLoop, renderer: renderer)
+
+    case .clearRole(let role):
+        do {
+            try AgentRoleRegistry.clear(role: role)
+            await agentLoop.registerToolsInternal()
+            await renderer.printScrollLine("  ✓ Cleared \(role) — now uses the orchestrator's own model.")
+        } catch {
+            await renderer.printScrollLine("\(DesignSystem.brightRed)  Failed to update config: \(error.localizedDescription)\(DesignSystem.reset)")
+        }
+
+    case .invalidRole(let name):
+        let roles = AgentRolesConfig.roleNames.joined(separator: ", ")
+        await renderer.printScrollLine("  Unknown role '\(name)'. Available roles: \(roles).")
+    }
+}
+
+/// Persists a role→model assignment and immediately refreshes the live
+/// session's TaskTool so `task(profile: <role>)` picks it up without a restart.
+@MainActor
+private func setRoleModel(role: String, carrier: String, agentLoop: AgentLoop, renderer: Renderer) async {
+    do {
+        try AgentRoleRegistry.set(role: role, model: carrier)
+        await agentLoop.registerToolsInternal()
+        await renderer.printScrollLine("  ✓ \(role.capitalized) now uses \(carrier).")
+    } catch {
+        await renderer.printScrollLine("\(DesignSystem.brightRed)  Failed to update config: \(error.localizedDescription)\(DesignSystem.reset)")
     }
 }
 

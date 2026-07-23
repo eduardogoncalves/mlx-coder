@@ -221,7 +221,9 @@ struct ChatCommand: AsyncParsableCommand {
             workspaceRoot: absWorkspace,
             memorySection: memorySection,
             skillsMetadata: skillMetadata,
-            dialect: ToolCallDialect.detect(modelPath: selectedModel)
+            dialect: ToolCallDialect.detect(modelPath: selectedModel),
+            usesNativeToolCalling: InferenceBackend(modelPath: selectedModel).isOnline,
+            toolPromptFilterOverride: AgentLoop.orchestratorToolPromptFilter(mode: .plan)
         )
 
         let agentLoop = AgentLoop(
@@ -246,6 +248,13 @@ struct ChatCommand: AsyncParsableCommand {
             cacheLimit: budget.cacheBytes,
             draftModel: draftModel
         )
+
+        // Re-register model-container-dependent tools now that a live AgentLoop
+        // exists, so TaskTool gets a `parentAgentLoop` reference (needed to swap
+        // local role models in/out — see AgentLoop+ModelLifecycle.swift). Cheap:
+        // ToolRegistry.register replaces by name, so this just upgrades the
+        // bootstrap TaskTool registered by registerAllTools() above.
+        await agentLoop.registerToolsInternal()
 
         // The AgentLoop actor now holds the container. Release this frame's copy
         // so that a later /model switch (which unloads AgentLoop's reference and
@@ -311,6 +320,10 @@ struct ChatCommand: AsyncParsableCommand {
         if args.ui.lowercased() == "debug" {
             let debugFrontend = DebugEventFrontend()
             await agentLoop.swapFrontend(debugFrontend)
+            // TaskTool/ProjectExpertLoRATool captured the pre-swap (legacy)
+            // frontend as a constant at registration time — re-register them
+            // now so sub-agents emit through the new frontend too.
+            await agentLoop.registerToolsInternal()
             print("[debug] Type your message and press Enter. Type 'exit' to quit.")
             while true {
                 print("[debug] > ", terminator: "")
@@ -370,6 +383,13 @@ struct ChatCommand: AsyncParsableCommand {
             let tuiRenderer = Renderer(config: tuiAppConfig, terminal: ProcessTerminal())
             let tuiFrontend = SwiftCoderTUIFrontend(renderer: tuiRenderer, appConfig: tuiAppConfig)
             await agentLoop.swapFrontend(tuiFrontend)
+            // TaskTool/ProjectExpertLoRATool captured the pre-swap (legacy)
+            // frontend as a constant when registerAllTools() ran earlier —
+            // without this, a `task` sub-agent still emits status/tool-call
+            // events through the old raw-terminal LegacyTerminalFrontend,
+            // which prints directly to stdout and corrupts the TUI's
+            // persistent footer/input box instead of scrolling above it.
+            await agentLoop.registerToolsInternal()
             await CancelController.shared.setPrintHandler { _ in } // TUI owns the terminal
             await runSwiftCoderTUISession(
                 agentLoop: agentLoop,

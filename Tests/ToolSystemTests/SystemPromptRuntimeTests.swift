@@ -23,7 +23,7 @@ final class SystemPromptRuntimeTests: XCTestCase {
         let composition = await AgentLoop.buildSystemPromptComposition(registry: registry)
 
         let cwd = FileManager.default.currentDirectoryPath
-        XCTAssertTrue(composition.prompt.contains("PROMPT_SECTION:runtime"))
+        XCTAssertTrue(composition.prompt.contains("SECTION:runtime"))
         XCTAssertTrue(composition.prompt.contains("WORKSPACE ROOT: \(cwd)"))
     }
 

@@ -68,7 +68,12 @@ public enum ToolInjectionSelection {
         case "planning":
             ephemeralGroups = [planningTools]
         case "orchestration":
-            ephemeralGroups = [agentTools]
+            // The manager/orchestrator's prompt only ever advertises
+            // orchestration tools — see AgentLoop.orchestratorToolPromptFilter,
+            // which already passes an explicit selectedToolNames list and never
+            // reaches this branch. Kept for completeness if callers pass
+            // taskTypeHint == "orchestration" without an explicit selection.
+            return agentTools + planningTools + ["todo"]
         case "general":
             ephemeralGroups = []
         default:

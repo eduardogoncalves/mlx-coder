@@ -60,6 +60,10 @@ public final class SwiftCoderTUIFrontend: AgentFrontend, @unchecked Sendable {
     private var spinnerBaseLabel: String = "Processing…"
     // Stats text captured from the backend; appended to the Turn complete line.
     private var pendingTurnStats: String? = nil
+    // Set while a TaskTool-delegated sub-agent (internal agent) is generating,
+    // so the spinner label can show which agent/model is currently active.
+    // At most one is ever active at a time (sub-agents cannot nest further).
+    private var activeSubAgent: (profile: String, modelPath: String)? = nil
 
     public init(renderer: Renderer, appConfig: AppConfig) {
         self.renderer = renderer
@@ -216,11 +220,25 @@ public final class SwiftCoderTUIFrontend: AgentFrontend, @unchecked Sendable {
         n >= 1000 ? String(format: "%.1fk", Double(n) / 1000) : "\(n)"
     }
 
+    /// Collapses a tool-call argument value to a single, bounded-length line
+    /// for the `toolCallStarted` preview — see the call site for why embedded
+    /// newlines there corrupt the whole layout below it.
+    private static func previewSafeArgumentValue(_ value: String, maxCharacters: Int = 160) -> String {
+        let flattened = value
+            .split(whereSeparator: \.isNewline)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+        guard flattened.count > maxCharacters else { return flattened }
+        return String(flattened.prefix(maxCharacters)).trimmingCharacters(in: .whitespaces) + "…"
+    }
+
     private func spinnerLabel() -> String {
         let up   = promptTokenCount > 0 ? " ↑ \(Self.kilo(promptTokenCount))" : ""
         let down = liveTokens > 0      ? " ↓ \(liveTokens)" : ""
         let sep  = !up.isEmpty && !down.isEmpty ? " ·" : ""
-        return "\(spinnerBaseLabel)\(up)\(sep)\(down)"
+        let agent = activeSubAgent.map { " [\($0.profile) · \($0.modelPath)]" } ?? ""
+        return "\(spinnerBaseLabel)\(up)\(sep)\(down)\(agent)"
     }
 
     private func render(_ event: AgentEvent) async {
@@ -289,11 +307,17 @@ public final class SwiftCoderTUIFrontend: AgentFrontend, @unchecked Sendable {
 
         case .toolCallStarted(let snap):
             // SessionEntry(.toolCall) splits content on the FIRST SPACE to get
-            // (toolName, argsLine). Use a single-space separator with args
-            // formatted inline so the split produces the correct pair.
+            // (toolName, argsLine), then renders that single argsLine with one
+            // "│ " box-continuation prefix — it does NOT re-prefix embedded
+            // newlines. A multi-line argument value (e.g. `task`'s
+            // `description`, which can be an unbounded, multi-paragraph spec)
+            // would otherwise print raw past the box's left border for every
+            // line after the first, breaking the box visually and throwing
+            // off the renderer's line/cursor accounting for everything drawn
+            // afterward. Flatten and cap each value before building the preview.
             let args = snap.arguments
                 .sorted(by: { $0.key < $1.key })
-                .map { "\($0.key): \($0.value)" }
+                .map { "\($0.key): \(Self.previewSafeArgumentValue($0.value))" }
                 .joined(separator: ", ")
             let content = args.isEmpty ? snap.name : "\(snap.name) \(args)"
             let entry = SessionEntry(role: .toolCall, content: content)
@@ -331,8 +355,13 @@ public final class SwiftCoderTUIFrontend: AgentFrontend, @unchecked Sendable {
                 }
                 return
             }
-            // Append pending stats to the Turn complete success line.
-            if s.severity == .success && s.text.hasPrefix("Turn complete.") {
+            // Append pending stats to the Turn complete / Sub-task complete
+            // success line. Sub-agents emit their own "↑ ..." stats line
+            // (line 332 above) followed by "Sub-task complete." instead of
+            // "Turn complete." — both must be matched here, or a sub-agent's
+            // pendingTurnStats would never get consumed and could leak onto
+            // the orchestrator's next actual "Turn complete." line.
+            if s.severity == .success && (s.text.hasPrefix("Turn complete.") || s.text.hasPrefix("Sub-task complete.")) {
                 if tokenProcessingActive || generationActive || thinkingActive || pendingGenerationEnd {
                     await finalizeGenerationUI()
                 }
@@ -445,7 +474,7 @@ public final class SwiftCoderTUIFrontend: AgentFrontend, @unchecked Sendable {
                 promptTokenCount = 0
                 spinnerBaseLabel = "Processing…"
                 pendingTurnStats = nil
-                await renderer.setThinking("Processing…")
+                await renderer.setThinking(spinnerLabel())
                 await renderer.setGenerating(true)
                 await renderer.renderFooter()
                 startSpinnerTicker()
@@ -479,6 +508,18 @@ public final class SwiftCoderTUIFrontend: AgentFrontend, @unchecked Sendable {
                 } else {
                     await finalizeGenerationUI()
                 }
+            }
+
+        case .subAgentActivity(let activity):
+            switch activity {
+            case .started(let profile, let modelPath):
+                activeSubAgent = (profile, modelPath)
+            case .ended:
+                activeSubAgent = nil
+            }
+            if tokenProcessingActive || generationActive || thinkingActive {
+                await renderer.setThinking(spinnerLabel())
+                await renderer.renderFooter()
             }
         }
     }

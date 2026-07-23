@@ -104,6 +104,12 @@ public final class DebugEventFrontend: AgentFrontend, @unchecked Sendable {
         case .stats(let s):
             log("[\(ts)] stats: \(s.generationTokens) tokens @ \(String(format: "%.1f", s.tokensPerSecond)) tok/s")
 
+        case .subAgentActivity(let activity):
+            switch activity {
+            case .started(let profile, let modelPath): log("[\(ts)] subAgentActivity.started profile=\(profile) model=\(modelPath)")
+            case .ended: log("[\(ts)] subAgentActivity.ended")
+            }
+
         default:
             log("[\(ts)] event: \(event)")
         }

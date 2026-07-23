@@ -131,4 +131,64 @@ extension AgentLoop {
         defer { history = savedHistory }
         try await processUserMessage(message)
     }
+
+    /// Directly dispatches a sub-agent via a `/planner <message>`-style
+    /// shortcut, bypassing the orchestrator's own reasoning entirely — for
+    /// when the user already knows exactly which internal agent they want,
+    /// without spending a generation on the orchestrator deciding to delegate.
+    ///
+    /// Mirrors what a normal orchestrator-issued `task(...)` call gets in
+    /// `executeToolCall` (modified-files → build-check/git bridging), since
+    /// this skips that code path entirely by calling the tool directly.
+    @discardableResult
+    public func dispatchTaskShortcut(profile: String, message: String) async -> ToolResult {
+        guard let tool = await registry.tool(named: "task") else {
+            return .error("The 'task' tool is not registered in this session.")
+        }
+
+        let arguments: [String: Any] = ["profile": profile, "description": message]
+        frontend.emit(.toolCallStarted(ToolCallSnapshot(name: "task", arguments: stringifyArgs(arguments))))
+
+        let result: ToolResult
+        do {
+            result = try await tool.execute(arguments: arguments)
+        } catch {
+            result = .error("Sub-agent dispatch failed: \(error.localizedDescription)")
+        }
+        frontend.emit(.toolCallResult(ToolResultSnapshot(
+            toolName: "task",
+            isError: result.isError,
+            content: result.content,
+            truncationMarker: result.truncationMarker
+        )))
+
+        history.addUser("/\(profile) \(message)")
+        history.addAssistant(result.content)
+
+        guard !result.isError else { return result }
+
+        let modifiedFiles = TaskTool.parseModifiedFiles(fromDigest: result.content)
+        guard !modifiedFiles.isEmpty else { return result }
+
+        for filepath in modifiedFiles {
+            turnModifiedFiles.insert(filepath)
+        }
+
+        if mode == .agent && taskType == .coding {
+            await performBuildCheckIfNeeded(modifiedPaths: Set(modifiedFiles))
+            if let manager = gitOrchestrationManager {
+                do {
+                    for filepath in modifiedFiles {
+                        try await manager.onFirstFileModification(filename: filepath)
+                    }
+                    await manager.trackToolExecution(toolName: "task", modifiedFiles: modifiedFiles)
+                    try await presentMergeApprovalFlow(manager: manager)
+                } catch {
+                    frontend.emitStatus("⚠️  Git completion flow failed: \(error.localizedDescription)")
+                }
+            }
+        }
+
+        return result
+    }
 }

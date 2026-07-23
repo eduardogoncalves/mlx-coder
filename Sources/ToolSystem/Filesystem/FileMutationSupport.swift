@@ -81,6 +81,30 @@ enum FileMutationSupport {
         }
     }
 
+    /// Reads a file's full contents back. Returns a clear "not found" result
+    /// (not an error a caller needs to special-case) rather than throwing,
+    /// since "the plan doesn't exist yet" is an expected, common outcome for
+    /// callers checking whether a plan has been written before delegating.
+    static func readContent(from path: String, permissions: PermissionEngine) -> ToolResult {
+        let resolvedPath: String
+        do {
+            resolvedPath = try permissions.validateReadPath(path)
+        } catch {
+            return .error(error.localizedDescription)
+        }
+
+        guard FileManager.default.fileExists(atPath: resolvedPath) else {
+            return .error("File not found: \(path)")
+        }
+
+        do {
+            let content = try String(contentsOfFile: resolvedPath, encoding: .utf8)
+            return .success(content)
+        } catch {
+            return .error("Failed to read file: \(error.localizedDescription)")
+        }
+    }
+
     static func generateUnifiedDiff(original: String, updated: String, path: String) -> String {
         let origLines = original.components(separatedBy: "\n")
         let newLines = updated.components(separatedBy: "\n")

@@ -25,16 +25,74 @@ extension AgentLoop {
             memorySection: memoryPromptSection,
             customizationSection: customizationPromptSection,
             skillsMetadata: skillsMetadata,
-            dialect: toolCallDialect
+            dialect: toolCallDialect,
+            usesNativeToolCalling: backend.isOnline,
+            toolPromptFilterOverride: currentToolPromptFilter()
         )
         promptSectionTokenEstimates = composition.sectionTokenEstimates
         history.updateSystemPrompt(composition.prompt)
         // The system prompt sits at the very front of every turn's token stream, so
         // replacing it invalidates the shared prefix the persisted KV cache relies on.
         promptCache.invalidate(reason: "system prompt changed")
-        
+
         let status = enabled ? "\u{001B}[32mEnabled\u{001B}[0m" : "\u{001B}[31mDisabled\u{001B}[0m"
         frontend.emitStatus("macOS Seatbelt Sandbox: \(status)")
+    }
+
+    /// Configures a freshly-constructed `TaskTool` sub-agent for delegated
+    /// execution.
+    ///
+    /// Without this, a sub-agent starts in `.plan` mode (the property's
+    /// default — `AgentLoop.init` has no `mode` parameter), so its very first
+    /// destructive tool call (`write_file`, `bash`, ...) hits the same
+    /// "blocked in PLAN mode — switch to AGENT mode?" interactive prompt a
+    /// human user would see, and blocks waiting on that prompt — that framing
+    /// ("switch to AGENT mode") makes no sense for a sub-agent, which is
+    /// always agent-mode. But the actual *approval requirement* for a
+    /// mutating tool call is not waived: a sub-agent inherits the parent
+    /// orchestrator's own live approval posture (autopilot state,
+    /// already-approved commands this session) via `parentAutoApproveAllTools`
+    /// / `parentSessionApprovedToolCommands` — the same gate the
+    /// orchestrator's own calls would hit, just without the PLAN-mode prompt
+    /// wording. `permissions.approvalMode` (yolo/auto-edit/default) is
+    /// already inherited automatically since sub-agents share the parent's
+    /// `PermissionEngine` unless explicitly isolated.
+    public func configureForSubAgentExecution(
+        taskType: TaskType = .coding,
+        parentAutoApproveAllTools: Bool = false,
+        parentSessionApprovedToolCommands: Set<String> = []
+    ) async {
+        await setMode(.agent, taskType: taskType, silent: true)
+        autoApproveAllTools = parentAutoApproveAllTools
+        sessionApprovedToolCommands = parentSessionApprovedToolCommands
+
+        // `taskType: .coding` also makes `processUserMessage` try to run its
+        // OWN git worktree/branch setup on first use (see
+        // `initializeGitOrchestration`) — every AgentLoop, including
+        // sub-agents, has a non-nil `interactiveInput`, so that path shows
+        // the same blocking "Coding mode git setup" picker a human session
+        // gets. A sub-agent must never do this: it operates inside whatever
+        // workspace TaskTool already gave it (the parent's own worktree,
+        // unless explicitly isolated) — it doesn't own git lifecycle.
+        skipGitOrchestrationInitialization = true
+
+        // `setMode` calls `updatePendingReloadIfNeeded()`, which unconditionally
+        // flags a reload because a freshly-constructed instance's `loaded*`
+        // tracking fields are still nil — even though TaskTool just handed us
+        // an already-correctly-loaded (or intentionally nil, for online
+        // backends) container. Without this, every sub-agent turn wastefully
+        // reloads the model it was just given as its very first action, and
+        // (for local models) the wasted reload/unload race with the same-turn
+        // token stream is a plausible contributor to the UI corruption seen
+        // around sub-agent dispatch.
+        loadedModelPath = modelPath
+        loadedMemoryLimit = memoryLimit
+        loadedCacheLimit = cacheLimit
+        loadedKVBits = currentGenerationConfig.kvBits
+        loadedKVGroupSize = currentGenerationConfig.kvGroupSize
+        loadedQuantizedKVStart = currentGenerationConfig.quantizedKVStart
+        loadedTurboQuantBits = currentGenerationConfig.turboQuantBits
+        pendingReload = false
     }
 
     /// Sets the working mode (agent/plan) and refreshes the system prompt.
@@ -63,14 +121,16 @@ extension AgentLoop {
             memorySection: memoryPromptSection,
             customizationSection: customizationPromptSection,
             skillsMetadata: skillsMetadata,
-            dialect: toolCallDialect
+            dialect: toolCallDialect,
+            usesNativeToolCalling: backend.isOnline,
+            toolPromptFilterOverride: currentToolPromptFilter()
         )
         promptSectionTokenEstimates = composition.sectionTokenEstimates
         history.updateSystemPrompt(composition.prompt)
         // The system prompt sits at the very front of every turn's token stream, so
         // replacing it invalidates the shared prefix the persisted KV cache relies on.
         promptCache.invalidate(reason: "system prompt changed")
-        
+
         if !silent {
             frontend.emit(.modeChanged(ModeSnapshot(
                 workingMode: mode.rawValue,
@@ -98,14 +158,16 @@ extension AgentLoop {
             memorySection: memoryPromptSection,
             customizationSection: customizationPromptSection,
             skillsMetadata: skillsMetadata,
-            dialect: toolCallDialect
+            dialect: toolCallDialect,
+            usesNativeToolCalling: backend.isOnline,
+            toolPromptFilterOverride: currentToolPromptFilter()
         )
         promptSectionTokenEstimates = composition.sectionTokenEstimates
         history.updateSystemPrompt(composition.prompt)
         // The system prompt sits at the very front of every turn's token stream, so
         // replacing it invalidates the shared prefix the persisted KV cache relies on.
         promptCache.invalidate(reason: "system prompt changed")
-        
+
         frontend.emit(.modeChanged(ModeSnapshot(
             workingMode: mode.rawValue,
             thinkingLevel: level.rawValue,
@@ -166,20 +228,22 @@ extension AgentLoop {
             memorySection: memoryPromptSection,
             customizationSection: customizationPromptSection,
             skillsMetadata: skillsMetadata,
-            dialect: toolCallDialect
+            dialect: toolCallDialect,
+            usesNativeToolCalling: backend.isOnline,
+            toolPromptFilterOverride: currentToolPromptFilter()
         )
         promptSectionTokenEstimates = composition.sectionTokenEstimates
         history.updateSystemPrompt(composition.prompt)
         // The system prompt sits at the very front of every turn's token stream, so
         // replacing it invalidates the shared prefix the persisted KV cache relies on.
         promptCache.invalidate(reason: "system prompt changed")
-        
+
         frontend.emit(.modeChanged(ModeSnapshot(
             workingMode: mode.rawValue,
             thinkingLevel: thinkingLevel.rawValue,
             taskType: taskType.rawValue
         )))
-        
+
         return currentMode.rawValue
     }
 

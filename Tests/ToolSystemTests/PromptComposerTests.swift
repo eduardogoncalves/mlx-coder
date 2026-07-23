@@ -15,16 +15,78 @@ final class PromptComposerTests: XCTestCase {
             maxTokens: 2048
         )
 
-        XCTAssertTrue(composition.prompt.contains("PROMPT_SECTION:core"))
-        XCTAssertTrue(composition.prompt.contains("PROMPT_SECTION:memory"))
-        XCTAssertTrue(composition.prompt.contains("PROMPT_SECTION:customization"))
-        XCTAssertTrue(composition.prompt.contains("PROMPT_SECTION:runtime"))
-        XCTAssertTrue(composition.prompt.contains("PROMPT_SECTION:skills"))
-        XCTAssertTrue(composition.prompt.contains("PROMPT_SECTION:tools"))
+        XCTAssertTrue(composition.prompt.contains("SECTION:core"))
+        XCTAssertTrue(composition.prompt.contains("SECTION:memory"))
+        XCTAssertTrue(composition.prompt.contains("SECTION:customization"))
+        XCTAssertTrue(composition.prompt.contains("SECTION:runtime"))
+        XCTAssertTrue(composition.prompt.contains("SECTION:skills"))
+        XCTAssertTrue(composition.prompt.contains("SECTION:tools"))
 
         XCTAssertGreaterThan(composition.sectionTokenEstimates[.core, default: 0], 0)
         XCTAssertGreaterThan(composition.sectionTokenEstimates[.runtime, default: 0], 0)
         XCTAssertGreaterThan(composition.sectionTokenEstimates[.tools, default: 0], 0)
         XCTAssertGreaterThan(composition.sectionTokenEstimates[.skills, default: 0], 0)
+    }
+
+    /// Regression test: native-tool-calling backends pass an empty
+    /// `toolsBlock` (schemas travel in the API's own `tools` field instead —
+    /// see AgentLoop+SystemPrompt.swift). Before this fix, `compose` always
+    /// appended the `.tools` layer regardless, producing a useless
+    /// `<!-- SECTION:tools -->\n\n<!-- /SECTION:tools -->`
+    /// pair in every native-tool-calling prompt (i.e. every remote-model
+    /// sub-agent). Empty/whitespace-only optional sections must be omitted
+    /// entirely, the same way memory/customization already are.
+    func testComposeOmitsEmptyToolsSection() {
+        let composition = PromptComposer.compose(
+            coreInstructions: "core",
+            memorySection: nil,
+            customizationSection: nil,
+            runtimeSection: "runtime",
+            skillsMetadata: [],
+            toolsBlock: "",
+            maxTokens: nil
+        )
+
+        XCTAssertFalse(composition.prompt.contains("SECTION:tools"))
+        XCTAssertFalse(composition.prompt.contains("SECTION:memory"))
+        XCTAssertFalse(composition.prompt.contains("SECTION:customization"))
+        XCTAssertFalse(composition.prompt.contains("SECTION:skills"))
+        XCTAssertTrue(composition.prompt.contains("SECTION:core"))
+        XCTAssertTrue(composition.prompt.contains("SECTION:runtime"))
+    }
+
+    func testComposeOmitsWhitespaceOnlyToolsSection() {
+        let composition = PromptComposer.compose(
+            coreInstructions: "core",
+            memorySection: nil,
+            customizationSection: nil,
+            runtimeSection: "runtime",
+            skillsMetadata: [],
+            toolsBlock: "   \n  ",
+            maxTokens: nil
+        )
+
+        XCTAssertFalse(composition.prompt.contains("SECTION:tools"))
+    }
+
+    /// Regression test: `maxTokens` used to be appended as its own separate
+    /// `.runtime`-tagged layer *after* the real runtime section, producing
+    /// two `SECTION:runtime` marker pairs in one prompt. It must
+    /// merge into the same layer as the runtime section instead.
+    func testComposeMergesMaxTokensGuardrailIntoSingleRuntimeSection() {
+        let composition = PromptComposer.compose(
+            coreInstructions: "core",
+            memorySection: nil,
+            customizationSection: nil,
+            runtimeSection: "runtime",
+            skillsMetadata: [],
+            toolsBlock: "",
+            maxTokens: 2048
+        )
+
+        let runtimeOpenMarkerCount = composition.prompt.components(separatedBy: "<!-- SECTION:runtime -->").count - 1
+        XCTAssertEqual(runtimeOpenMarkerCount, 1, "maxTokens guardrail must merge into the single runtime layer, not append a second one")
+        XCTAssertTrue(composition.prompt.contains("runtime"))
+        XCTAssertTrue(composition.prompt.contains("2048"))
     }
 }

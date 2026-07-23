@@ -80,6 +80,21 @@ public enum AgentEvent: Sendable {
     /// tokenisation, before the first generated token). Used to display
     /// the ↑ count in the processing spinner.
     case promptTokensKnown(Int)
+
+    /// A `TaskTool`-delegated sub-agent (internal agent) started or finished
+    /// running. Lets the spinner/status UI show which agent/profile and model
+    /// are currently generating, since sub-agents share the parent's frontend
+    /// and can use a different model than the orchestrator's own.
+    case subAgentActivity(SubAgentActivity)
+}
+
+/// Lifecycle of a `TaskTool`-delegated sub-agent run, carrying enough context
+/// (profile + model) for a frontend to label its spinner/status UI while the
+/// sub-agent is generating. Sub-agents cannot themselves spawn further
+/// sub-agents (max depth 1), so at most one is ever active at a time.
+public enum SubAgentActivity: Sendable, Equatable {
+    case started(profile: String, modelPath: String)
+    case ended
 }
 
 // MARK: - Snapshots

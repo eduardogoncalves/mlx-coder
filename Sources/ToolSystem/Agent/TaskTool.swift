@@ -12,6 +12,7 @@ public struct TaskTool: Tool {
     static let maxDelegatedTools = 32
     static let maxDigestSummaryCharacters = 700
     static let maxDigestSummaryLines = 8
+    static let maxStatusLineCharacters = 160
 
     enum ToolListValidationError: Error, Equatable {
         case message(String)
@@ -56,6 +57,11 @@ public struct TaskTool: Tool {
         case testEngineering = "test_engineering"
         case securityReview = "security_review"
         case docs
+        case planner
+        case executor
+        case reviewer
+        case filesystem
+        case terminal
     }
 
     static var supportedProfileNames: [String] {
@@ -67,18 +73,87 @@ public struct TaskTool: Tool {
             return nil
         }
 
-        let common = "You are a specialized sub-agent. Your task is to complete the objective using your available tools. Process the task fully and output your final result as a concise summary. Do not ask the user for permission to proceed."
+        // One identity statement per profile (not a generic "specialized
+        // sub-agent" preamble followed by a second, role-specific one) — a
+        // single, upfront role label is a stronger steering signal for small
+        // models than an implicit "focus on X" clause tacked onto a generic
+        // opener, and every profile paying for two identity sentences back
+        // to back on every `task()` call added up across a whole run.
+        let outputRules = "Process the task fully and output a concise final summary. Do not ask the user for permission to proceed."
         switch profile {
         case .general:
-            return common
+            return "You are a general-purpose sub-agent. \(outputRules)"
         case .codebaseResearch:
-            return common + " Focus on finding relevant files, symbols, and code-path evidence. Prefer precise file/symbol references over broad summaries."
+            return "You are the CODEBASE_RESEARCH agent. Focus on finding relevant files, symbols, and code-path evidence — prefer precise file/symbol references over broad summaries. \(outputRules)"
         case .testEngineering:
-            return common + " Focus on deterministic validation: run and interpret targeted tests, identify regressions, and propose minimal-risk fixes."
+            return "You are the TEST_ENGINEERING agent. Focus on deterministic validation: run and interpret targeted tests, identify regressions, and propose minimal-risk fixes. \(outputRules)"
         case .securityReview:
-            return common + " Focus on security risks first: input validation, command/path injection, data leakage, authz boundaries, and unsafe defaults."
+            return "You are the SECURITY_REVIEW agent. Focus on security risks first: input validation, command/path injection, data leakage, authz boundaries, unsafe defaults. \(outputRules)"
         case .docs:
-            return common + " Focus on clear user-facing documentation and migration notes aligned with actual behavior."
+            return "You are the DOCS agent. Focus on clear user-facing documentation and migration notes aligned with actual behavior. \(outputRules)"
+        case .planner:
+            return "You are the PLANNER. Decompose the request, research the codebase (never edit or run destructive commands), and produce a concrete, actionable implementation plan via plan_file, citing specific file/symbol references. Do not implement the change yourself. \(outputRules)"
+        case .executor:
+            return "You are the EXECUTOR. Implement the requested change: read what you need, then write/edit/patch files and run shell commands as required, verifying your own work (build/tests) when tools allow it. \(outputRules)"
+        case .reviewer:
+            return "You are the REVIEWER. Inspect the current state of the code (never edit files); check correctness and project-convention compliance, and run build_check if available. Only report a finding if you're \u{2265}80% confident it's real after double-checking — skip stylistic nitpicks. Format each finding as `file:line — issue — suggested fix`, or state explicitly that the change looks correct if you find nothing. \(outputRules)"
+        case .filesystem:
+            return "You are the FILESYSTEM AGENT. Perform only the requested file reads/writes/edits precisely as described — do not run shell commands. \(outputRules)"
+        case .terminal:
+            return "You are the TERMINAL AGENT. Run only the requested shell command(s) and report their output — do not edit files. \(outputRules)"
+        }
+    }
+
+    /// Default tool preset for a profile, used when the caller omits `tools`
+    /// (or passes an empty list). An explicit `tools` argument always overrides
+    /// this preset.
+    static func defaultTools(for profileName: String) -> [String] {
+        guard let profile = SpecialistProfile(rawValue: profileName) else {
+            return []
+        }
+        switch profile {
+        case .general:
+            return ["read_file", "read_many", "list_dir", "glob", "grep", "code_search", "write_file", "edit_file", "bash", "todo"]
+        case .codebaseResearch:
+            return ["read_file", "read_many", "list_dir", "glob", "grep", "code_search", "search_knowledge"]
+        case .testEngineering:
+            return ["read_file", "read_many", "list_dir", "glob", "grep", "bash", "build_check"]
+        case .securityReview:
+            return ["read_file", "read_many", "list_dir", "glob", "grep", "code_search"]
+        case .docs:
+            return ["read_file", "read_many", "list_dir", "glob", "grep", "write_file", "edit_file"]
+        case .planner:
+            return ["read_file", "read_many", "list_dir", "glob", "grep", "code_search", "web_search", "web_fetch", "search_knowledge", "plan_file"]
+        case .executor:
+            return ["read_file", "read_many", "list_dir", "glob", "grep", "write_file", "edit_file", "append_file", "patch", "bash", "code_search", "lsp_diagnostics"]
+        case .reviewer:
+            return ["read_file", "read_many", "list_dir", "glob", "grep", "code_search", "lsp_diagnostics", "lsp_references", "build_check"]
+        case .filesystem:
+            return ["read_file", "read_many", "write_file", "edit_file", "append_file", "patch", "list_dir", "glob", "grep"]
+        case .terminal:
+            return ["bash", "build_check"]
+        }
+    }
+
+    /// Maps any profile to the role (`planner`/`executor`/`reviewer`) whose
+    /// configured model it should inherit when it has no override of its own.
+    /// `AgentRoleRegistry` only lets users configure those three roles — this
+    /// spreads that configuration across every specialist profile by nature
+    /// (research-flavored profiles inherit `planner`'s model, mutation-capable
+    /// ones inherit `executor`'s, read-only verification ones inherit
+    /// `reviewer`'s), so choosing e.g. `codebase_research` over `planner`
+    /// still uses the model the user actually configured for research work.
+    static func roleModelKey(forProfile profileName: String) -> String {
+        guard let profile = SpecialistProfile(rawValue: profileName) else {
+            return profileName
+        }
+        switch profile {
+        case .planner, .codebaseResearch:
+            return "planner"
+        case .executor, .general, .filesystem, .terminal, .testEngineering, .docs:
+            return "executor"
+        case .reviewer, .securityReview:
+            return "reviewer"
         }
     }
 
@@ -89,6 +164,30 @@ public struct TaskTool: Tool {
             .lowercased()
             .replacingOccurrences(of: "-", with: "_")
         return normalized.isEmpty ? SpecialistProfile.general.rawValue : normalized
+    }
+
+    /// Tools that write to the filesystem or run arbitrary commands — used to
+    /// decide whether a `task(...)` call needs the same approval a direct
+    /// mutating tool call would need. Deliberately excludes `plan_file`:
+    /// writing PLAN.MD (directly, or via a delegated `planner`) is already
+    /// treated as a safe, expected planning action, not a destructive one —
+    /// see the `plan_file` special-casing in `AgentLoop.isDestructiveToolCall`.
+    static let mutatingToolNames: Set<String> = ["write_file", "edit_file", "append_file", "patch", "bash"]
+
+    /// Whether a `task(...)` call, given its arguments, could perform a
+    /// mutating action. The orchestrator must be free to delegate research
+    /// (`planner`, `reviewer`, `codebase_research`, ...) without an approval
+    /// prompt — even in PLAN mode, since that's the only way it can research
+    /// anything — but delegating to a profile that can write files or run
+    /// shell commands still needs to go through the normal permission system,
+    /// exactly like a direct `write_file`/`bash` call would.
+    static func isMutatingTaskCall(arguments: [String: Any]) -> Bool {
+        let profileName = normalizeProfileName(arguments["profile"] as? String)
+        let explicitTools = (arguments["tools"] as? [String])?
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+            .filter { !$0.isEmpty }
+        let effectiveTools = (explicitTools?.isEmpty == false) ? explicitTools! : defaultTools(for: profileName)
+        return effectiveTools.contains { mutatingToolNames.contains($0) }
     }
 
     static func resolveIsolationPlan(workspaceRoot: String, requestedSubdirectory: String?) throws -> IsolationPlan {
@@ -131,10 +230,6 @@ public struct TaskTool: Tool {
         let trimmed = tools
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
-
-        guard !trimmed.isEmpty else {
-            return .failure(.message("Task tool requires at least one tool in 'tools'."))
-        }
 
         guard trimmed.count <= maxDelegatedTools else {
             return .failure(.message("Task tool supports at most \(maxDelegatedTools) delegated tools."))
@@ -256,7 +351,7 @@ public struct TaskTool: Tool {
             return .failure(error)
         }
 
-        let sanitizedTools: [String]
+        var sanitizedTools: [String]
         switch sanitizeRequestedTools(requestedTools) {
         case .success(let value):
             sanitizedTools = value
@@ -270,6 +365,15 @@ public struct TaskTool: Tool {
             profileName = value
         case .failure(let error):
             return .failure(error)
+        }
+
+        // No explicit tools given — fall back to the profile's default preset.
+        if sanitizedTools.isEmpty {
+            sanitizedTools = defaultTools(for: profileName)
+        }
+
+        guard !sanitizedTools.isEmpty else {
+            return .failure(.message("Task tool requires at least one tool in 'tools' (profile '\(profileName)' has no default preset)."))
         }
 
         let isolate: Bool
@@ -330,6 +434,57 @@ public struct TaskTool: Tool {
         return "\(timestamp)-\(normalizedProfile)-\(suffix)"
     }
 
+    /// Collapses a (possibly long, multi-line) description down to a single
+    /// short line, for status/spinner text — those render paths assume a
+    /// bounded, single-line string. A raw multi-line, multi-hundred-character
+    /// task description (e.g. a full numbered-list spec) pushed through
+    /// `emitStatus`/the spinner label can overwhelm the TUI's line-wrapping
+    /// and cursor-position math, corrupting the whole layout below it.
+    static func statusLineSummary(_ text: String, maxCharacters: Int = maxStatusLineCharacters) -> String {
+        let firstLine = text
+            .split(whereSeparator: \.isNewline)
+            .first
+            .map(String.init) ?? text
+        let normalized = firstLine.trimmingCharacters(in: .whitespacesAndNewlines)
+        let hasMore = normalized.count > maxCharacters || text.contains(where: \.isNewline)
+
+        guard normalized.count > maxCharacters else {
+            return hasMore ? normalized + "…" : normalized
+        }
+        return String(normalized.prefix(maxCharacters)).trimmingCharacters(in: .whitespacesAndNewlines) + "…"
+    }
+
+    /// Builds a last-resort digest summary from raw tool output when a
+    /// sub-agent's final turn carries no assistant text (e.g. it stopped
+    /// right after a tool call without writing a wrap-up). Without this,
+    /// `compactDigestSummary` falls through to "No summary available." and
+    /// discards everything the tool actually returned — including cases
+    /// like "read this file and report back" where the tool result *is*
+    /// the answer the orchestrator asked for. The orchestrator has no
+    /// direct file/tool access of its own, so this is the only path that
+    /// information can reach it through.
+    static func fallbackToolActivitySummary(
+        from messages: [Message],
+        maxTools: Int = 3,
+        maxCharactersPerTool: Int = 220
+    ) -> String? {
+        let toolMessages = messages.filter { $0.role == .tool }
+        guard !toolMessages.isEmpty else { return nil }
+
+        let recent = toolMessages.suffix(maxTools)
+        let lines = recent.map { message -> String in
+            let name = message.toolCallId ?? "tool"
+            let trimmed = message.content.trimmingCharacters(in: .whitespacesAndNewlines)
+            let truncated = trimmed.count > maxCharactersPerTool
+                ? String(trimmed.prefix(maxCharactersPerTool)) + "..."
+                : trimmed
+            return "- \(name): \(truncated)"
+        }
+
+        return "Sub-agent did not write a final summary. Raw output from its last \(recent.count) tool call(s):\n"
+            + lines.joined(separator: "\n")
+    }
+
     static func compactDigestSummary(
         from text: String,
         maxLines: Int = maxDigestSummaryLines,
@@ -352,12 +507,18 @@ public struct TaskTool: Tool {
         return String(limited.prefix(maxCharacters)).trimmingCharacters(in: .whitespacesAndNewlines) + "..."
     }
 
+    /// Prefix identifying the modified-files line in a digest, parsed back out
+    /// by `AgentLoop.executeToolCall` so a parent orchestrator can bridge a
+    /// sub-agent's edits into its own build-check/git flow.
+    static let modifiedFilesLinePrefix = "modified_files: "
+
     static func makeSubagentDigest(
         status: String,
         profileName: String,
         taskDescription: String,
         summary: String,
-        archivePath: String?
+        archivePath: String?,
+        modifiedFiles: [String] = []
     ) -> String {
         var lines: [String] = [
             "[Sub-agent digest]",
@@ -372,18 +533,36 @@ public struct TaskTool: Tool {
             lines.append("archive: \(archivePath)")
         }
 
+        if !modifiedFiles.isEmpty {
+            lines.append("\(modifiedFilesLinePrefix)\(modifiedFiles.sorted().joined(separator: ", "))")
+        }
+
         return lines.joined(separator: "\n")
     }
 
+    /// Parses the `modified_files:` line out of a digest (if present).
+    static func parseModifiedFiles(fromDigest digest: String) -> [String] {
+        for line in digest.split(separator: "\n", omittingEmptySubsequences: false) {
+            let lineString = String(line)
+            guard lineString.hasPrefix(modifiedFilesLinePrefix) else { continue }
+            let list = lineString.dropFirst(modifiedFilesLinePrefix.count)
+            return list
+                .split(separator: ",")
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+        }
+        return []
+    }
+
     public let name = "task"
-    public let description = "Delegate a subtask to a sub-agent. Supports specialist profiles (general, codebase_research, test_engineering, security_review, docs). Sub-agents have isolated context and cannot spawn further sub-agents (max depth 1)."
+    public let description = "Delegate a subtask to an internal sub-agent. See the 'profile' parameter's allowed values for available specialist profiles; each has a default tool scope you can override with 'tools'. Sub-agents have isolated context and cannot spawn further sub-agents (max depth 1)."
     public let parameters = JSONSchema(
         type: "object",
         properties: [
             "description": PropertySchema(type: "string", description: "Description of the task for the sub-agent"),
             "tools": PropertySchema(
                 type: "array",
-                description: "List of tool names the sub-agent should have access to",
+                description: "Optional list of tool names the sub-agent should have access to. Omit to use the profile's default tool preset.",
                 items: PropertySchema(type: "string")
             ),
             "profile": PropertySchema(
@@ -404,25 +583,35 @@ public struct TaskTool: Tool {
                 description: "When isolate=true, remove auto-created isolated directory after task completion"
             ),
         ],
-        required: ["description", "tools"]
+        required: ["description"]
     )
 
-    private let modelContainer: ModelContainer
+    private let modelContainer: ModelContainer?
     private let permissions: PermissionEngine
     private let generationConfig: GenerationEngine.Config
     private let modelPath: String
     private let useSandbox: Bool
     private let parentRegistry: ToolRegistry
     private let frontend: any AgentFrontend
+    /// Per-profile model overrides (e.g. planner/executor/reviewer), keyed by
+    /// profile name, resolved from `AgentRoleRegistry`. Values are carrier
+    /// strings (local path/hub id, or `<providerID>:<modelID>`).
+    private let roleModels: [String: String]
+    /// The parent AgentLoop, used to release/reacquire its local model when a
+    /// role's model is a *different* local model (only one local model may be
+    /// resident at a time).
+    private let parentAgentLoop: AgentLoop?
 
     public init(
-        modelContainer: ModelContainer,
+        modelContainer: ModelContainer?,
         permissions: PermissionEngine,
         generationConfig: GenerationEngine.Config,
         modelPath: String,
         useSandbox: Bool,
         parentRegistry: ToolRegistry,
-        frontend: any AgentFrontend
+        frontend: any AgentFrontend,
+        roleModels: [String: String] = [:],
+        parentAgentLoop: AgentLoop? = nil
     ) {
         self.modelContainer = modelContainer
         self.permissions = permissions
@@ -431,6 +620,8 @@ public struct TaskTool: Tool {
         self.useSandbox = useSandbox
         self.parentRegistry = parentRegistry
         self.frontend = frontend
+        self.roleModels = roleModels
+        self.parentAgentLoop = parentAgentLoop
     }
 
     public func execute(arguments: [String: Any]) async throws -> ToolResult {
@@ -482,17 +673,68 @@ public struct TaskTool: Tool {
             subPermissions = permissions
         }
 
+        // Resolve which model this sub-agent should use. A role-model override
+        // (planner/executor/reviewer, configured via AgentRoleRegistry) takes
+        // precedence over the parent's own model. Resolved before tool
+        // registration so container-dependent tools (project_expert_lora,
+        // web_fetch) bind to the role's own container, not a stale parent one.
+        var resolvedModelContainer = modelContainer
+        var resolvedModelPath = modelPath
+        var releasedParentLocalModel = false
+
+        let roleModelKey = TaskTool.roleModelKey(forProfile: profileName)
+        if let roleModelPath = roleModels[roleModelKey], roleModelPath != modelPath {
+            let roleBackend = InferenceBackend(modelPath: roleModelPath)
+            resolvedModelPath = roleModelPath
+            if roleBackend.isOnline {
+                resolvedModelContainer = nil
+            } else if let parentAgentLoop {
+                // Local role model different from the parent's — only one local
+                // model may be resident at a time, so release the parent's first.
+                await parentAgentLoop.releaseLocalModelForSubagent()
+                releasedParentLocalModel = true
+                do {
+                    resolvedModelContainer = try await ModelLoader.load(
+                        from: roleModelPath,
+                        memoryLimit: nil,
+                        cacheLimit: nil
+                    )
+                } catch {
+                    try? await parentAgentLoop.reacquireLocalModelAfterSubagent()
+                    return .error("Failed to load role model '\(roleModelPath)' for profile '\(profileName)': \(error.localizedDescription)")
+                }
+            }
+            // else: no parentAgentLoop reference (e.g. isolated test construction) —
+            // fall back to the parent's own model/container rather than risk two
+            // local models resident at once.
+        }
+
         // Create a new registry for the sub-agent
         let subRegistry = ToolRegistry()
         for toolName in sanitizedTools {
-            if await registerRequestedTool(named: toolName, into: subRegistry, permissions: subPermissions, isolationEnabled: isolate) {
+            let registered = await registerRequestedTool(
+                named: toolName,
+                into: subRegistry,
+                permissions: subPermissions,
+                isolationEnabled: isolate,
+                modelContainer: resolvedModelContainer,
+                modelPath: resolvedModelPath
+            )
+            if registered {
                 continue
             } else {
+                if releasedParentLocalModel {
+                    resolvedModelContainer = nil
+                    MLX.Memory.clearCache()
+                    try? await parentAgentLoop?.reacquireLocalModelAfterSubagent()
+                }
                 return .error("Requested tool not found or cannot be used by sub-agent: \(toolName)")
             }
         }
 
-        // Build a specialized system prompt for the sub-agent
+        // Build a specialized system prompt for the sub-agent. Uses
+        // subagentToolPromptFilter so the prompt shows exactly the tools this
+        // profile was registered with (subRegistry), not a curated subset.
         let systemPrompt = await AgentLoop.buildSystemPrompt(
             registry: subRegistry,
             maxTokens: generationConfig.maxTokens,
@@ -500,35 +742,80 @@ public struct TaskTool: Tool {
             thinkingLevel: .high, // Default to high for sub-agents
             taskType: .general,
             baseInstructions: baseInstructions,
-            dialect: ToolCallDialect.detect(modelPath: modelPath)
+            dialect: ToolCallDialect.detect(modelPath: resolvedModelPath),
+            usesNativeToolCalling: InferenceBackend(modelPath: resolvedModelPath).isOnline,
+            toolPromptFilterOverride: AgentLoop.subagentToolPromptFilter(role: profileName)
         )
 
         // Instantiate a fresh AgentLoop with isolated history
         let subAgent = AgentLoop(
-            modelContainer: modelContainer,
+            modelContainer: resolvedModelContainer,
             registry: subRegistry,
             permissions: subPermissions,
             generationConfig: generationConfig,
             frontend: frontend,
             systemPrompt: systemPrompt,
-            modelPath: modelPath,
+            modelPath: resolvedModelPath,
             workspace: subPermissions.effectiveWorkspaceRoot,
-            useSandbox: useSandbox
+            useSandbox: useSandbox,
+            role: profileName
         )
 
-        // Notify user via renderer about sub-agent start
+        // Puts the sub-agent in AGENT mode (not the PLAN-mode default, whose
+        // "switch to AGENT mode?" framing makes no sense here) while
+        // inheriting the parent orchestrator's own live approval posture —
+        // mutating tool calls inside the sub-agent still need permission,
+        // exactly like the orchestrator's own calls would. See
+        // configureForSubAgentExecution.
+        let parentAutoApprove = await parentAgentLoop?.autoApproveAllTools ?? false
+        let parentApprovedCommands = await parentAgentLoop?.sessionApprovedToolCommands ?? []
+        await subAgent.configureForSubAgentExecution(
+            taskType: .coding,
+            parentAutoApproveAllTools: parentAutoApprove,
+            parentSessionApprovedToolCommands: parentApprovedCommands
+        )
+
+        // Notify user via renderer about sub-agent start. Status/spinner text
+        // must stay a single short line — see statusLineSummary.
+        let descriptionSummary = TaskTool.statusLineSummary(sanitizedDescription)
         if let isolatedRoot {
-            frontend.emitStatus("Starting sub-agent (profile=\(profileName), isolated_root=\(isolatedRoot)) for task: \(sanitizedDescription)")
+            frontend.emitStatus("Starting sub-agent (profile=\(profileName), model=\(resolvedModelPath), isolated_root=\(isolatedRoot)) for task: \(descriptionSummary)")
         } else {
-            frontend.emitStatus("Starting sub-agent (profile=\(profileName)) for task: \(sanitizedDescription)")
+            frontend.emitStatus("Starting sub-agent (profile=\(profileName), model=\(resolvedModelPath)) for task: \(descriptionSummary)")
         }
-        
+
+        // Let the frontend label its spinner with the active internal agent +
+        // model (sub-agents share the parent's frontend/event pipeline, so
+        // without this the "Generating…" spinner gives no indication that a
+        // different agent/model just took over). Sub-agents cannot spawn
+        // further sub-agents, so this never nests.
+        frontend.emit(.subAgentActivity(.started(profile: profileName, modelPath: resolvedModelPath)))
+        defer { frontend.emit(.subAgentActivity(.ended)) }
+
         do {
             try await subAgent.processUserMessage("Sub-agent Task: \(sanitizedDescription)")
 
-            let subMessages = await subAgent.history.messages
-            let finalAssistantResponse = subMessages.last(where: { $0.role == .assistant })?.content
-            let status = finalAssistantResponse == nil ? "partial" : "success"
+            var subMessages = await subAgent.history.messages
+            var finalAssistantResponse = subMessages.last(where: { $0.role == .assistant })?.content
+            var trimmedFinalResponse = finalAssistantResponse?.trimmingCharacters(in: .whitespacesAndNewlines)
+
+            // A sub-agent's last turn can be tool-calls-only (no wrap-up text) —
+            // e.g. it stops right after a successful `read_file`/`web_search`
+            // without narrating the result. The orchestrator has no other way to
+            // see what happened (it can't call tools directly), so force one more
+            // turn asking explicitly for a plain-text report instead of silently
+            // losing everything the sub-agent did.
+            if trimmedFinalResponse?.isEmpty ?? true {
+                frontend.emitStatus("Sub-agent produced no final summary; requesting one explicitly.", severity: .warning)
+                try? await subAgent.processUserMessage(
+                    "You stopped without writing a final summary. Do not call any more tools — respond now with a short plain-text report (2-6 sentences) of what you did and what you found or produced."
+                )
+                subMessages = await subAgent.history.messages
+                finalAssistantResponse = subMessages.last(where: { $0.role == .assistant })?.content
+                trimmedFinalResponse = finalAssistantResponse?.trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+
+            let status = (trimmedFinalResponse?.isEmpty ?? true) ? "partial" : "success"
 
             let runID = TaskTool.subagentRunID(profileName: profileName)
             let archivePath = try? archiveSubagentRun(
@@ -544,24 +831,56 @@ public struct TaskTool: Tool {
                 try? FileManager.default.removeItem(atPath: isolatedRoot)
             }
 
+            // If even the forced follow-up didn't produce text (model ignored the
+            // instruction, or the follow-up call itself errored), fall back to the
+            // raw tool output rather than reporting an empty digest.
+            let summarySource: String
+            if let trimmedFinalResponse, !trimmedFinalResponse.isEmpty {
+                summarySource = trimmedFinalResponse
+            } else if let fallback = TaskTool.fallbackToolActivitySummary(from: subMessages) {
+                summarySource = fallback
+            } else {
+                summarySource = "Sub-agent finished but returned no response."
+            }
+
             let digestSummary = TaskTool.compactDigestSummary(
-                from: finalAssistantResponse ?? "Sub-agent finished but returned no response.",
+                from: summarySource,
                 maxLines: TaskTool.maxDigestSummaryLines,
                 maxCharacters: TaskTool.maxDigestSummaryCharacters
             )
+
+            // Only bridge modified-file paths up when the sub-agent shared the
+            // parent's own workspace (not an isolated sandbox root) — otherwise
+            // the paths aren't meaningful relative to the parent's workspace.
+            let subAgentModifiedFiles = isolate ? [] : Array(await subAgent.turnModifiedFiles)
 
             let digest = TaskTool.makeSubagentDigest(
                 status: status,
                 profileName: profileName,
                 taskDescription: sanitizedDescription,
                 summary: digestSummary,
-                archivePath: archivePath
+                archivePath: archivePath,
+                modifiedFiles: subAgentModifiedFiles
             )
+
+            if releasedParentLocalModel {
+                resolvedModelContainer = nil
+                MLX.Memory.clearCache()
+                try? await parentAgentLoop?.reacquireLocalModelAfterSubagent()
+            }
+
             return .success(digest)
         } catch {
             if isolate, cleanupIsolation, isolationIsEphemeral, let isolatedRoot {
                 try? FileManager.default.removeItem(atPath: isolatedRoot)
             }
+
+            if releasedParentLocalModel {
+                resolvedModelContainer = nil
+                MLX.Memory.clearCache()
+                try? await parentAgentLoop?.reacquireLocalModelAfterSubagent()
+            }
+
             return .error("Sub-agent failed: \(error.localizedDescription)")
         }
     }
@@ -616,7 +935,9 @@ public struct TaskTool: Tool {
         named toolName: String,
         into registry: ToolRegistry,
         permissions: PermissionEngine,
-        isolationEnabled: Bool
+        isolationEnabled: Bool,
+        modelContainer: ModelContainer?,
+        modelPath: String
     ) async -> Bool {
         let normalizedToolName = toolName.lowercased()
 
@@ -645,12 +966,18 @@ public struct TaskTool: Tool {
             await registry.register(CodeSearchTool(permissions: permissions))
         case "bash":
             await registry.register(BashTool(permissions: permissions, useSandbox: useSandbox))
+        case "build_check":
+            await registry.register(BuildCheckTool(permissions: permissions))
         case "todo":
             await registry.register(TodoTool(workspaceRoot: permissions.workspaceRoot))
         case "read_skill":
             await registry.register(ReadSkillTool(skills: SkillsRegistry(workspaceRoot: permissions.workspaceRoot)))
         case "project_expert_lora":
-            await registry.register(ProjectExpertLoRATool(modelContainer: modelContainer, workspaceRoot: permissions.workspaceRoot, modelPath: modelPath, frontend: frontend))
+            if let modelContainer {
+                await registry.register(ProjectExpertLoRATool(modelContainer: modelContainer, workspaceRoot: permissions.workspaceRoot, modelPath: modelPath, frontend: frontend))
+            } else {
+                return false
+            }
         case "web_fetch":
             await registry.register(WebFetchTool(modelContainer: modelContainer, generationConfig: generationConfig))
         case "web_search":
