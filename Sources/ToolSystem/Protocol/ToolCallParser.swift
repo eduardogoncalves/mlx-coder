@@ -315,8 +315,16 @@ public struct ToolCallParser: Sendable {
 
     private static func tryParse(_ jsonString: String) -> ParsedToolCall? {
         guard let data = jsonString.data(using: .utf8),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let name = json["name"] as? String else {
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+        // Some models (observed on smaller/quantized local checkpoints) emit
+        // `"tool_name"` instead of the documented `"name"` key — otherwise a
+        // correctly-structured call gets rejected as malformed, and the
+        // generic "re-emit in the exact format" steering message doesn't
+        // pinpoint the actual mistake, so the model tends to thrash between
+        // wrong shapes instead of converging.
+        guard let name = (json["name"] as? String) ?? (json["tool_name"] as? String), !name.isEmpty else {
             return nil
         }
 

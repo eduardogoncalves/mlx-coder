@@ -16,6 +16,23 @@ final class ToolCallParserTests: XCTestCase {
         XCTAssertEqual(calls.first?.name, "read_file")
     }
 
+    /// Regression test: some models (observed on smaller/quantized local
+    /// checkpoints) emit `"tool_name"` instead of the documented `"name"`
+    /// key. A correctly-structured call using that key must still parse,
+    /// rather than being rejected as malformed and sending the model in
+    /// circles trying to "fix" an already-otherwise-valid call.
+    func testParseAcceptsToolNameAsAliasForName() {
+        let text = """
+        <tool_call>
+        {"tool_name": "task", "arguments": {"profile": "planner", "description": "research the auth flow"}}
+        </tool_call>
+        """
+        let calls = ToolCallParser.parse(text)
+        XCTAssertEqual(calls.count, 1)
+        XCTAssertEqual(calls.first?.name, "task")
+        XCTAssertEqual(calls.first?.arguments["profile"] as? String, "planner")
+    }
+
     func testParseMultipleToolCalls() {
         let text = """
         <tool_call>
