@@ -371,12 +371,16 @@ public actor BuildToolErrorDetector {
         }
 
         // Make sure we have collected all bytes the child emitted before we
-        // read termination status.
+        // read termination status. Uses a non-blocking read (see
+        // `ProcessIO.nonBlockingDrain`) — a detached grandchild (e.g. an
+        // MSBuild node-reuse worker) can still hold the pipe's write end
+        // open after `waitUntilExit` returns, and a blocking `.availableData`
+        // read here would then hang forever.
         process.waitUntilExit()
         stdoutPipe.fileHandleForReading.readabilityHandler = nil
         stderrPipe.fileHandleForReading.readabilityHandler = nil
-        let tailOut = stdoutPipe.fileHandleForReading.availableData
-        let tailErr = stderrPipe.fileHandleForReading.availableData
+        let tailOut = ProcessIO.nonBlockingDrain(stdoutPipe.fileHandleForReading)
+        let tailErr = ProcessIO.nonBlockingDrain(stderrPipe.fileHandleForReading)
         if !tailOut.isEmpty { collector.appendStdout(tailOut) }
         if !tailErr.isEmpty { collector.appendStderr(tailErr) }
 

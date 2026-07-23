@@ -170,13 +170,17 @@ public struct BashTool: Tool {
 
         timeoutTask.cancel()
 
-        // Tear down readability handlers and drain any final bytes. After
-        // `waitUntilExit` returns the child has closed its ends; reading the
-        // remainder is non-blocking.
+        // Tear down readability handlers and drain any final bytes. Uses a
+        // non-blocking read (see `ProcessIO.nonBlockingDrain`) — a detached
+        // grandchild (e.g. an MSBuild/VBCSCompiler "node reuse" worker left
+        // behind by `dotnet build`/`dotnet restore`) can still hold the
+        // pipe's write end open after `waitUntilExit` returns, and a
+        // blocking `.availableData` read here would then hang forever even
+        // though the command we actually cared about already finished.
         stdoutPipe.fileHandleForReading.readabilityHandler = nil
         stderrPipe.fileHandleForReading.readabilityHandler = nil
-        let tailOut = stdoutPipe.fileHandleForReading.availableData
-        let tailErr = stderrPipe.fileHandleForReading.availableData
+        let tailOut = ProcessIO.nonBlockingDrain(stdoutPipe.fileHandleForReading)
+        let tailErr = ProcessIO.nonBlockingDrain(stderrPipe.fileHandleForReading)
         if !tailOut.isEmpty { collector.appendStdout(tailOut) }
         if !tailErr.isEmpty { collector.appendStderr(tailErr) }
 
@@ -294,6 +298,18 @@ public struct BashTool: Tool {
         // unless the workspace env already sets it.
         if useSandbox, env["DOTNET_CLI_HOME"] == nil {
             env["DOTNET_CLI_HOME"] = permissions.effectiveWorkspaceRoot + "/.dotnet"
+        }
+
+        // `dotnet build`/`dotnet restore`/`dotnet test` leave a detached
+        // MSBuild "node reuse" worker process running in the background by
+        // default, to speed up subsequent builds. That worker inherits this
+        // command's stdout/stderr pipe file descriptors and never closes
+        // them, which — independent of the non-blocking-read fix in
+        // ProcessIO — is wasteful and can confuse other tooling that expects
+        // the process tree to be gone once the command returns. Opt out
+        // unless the workspace env already set a preference.
+        if env["MSBUILDDISABLENODEREUSE"] == nil {
+            env["MSBUILDDISABLENODEREUSE"] = "1"
         }
         return env
     }
