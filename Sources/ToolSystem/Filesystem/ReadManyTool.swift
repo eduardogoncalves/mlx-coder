@@ -6,7 +6,7 @@ import Foundation
 /// Reads multiple files in a single call, returning their contents.
 public struct ReadManyTool: Tool {
     public let name = "read_many"
-    public let description = "Read multiple files at once. Returns the content of each file."
+    public let description = "Read multiple files at once (each capped at ~200 lines, marked with an omitted-lines count if truncated). To see the rest of a truncated file, re-read it individually with read_file and start_line."
     public let parameters = JSONSchema(
         type: "object",
         properties: [

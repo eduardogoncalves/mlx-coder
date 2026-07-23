@@ -14,14 +14,6 @@ public struct BuildCheckTool: Tool {
     public let parameters = JSONSchema(
         type: "object",
         properties: [
-            "projectType": PropertySchema(
-                type: "string",
-                description: "Optional project type override. Auto-detected if not provided. Values: 'dotnet', 'nodejs', 'go', 'rust', 'python'"
-            ),
-            "useLSPFirst": PropertySchema(
-                type: "boolean",
-                description: "Try language server first before build tools (default: true, faster but less thorough)"
-            ),
             "workspace": PropertySchema(
                 type: "string",
                 description: "Optional workspace path (default: current directory)"
@@ -42,8 +34,6 @@ public struct BuildCheckTool: Tool {
     }
     
     public func execute(arguments: [String: Any]) async throws -> ToolResult {
-        let _ = arguments["projectType"] as? String // Reserved for future use
-        let _ = arguments["useLSPFirst"] as? Bool // Reserved for future use
         let workspacePath = (arguments["workspace"] as? String) ?? FileManager.default.currentDirectoryPath
         
         // Validate workspace path

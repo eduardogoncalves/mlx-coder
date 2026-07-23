@@ -20,11 +20,6 @@ public struct LogKnowledgeTool: Tool {
     - "log":    Persist new knowledge. Requires: type, content. Optional: tags.
     - "update": Replace an existing entry's content. Requires: id (from search_knowledge), content.
     - "remove": Delete an entry. Requires: id (from search_knowledge).
-
-    Examples:
-    - New fact:  { "action": "log",    "type": "gotcha", "content": "Always use xcodebuild" }
-    - Correct:   { "action": "update", "id": "<uuid>",   "content": "Corrected text" }
-    - Delete:    { "action": "remove", "id": "<uuid>" }
     """
 
     public let parameters = JSONSchema(

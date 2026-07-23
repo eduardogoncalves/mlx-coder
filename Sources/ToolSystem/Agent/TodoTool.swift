@@ -6,7 +6,7 @@ import Foundation
 /// Manages a persistent todo list for task tracking.
 public struct TodoTool: Tool {
     public let name = "todo"
-    public let description = "Read or update a todo list. Items are never hidden — completed items stay in the list marked [x], pending items are marked [ ]. Actions: 'read' to view all items, 'add' to append a new [ ] item, 'complete' to change [ ] to [x], 'uncomplete' to change [x] back to [ ] (use this to reopen/mark-as-pending — do NOT remove+add), 'remove' to permanently delete. CRITICAL: When working on tasks, only process ONE AT A TIME. Stop and ask the user for permission before moving to the next task."
+    public let description = "Read or update a todo list. Items are never hidden — completed items stay in the list marked [x], pending items are marked [ ]. Actions: 'read' to view all items, 'add' to append a new [ ] item, 'complete' to change [ ] to [x], 'uncomplete' to reopen a completed item, 'remove' to permanently delete. CRITICAL: When working on tasks, only process ONE AT A TIME. Stop and ask the user for permission before moving to the next task."
     public let parameters = JSONSchema(
         type: "object",
         properties: [

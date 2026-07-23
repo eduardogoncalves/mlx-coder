@@ -298,19 +298,10 @@ enum URLFetchValidator {
 public struct WebFetchTool: Tool {
     public let name = "web_fetch"
     public let description = """
-        Fetch content from a URL. The full page is downloaded, pre-processed (optional HTML \
-        stripping) and stored in an on-disk cache; only a bounded window of at most \
-        \(WebFetchTool.defaultMaxOutputLength) characters is returned per call to keep the context small.
-        • text_only: true  — strips HTML tags, CSS, and scripts; returns clean readable text \
-        (recommended for most pages; greatly reduces context size).
-        • query             — additionally extract a specific answer from the page using the LLM \
-        (combine with text_only for best results).
-        • If the page is larger than one window, the returned truncation marker reports the exact \
-        next offset. Call web_fetch again with the SAME url (and same text_only) plus that offset to \
-        read the next chunk. Continuation reads are served from the disk cache — no new network \
-        request is made — so you can read a large JSON/page in order without losing or inventing data.
-        • fresh: true       — bypass the cache and re-download from the network (use only when the \
-        page may have changed since it was first fetched).
+        Fetch content from a URL and return it as text. The full page is downloaded, optionally \
+        HTML-stripped, and cached on disk; only a bounded window of at most \
+        \(WebFetchTool.defaultMaxOutputLength) characters is returned per call to keep the context \
+        small. See each parameter's description for exact usage (text_only, query, offset, fresh).
         """
     public let parameters = JSONSchema(
         type: "object",
