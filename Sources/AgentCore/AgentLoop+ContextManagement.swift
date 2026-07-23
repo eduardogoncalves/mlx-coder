@@ -104,7 +104,14 @@ extension AgentLoop {
 
     // MARK: - Deterministic Context Compaction
 
-    func applyDeterministicContextCompactionIfNeeded(reason: String) async {
+    /// - Parameter overrideThreshold: When set, compacts against this token budget instead
+    ///   of `currentGenerationConfig.longContextThreshold`. Used for emergency recovery when
+    ///   a remote provider reports its actual context window size (e.g. after an
+    ///   `exceed_context_size_error`) — that number is authoritative where the chip-based
+    ///   default threshold isn't. Since remote-only sessions have no local tokenizer, the
+    ///   `chars/4` fallback estimate can undercount real tokens, so the reserve is widened
+    ///   proportionally to leave headroom for that error margin.
+    func applyDeterministicContextCompactionIfNeeded(reason: String, overrideThreshold: Int? = nil) async {
         // Never compact mid-recovery. While a turn is in flight, transient artifacts
         // (malformed tool-call attempts, automated steering) are still in history so
         // the model can recover; they are purged when the turn completes. Skipping
@@ -114,8 +121,10 @@ extension AgentLoop {
         // runs when genuinely needed.
         guard !history.messages.contains(where: { $0.transient }) else { return }
 
-        let threshold = max(currentGenerationConfig.longContextThreshold, contextReserveTokens + 1)
-        let target = max(256, threshold - contextReserveTokens)
+        let baseThreshold = overrideThreshold ?? currentGenerationConfig.longContextThreshold
+        let reserve = overrideThreshold != nil ? max(contextReserveTokens, baseThreshold / 5) : contextReserveTokens
+        let threshold = max(baseThreshold, reserve + 1)
+        let target = max(256, threshold - reserve)
 
         // Use the real tokenizer for accurate token counts when the model is loaded.
         // We snapshot message contents, compute counts inside perform (which is Sendable-safe),

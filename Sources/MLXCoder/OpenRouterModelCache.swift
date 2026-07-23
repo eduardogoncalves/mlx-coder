@@ -66,7 +66,7 @@ enum RemoteModelCache {
         // configured key when present so authenticated gateways work too.
         let base = provider.baseURLValue ?? URL(string: "https://openrouter.ai/api/v1")!
         let key = RemoteProviderRegistry.apiKey(for: providerID) ?? ""
-        let client = OpenRouterClient(apiKey: key, baseURL: base)
+        let client = OpenRouterClient(apiKey: key, baseURL: base, providerName: provider.name)
         let models = try await client.listToolCapableModels()
         try save(models, providerID: providerID)
         return models

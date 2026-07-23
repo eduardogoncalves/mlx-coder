@@ -357,16 +357,23 @@ public actor AgentLoop {
                     hasRetriedFailedTurn = true
                     frontend.emitStatus("⚠️  Generation failed: \(error.localizedDescription). Retrying the current turn once.")
                     // If a context-overflow error was thrown, force aggressive compaction
-                    // before the retry attempt so the reshape crash cannot recur.
-                    let isContextOverflow = (error as NSError).domain == "AgentLoop"
+                    // before the retry attempt so the reshape crash (local) or the same
+                    // oversized request (remote) cannot recur.
+                    let isLocalContextOverflow = (error as NSError).domain == "AgentLoop"
                         && (error as NSError).code == 9
-                    if isContextOverflow {
+                    let remoteOverflowError = (error as? OpenRouterError)?.isContextOverflow == true
+                        ? (error as? OpenRouterError)
+                        : nil
+                    if isLocalContextOverflow || remoteOverflowError != nil {
                         frontend.emitStatus("⚠️  Context too large — forcing compaction before retry.")
                         // Abandon in-flight recovery artifacts so the emergency
                         // compaction is unblocked (it skips while transient messages
                         // exist) and so malformed attempts never enter a summary.
                         history.purgeTransient()
-                        await applyDeterministicContextCompactionIfNeeded(reason: "context_overflow_recovery")
+                        await applyDeterministicContextCompactionIfNeeded(
+                            reason: "context_overflow_recovery",
+                            overrideThreshold: remoteOverflowError?.reportedContextWindow
+                        )
                     }
                     pendingImages = images
                     continue

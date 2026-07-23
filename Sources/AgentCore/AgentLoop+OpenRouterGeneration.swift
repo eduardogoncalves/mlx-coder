@@ -70,7 +70,7 @@ extension AgentLoop {
         }
 
         let base = provider.baseURLValue ?? URL(string: "https://openrouter.ai/api/v1")!
-        let client = OpenRouterClient(apiKey: apiKey ?? "", baseURL: base)
+        let client = OpenRouterClient(apiKey: apiKey ?? "", baseURL: base, providerName: provider.name)
         let stream = client.stream(model: modelID, messages: chatMessages, tools: tools, sessionId: sessionId)
 
         // Lifecycle events — mirror the activity emissions of the local path so
