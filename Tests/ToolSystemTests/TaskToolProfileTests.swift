@@ -374,8 +374,8 @@ final class TaskToolProfileTests: XCTestCase {
         )
         XCTAssertTrue(digest.contains("recovery:"))
         XCTAssertTrue(digest.contains("response_mode:\"raw\""))
-        // With an archive present, it points the caller at read_subagent_log.
-        XCTAssertTrue(digest.contains("read_subagent_log"))
+        // With an archive present, it points the caller at task_output.
+        XCTAssertTrue(digest.contains("task_output"))
         XCTAssertTrue(digest.contains(".native-agent/subagent-logs/abc"))
     }
 

@@ -35,6 +35,7 @@ final class OrchestratorPromptSizeTests: XCTestCase {
         await registry.register(LogKnowledgeTool(workspaceRoot: workspace))
         await registry.register(SearchKnowledgeTool(workspaceRoot: workspace))
         await registry.register(WebSearchTool())
+        await registry.register(TaskOutputTool(permissions: permissions))
         await registry.register(TaskTool(
             modelContainer: nil,
             permissions: permissions,
@@ -70,7 +71,7 @@ final class OrchestratorPromptSizeTests: XCTestCase {
                 "orchestrator prompt should not advertise '\(hiddenTool)'"
             )
         }
-        for visibleTool in ["task", "todo", "plan_file", "log_knowledge", "search_knowledge"] {
+        for visibleTool in ["task", "todo", "plan_file", "log_knowledge", "search_knowledge", "task_output"] {
             XCTAssertTrue(
                 orchestratorComposition.prompt.contains("\"name\" : \"\(visibleTool)\""),
                 "orchestrator prompt should advertise '\(visibleTool)'"

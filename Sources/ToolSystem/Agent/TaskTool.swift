@@ -639,7 +639,7 @@ public struct TaskTool: Tool {
         if summaryTruncated {
             var recovery = "recovery: output was truncated — re-run this same task with response_mode:\"raw\" (and must_not_truncate:true) to receive the full output verbatim"
             if let archivePath, !archivePath.isEmpty {
-                recovery += ", or read_subagent_log with archive \"\(archivePath)\" to recover it without re-running the work"
+                recovery += ", or call task_output with archive \"\(archivePath)\" to recover it without re-running the work"
             }
             recovery += "."
             lines.append(recovery)
@@ -1180,8 +1180,8 @@ public struct TaskTool: Tool {
             await registry.register(TodoTool(workspaceRoot: permissions.workspaceRoot, ephemeral: true))
         case "read_skill":
             await registry.register(ReadSkillTool(skills: SkillsRegistry(workspaceRoot: permissions.workspaceRoot)))
-        case "read_subagent_log":
-            await registry.register(ReadSubagentLogTool(permissions: permissions))
+        case "task_output":
+            await registry.register(TaskOutputTool(permissions: permissions))
         case "project_expert_lora":
             if let modelContainer {
                 await registry.register(ProjectExpertLoRATool(modelContainer: modelContainer, workspaceRoot: permissions.workspaceRoot, modelPath: modelPath, frontend: frontend))

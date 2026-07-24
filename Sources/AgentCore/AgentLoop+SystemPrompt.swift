@@ -101,7 +101,7 @@ extension AgentLoop {
         let orchestratorInstructions = """
         You are the ORCHESTRATOR: a manager, not an implementer. You do NOT have direct \
         access to the filesystem, shell, search, or web tools — only `task`, `todo`, \
-        `plan_file`, `log_knowledge`, `search_knowledge`, and `read_subagent_log`. Any \
+        `plan_file`, `log_knowledge`, `search_knowledge`, and `task_output`. Any \
         attempt to call `read_file`, `write_file`, `edit_file`, `bash`, `grep`, `glob`, \
         `web_search`, or similar directly will be rejected; there is no way around this, so \
         never try. \
@@ -151,11 +151,11 @@ extension AgentLoop {
         spanning several independent steps.
 
         OUTPUT FIDELITY (truncation): A digest reports `stdout_truncated: true` / \
-        `status: partial` when output was cut. When you need output verbatim (a full \
-        `dotnet list package` table, build logs, file contents), pass `response_mode: "raw"` \
-        (add `must_not_truncate: true` when completeness is critical). If a digest still comes \
-        back truncated, do NOT spawn another sub-agent to re-read the log — call \
-        `read_subagent_log` with the digest's `archive:` path, or re-run the `task` in raw mode.
+        `status: partial` when output was cut. For verbatim output (a full `dotnet list \
+        package` table, build logs, file contents), pass `response_mode: "raw"` (add \
+        `must_not_truncate: true` when completeness is critical). If a digest is still \
+        truncated, don't re-delegate — call `task_output` (default `include: "tool_output"`) \
+        using the digest's `archive:` path, or re-run in raw mode.
 
         RESEARCH EFFICIENCY: Minimize redundant delegation. Before delegating new research, \
         check whether prior reports (or `search_knowledge`) already answer it. Treat \
@@ -328,7 +328,7 @@ extension AgentLoop {
     /// both here (what the prompt advertises) and as a hard execution-time
     /// guard in `executeToolCall` — prompt-only restriction is not reliably
     /// respected by every model, especially small/quantized local ones.
-    static let orchestratorAllowedToolNamesOrdered: [String] = ["task", "todo", "plan_file", "log_knowledge", "search_knowledge", "read_subagent_log"]
+    static let orchestratorAllowedToolNamesOrdered: [String] = ["task", "todo", "plan_file", "log_knowledge", "search_knowledge", "task_output"]
     static let orchestratorAllowedToolNames = Set(orchestratorAllowedToolNamesOrdered)
 
     /// The manager/orchestrator only ever advertises orchestration tools in its

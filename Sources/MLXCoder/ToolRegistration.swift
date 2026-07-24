@@ -37,6 +37,7 @@ func registerAllTools(
 
     // Agent tools
     await registry.register(TodoTool(workspaceRoot: permissions.workspaceRoot))
+    await registry.register(TaskOutputTool(permissions: permissions))
     // `parentAgentLoop` is nil here because the top-level AgentLoop doesn't exist
     // yet at this point in the startup sequence — remote role delegation (Phase 3)
     // still works immediately, but local role-model residency swapping (Phase 4)

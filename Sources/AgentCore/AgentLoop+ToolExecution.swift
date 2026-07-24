@@ -58,7 +58,7 @@ extension AgentLoop {
         // Lets the orchestrator recover a truncated sub-agent digest by reading
         // its archived run log directly, instead of spawning another sub-agent
         // just to read a file. Read-only and sandbox-scoped.
-        await registry.register(ReadSubagentLogTool(permissions: permissions))
+        await registry.register(TaskOutputTool(permissions: permissions))
 
         // `task` works with or without a loaded local container — remote-backend
         // orchestrators can still delegate to remote-backed roles. Only
