@@ -19,7 +19,8 @@ extension AgentLoop {
         skillsMetadata: [SkillMetadata] = [],
         dialect: ToolCallDialect = .qwen,
         usesNativeToolCalling: Bool = false,
-        toolPromptFilterOverride: ToolPromptFilter? = nil
+        toolPromptFilterOverride: ToolPromptFilter? = nil,
+        strictOrchestration: Bool = false
     ) async -> PromptComposition {
         let defaultInstructions = """
         You are an expert coding assistant that combines three complementary mindsets — \
@@ -200,7 +201,24 @@ extension AgentLoop {
         } else if mode == .plan {
             coreInstructions += "\n\nCRITICAL: You are currently in PLAN MODE. Your goal is to research the codebase and propose a comprehensive plan. DO NOT execute any tools that modify the filesystem (like write_file, edit_file, append_file, patch) or the system (bash) WITHOUT ASKING FIRST. If you call one of these tools, the user will be prompted to switch you to AGENT MODE and execute. You can use this to transition from planning to implementation once your plan is approved. For now, focus on gathering context and designing your approach."
         }
-        
+
+        if strictOrchestration && isOrchestrator {
+            coreInstructions += """
+            \n\nSTRICT ORCHESTRATION MODE: The following overrides any conflicting guidance \
+            above (for example "prefer fewer, larger `task` calls" or using `todo` to skip \
+            ahead) — validation and fidelity take priority over throughput:
+
+            - Execute exactly ONE action per `task` call. Do NOT batch multiple steps into a \
+            single delegation, even when they seem related or trivial to combine.
+            - Do NOT rely on `todo` shortcuts to skip validation. Before moving on to the next \
+            step, validate every sub-agent result against the user's acceptance criteria for \
+            that step.
+            - Never summarize, paraphrase, or reinterpret raw sub-agent output the user asked \
+            to be returned verbatim — relay it faithfully. If a sub-agent result comes back \
+            `partial` or truncated, re-delegate that same step rather than proceeding.
+            """
+        }
+
         if taskType == .reasoning {
             coreInstructions += "\n\nREASONING TASK: Please reason step by step. If you reach a final mathematical or logical conclusion, put your final answer within \\boxed{}."
         }
@@ -376,7 +394,8 @@ extension AgentLoop {
         skillsMetadata: [SkillMetadata] = [],
         dialect: ToolCallDialect = .qwen,
         usesNativeToolCalling: Bool = false,
-        toolPromptFilterOverride: ToolPromptFilter? = nil
+        toolPromptFilterOverride: ToolPromptFilter? = nil,
+        strictOrchestration: Bool = false
     ) async -> String {
         let composition = await buildSystemPromptComposition(
             registry: registry,
@@ -391,8 +410,21 @@ extension AgentLoop {
             skillsMetadata: skillsMetadata,
             dialect: dialect,
             usesNativeToolCalling: usesNativeToolCalling,
-            toolPromptFilterOverride: toolPromptFilterOverride
+            toolPromptFilterOverride: toolPromptFilterOverride,
+            strictOrchestration: strictOrchestration
         )
         return composition.prompt
+    }
+
+    /// Whether strict orchestration mode is enabled for this process, per the
+    /// `MLXCODER_STRICT_ORCHESTRATION` environment variable ("1"/"true",
+    /// case-insensitive). Only ever applied to the TOP-LEVEL orchestrator's own
+    /// prompt (`role == nil`) — never to sub-agents spawned by `task`, which
+    /// always run their own focused, single-action turn regardless of this flag.
+    static var strictOrchestrationEnvEnabled: Bool {
+        guard let raw = ProcessInfo.processInfo.environment["MLXCODER_STRICT_ORCHESTRATION"] else {
+            return false
+        }
+        return ["1", "true"].contains(raw.lowercased())
     }
 }

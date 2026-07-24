@@ -223,7 +223,8 @@ struct ChatCommand: AsyncParsableCommand {
             skillsMetadata: skillMetadata,
             dialect: ToolCallDialect.detect(modelPath: selectedModel),
             usesNativeToolCalling: InferenceBackend(modelPath: selectedModel).isOnline,
-            toolPromptFilterOverride: AgentLoop.orchestratorToolPromptFilter(mode: .plan)
+            toolPromptFilterOverride: AgentLoop.orchestratorToolPromptFilter(mode: .plan),
+            strictOrchestration: AgentLoop.strictOrchestrationEnvEnabled
         )
 
         let agentLoop = AgentLoop(

@@ -27,7 +27,8 @@ extension AgentLoop {
             skillsMetadata: skillsMetadata,
             dialect: toolCallDialect,
             usesNativeToolCalling: backend.isOnline,
-            toolPromptFilterOverride: currentToolPromptFilter()
+            toolPromptFilterOverride: currentToolPromptFilter(),
+            strictOrchestration: role == nil && AgentLoop.strictOrchestrationEnvEnabled
         )
         promptSectionTokenEstimates = composition.sectionTokenEstimates
         history.updateSystemPrompt(composition.prompt)
@@ -123,7 +124,8 @@ extension AgentLoop {
             skillsMetadata: skillsMetadata,
             dialect: toolCallDialect,
             usesNativeToolCalling: backend.isOnline,
-            toolPromptFilterOverride: currentToolPromptFilter()
+            toolPromptFilterOverride: currentToolPromptFilter(),
+            strictOrchestration: role == nil && AgentLoop.strictOrchestrationEnvEnabled
         )
         promptSectionTokenEstimates = composition.sectionTokenEstimates
         history.updateSystemPrompt(composition.prompt)
@@ -160,7 +162,8 @@ extension AgentLoop {
             skillsMetadata: skillsMetadata,
             dialect: toolCallDialect,
             usesNativeToolCalling: backend.isOnline,
-            toolPromptFilterOverride: currentToolPromptFilter()
+            toolPromptFilterOverride: currentToolPromptFilter(),
+            strictOrchestration: role == nil && AgentLoop.strictOrchestrationEnvEnabled
         )
         promptSectionTokenEstimates = composition.sectionTokenEstimates
         history.updateSystemPrompt(composition.prompt)
@@ -230,7 +233,8 @@ extension AgentLoop {
             skillsMetadata: skillsMetadata,
             dialect: toolCallDialect,
             usesNativeToolCalling: backend.isOnline,
-            toolPromptFilterOverride: currentToolPromptFilter()
+            toolPromptFilterOverride: currentToolPromptFilter(),
+            strictOrchestration: role == nil && AgentLoop.strictOrchestrationEnvEnabled
         )
         promptSectionTokenEstimates = composition.sectionTokenEstimates
         history.updateSystemPrompt(composition.prompt)
