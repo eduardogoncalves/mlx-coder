@@ -308,7 +308,7 @@ public struct WebFetchTool: Tool {
         properties: [
             "url": PropertySchema(type: "string", description: "URL to fetch"),
             "text_only": PropertySchema(type: "boolean",
-                description: "When true, strip all HTML markup (tags, CSS, scripts) and return plain readable text. Recommended for web pages when you need the content rather than the markup structure."),
+                description: "When true, isolate the main article content and convert it to compact Markdown — headings, lists, and links (as [text](url)) are preserved, boilerplate (nav/ads/sidebars) is dropped, and a Title/Published header is added when available. Recommended for web pages when you need the content, links, and metadata rather than the raw markup."),
             "query": PropertySchema(type: "string",
                 description: "Specific question or information to extract from the page via LLM. If empty, returns the full text (after optional HTML stripping)."),
             "offset": PropertySchema(type: "integer",
@@ -391,7 +391,7 @@ extension WebFetchTool: ProgressReportingTool {
                     || cachedRaw.prefix(512).lowercased().contains("<html")
                 if isHTML {
                     reportProgress("parsing HTML → extracting text")
-                    let stripped = HTMLTextExtractor.extract(from: cachedRaw)
+                    let stripped = HTMLTextExtractor.extract(from: cachedRaw, baseURL: url)
                     // Persist the stripped copy so next call is even faster
                     cache.save(raw: cachedRaw, text: stripped, for: urlString)
                     return try await resolveResult(
@@ -436,7 +436,7 @@ extension WebFetchTool: ProgressReportingTool {
             let strippedText: String?
             if textOnly && isHTML {
                 reportProgress("parsing HTML → extracting text")
-                strippedText = HTMLTextExtractor.extract(from: rawText)
+                strippedText = HTMLTextExtractor.extract(from: rawText, baseURL: url)
             } else {
                 strippedText = nil
             }

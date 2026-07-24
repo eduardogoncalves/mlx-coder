@@ -11,6 +11,7 @@ let package = Package(
         .package(url: "https://github.com/apple/swift-argument-parser", from: "1.7.1"),
         .package(url: "https://github.com/jpsim/Yams", from: "6.2.1"),
         .package(url: "https://github.com/eduardogoncalves/swift-coder-tui", branch: "main"),
+        .package(url: "https://github.com/scinfu/SwiftSoup", from: "2.9.0"),
     ],
     targets: [
         .systemLibrary(
@@ -31,6 +32,7 @@ let package = Package(
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
                 .product(name: "Yams",          package: "Yams"),
                 .product(name: "SwiftCoderTUI", package: "swift-coder-tui"),
+                .product(name: "SwiftSoup", package: "SwiftSoup"),
                 "CSQLite",
             ],
             path: "Sources",
