@@ -27,7 +27,8 @@ public enum PromptComposer {
         runtimeSection: String,
         skillsMetadata: [SkillMetadata],
         toolsBlock: String,
-        maxTokens: Int?
+        maxTokens: Int?,
+        includeFileGenerationGuardrail: Bool = true
     ) -> PromptComposition {
         var layers: [(PromptSection, String)] = []
         layers.append((.core, coreInstructions))
@@ -52,7 +53,13 @@ public enum PromptComposer {
         // logical section — that duplicated wrapper overhead and broke the
         // one-section-per-name invariant `PromptSection` implies.
         var runtimeBody = runtimeSection
-        if let maxTokens {
+        // The incremental-write guardrail only makes sense for a caller that can
+        // actually write files (`write_file`/`append_file`/`edit_file`). The
+        // orchestrator has none of those — it only delegates — so showing it
+        // this instruction was contradictory noise that diluted attention on a
+        // small model. Callers pass `includeFileGenerationGuardrail: false` in
+        // that case.
+        if let maxTokens, includeFileGenerationGuardrail {
             let generationGuardrail = """
             CRITICAL INSTRUCTION: You have a maximum generation limit of \(maxTokens) tokens per turn.
             If you need to write or generate a file, you MUST build it incrementally.

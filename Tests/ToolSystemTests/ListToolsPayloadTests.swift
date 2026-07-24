@@ -189,7 +189,7 @@ final class ListToolsPayloadTests: XCTestCase {
         XCTAssertTrue(result.payload.taskCapabilities.profiles.contains("security_review"))
         XCTAssertEqual(
             result.payload.taskCapabilities.isolationOptions,
-            ["isolate", "isolation_directory", "cleanup_isolation"]
+            ["isolate", "isolation_directory"]
         )
     }
 

@@ -89,4 +89,41 @@ final class PromptComposerTests: XCTestCase {
         XCTAssertTrue(composition.prompt.contains("runtime"))
         XCTAssertTrue(composition.prompt.contains("2048"))
     }
+
+    /// The incremental-write guardrail ("build it incrementally … use
+    /// write_file/append_file") is contradictory noise for a caller with no
+    /// file-writing tools (the orchestrator). It must be omitted when
+    /// `includeFileGenerationGuardrail` is false, even with `maxTokens` set.
+    func testComposeOmitsFileGenerationGuardrailWhenDisabled() {
+        let composition = PromptComposer.compose(
+            coreInstructions: "core",
+            memorySection: nil,
+            customizationSection: nil,
+            runtimeSection: "runtime",
+            skillsMetadata: [],
+            toolsBlock: "",
+            maxTokens: 2048,
+            includeFileGenerationGuardrail: false
+        )
+
+        XCTAssertFalse(composition.prompt.contains("build it incrementally"))
+        XCTAssertFalse(composition.prompt.contains("append_file"))
+        XCTAssertTrue(composition.prompt.contains("SECTION:runtime"))
+    }
+
+    /// The guardrail must still appear for a file-writing caller (the default),
+    /// so executor-style prompts keep their incremental-write instruction.
+    func testComposeKeepsFileGenerationGuardrailByDefault() {
+        let composition = PromptComposer.compose(
+            coreInstructions: "core",
+            memorySection: nil,
+            customizationSection: nil,
+            runtimeSection: "runtime",
+            skillsMetadata: [],
+            toolsBlock: "",
+            maxTokens: 2048
+        )
+
+        XCTAssertTrue(composition.prompt.contains("build it incrementally"))
+    }
 }

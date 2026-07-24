@@ -100,9 +100,10 @@ extension AgentLoop {
         let orchestratorInstructions = """
         You are the ORCHESTRATOR: a manager, not an implementer. You do NOT have direct \
         access to the filesystem, shell, search, or web tools — only `task`, `todo`, \
-        `plan_file`, `log_knowledge`, and `search_knowledge`. Any attempt to call \
-        `read_file`, `write_file`, `edit_file`, `bash`, `grep`, `glob`, `web_search`, or \
-        similar directly will be rejected; there is no way around this, so never try. \
+        `plan_file`, `log_knowledge`, `search_knowledge`, and `read_subagent_log`. Any \
+        attempt to call `read_file`, `write_file`, `edit_file`, `bash`, `grep`, `glob`, \
+        `web_search`, or similar directly will be rejected; there is no way around this, so \
+        never try. \
         Use `search_knowledge`/`log_knowledge` directly to consult or persist durable \
         cross-session memory (project facts, prior decisions, gotchas) — do not delegate \
         these. All other actual work — reading code, editing files, running commands, \
@@ -143,17 +144,24 @@ extension AgentLoop {
         Prefer fewer, larger `task` calls over many tiny ones. Summarize what the sub-agents \
         did for the user — don't just relay raw sub-agent output.
 
-        RESEARCH EFFICIENCY: Minimize redundant delegation — cost and quality both matter. \
-        Before delegating new research, check whether prior sub-agent reports (or \
-        `search_knowledge`) already answer it; if so, skip the task. Treat near-duplicate \
-        queries as the same query (case, spacing, punctuation — "Meridiano52w" == "meridiano \
-        52 w") and don't re-run one just because the wording changed. Only repeat a query \
-        that already ran if it failed outright, the data is stale, or new evidence \
-        contradicts it. After every 1-2 research tasks, pause and consolidate: what's now \
-        known, what's still missing, and does that gap actually change the final answer? If \
-        not, stop researching and move on. A sub-agent reporting nothing useful is not \
-        automatically a failed search — before retrying, consider whether the underlying \
-        task/topic is simply thin, not that the query needs another attempt.
+        ALTITUDE: Match ceremony to the work. A genuinely one-or-two-step request (run a \
+        command and apply the obvious fix) is a single `task` call — no `todo`, no \
+        `plan_file`, no research/implementation split. Reserve that machinery for work \
+        spanning several independent steps.
+
+        OUTPUT FIDELITY (truncation): A digest reports `stdout_truncated: true` / \
+        `status: partial` when output was cut. When you need output verbatim (a full \
+        `dotnet list package` table, build logs, file contents), pass `response_mode: "raw"` \
+        (add `must_not_truncate: true` when completeness is critical). If a digest still comes \
+        back truncated, do NOT spawn another sub-agent to re-read the log — call \
+        `read_subagent_log` with the digest's `archive:` path, or re-run the `task` in raw mode.
+
+        RESEARCH EFFICIENCY: Minimize redundant delegation. Before delegating new research, \
+        check whether prior reports (or `search_knowledge`) already answer it. Treat \
+        near-duplicate queries (case/spacing/punctuation) as the same — only repeat a query \
+        that failed, went stale, or is contradicted by new evidence. Every 1-2 tasks, ask \
+        whether the remaining gap actually changes the final answer; if not, stop researching. \
+        A thin result may just mean the topic is thin, not that the query needs a retry.
         """
 
         let isOrchestrator = toolPromptFilterOverride?.taskTypeHint == "orchestration"
@@ -225,6 +233,11 @@ extension AgentLoop {
         let registeredToolNames = Set(await registry.toolNames)
         let visibleToolNames = effectiveFilter.selectedToolNames.map { Set($0).intersection(registeredToolNames) } ?? registeredToolNames
         let visibleFilesystemPathTools = knownFilesystemPathTools.filter { visibleToolNames.contains($0) }
+        // The incremental-write guardrail is only meaningful when this caller can
+        // actually write files — the orchestrator only delegates, so it never
+        // sees it (avoids a contradictory "use write_file/append_file" note it
+        // can't act on). See PromptComposer.compose.
+        let canGenerateFiles = !["write_file", "append_file", "edit_file"].filter { visibleToolNames.contains($0) }.isEmpty
         let pathsNote = visibleFilesystemPathTools.isEmpty
             ? ""
             : "\n\nPATHS: All `path` arguments to filesystem tools (\(visibleFilesystemPathTools.joined(separator: ", "))) MUST be relative to the workspace root above. Do NOT include the workspace root prefix and do NOT pass absolute paths (no leading \"/\"). Use \".\" for the workspace root itself. Paths outside the workspace are rejected by the sandbox."
@@ -278,7 +291,8 @@ extension AgentLoop {
             runtimeSection: runtimeSection,
             skillsMetadata: skillsMetadata,
             toolsBlock: toolsBlock,
-            maxTokens: maxTokens
+            maxTokens: maxTokens,
+            includeFileGenerationGuardrail: canGenerateFiles
         )
     }
 
@@ -296,7 +310,7 @@ extension AgentLoop {
     /// both here (what the prompt advertises) and as a hard execution-time
     /// guard in `executeToolCall` — prompt-only restriction is not reliably
     /// respected by every model, especially small/quantized local ones.
-    static let orchestratorAllowedToolNamesOrdered: [String] = ["task", "todo", "plan_file", "log_knowledge", "search_knowledge"]
+    static let orchestratorAllowedToolNamesOrdered: [String] = ["task", "todo", "plan_file", "log_knowledge", "search_knowledge", "read_subagent_log"]
     static let orchestratorAllowedToolNames = Set(orchestratorAllowedToolNamesOrdered)
 
     /// The manager/orchestrator only ever advertises orchestration tools in its

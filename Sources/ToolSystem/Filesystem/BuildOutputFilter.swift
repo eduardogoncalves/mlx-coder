@@ -38,6 +38,9 @@ public enum BuildOutputFilter {
         ".bundle",
         // Misc package caches
         ".cache",
+        // mlx-coder's own sub-agent run archives/logs — internal bookkeeping,
+        // not project content the model should be browsing or grepping.
+        ".native-agent",
     ]
 
     /// Returns `true` when *any* component of `path` matches an ignored name.

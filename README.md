@@ -588,16 +588,19 @@ The `task` tool supports specialist profiles via the optional `profile` argument
 
 This helps delegated sub-agents adopt purpose-specific behavior while retaining isolated context and depth limits.
 
-The `task` tool also supports optional execution isolation:
+Sub-agents share the orchestrator's own workspace by default — including its active git worktree, if the
+orchestrator switched into one — rather than a synthetic sandbox directory. The `task` tool also supports
+optional scoping to a specific subdirectory of that workspace:
 
-- `isolate: true` creates/uses an isolated sub-agent workspace directory
-- `isolation_directory: "relative/path"` pins isolation to a specific workspace-relative directory
-- `cleanup_isolation: true` removes auto-created isolation directories after completion
+- `isolate: true` + `isolation_directory: "relative/path"` scopes the sub-agent to that specific
+  workspace-relative directory instead of the full workspace
+- `isolation_directory` requires `isolate: true`; when provided it must be non-empty (whitespace-only
+  values are rejected)
+- `isolate: true` alone (no `isolation_directory`) has no effect — sub-agents already share the
+  orchestrator's real workspace, so there is nothing to isolate to
 
-When isolation is enabled, unknown dynamic tools are rejected unless they can be rebuilt with isolated permissions.
-For safety, `cleanup_isolation` is only allowed when `isolation_directory` is not explicitly provided.
-`isolation_directory` requires `isolate: true`.
-When provided, `isolation_directory` must be non-empty (whitespace-only values are rejected).
+When scoped to a subdirectory, unknown dynamic tools are rejected unless they can be rebuilt with the
+scoped permissions.
 
 Additional delegated input validation:
 
@@ -606,7 +609,7 @@ Additional delegated input validation:
 - `tools` cannot include `task` (sub-agent depth is capped at 1)
 - tool-name deduplication is case-insensitive while preserving provided names for delegation compatibility
 - `description` is trimmed, must be non-empty, and is capped to 4000 characters
-- optional arguments are type-checked (`profile` string, `isolate` boolean, `isolation_directory` string, `cleanup_isolation` boolean)
+- optional arguments are type-checked (`profile` string, `isolate` boolean, `isolation_directory` string)
 
 ### Tool Call Dialects
 

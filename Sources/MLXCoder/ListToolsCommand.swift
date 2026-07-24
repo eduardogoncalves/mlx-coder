@@ -190,7 +190,7 @@ func buildListToolsPayload(
         skills: skillMetadata,
         taskCapabilities: TaskCapabilities(
             profiles: TaskTool.supportedProfileNames,
-            isolationOptions: ["isolate", "isolation_directory", "cleanup_isolation"]
+            isolationOptions: ["isolate", "isolation_directory"]
         ),
         mcpError: mcpErrorMessages.isEmpty ? nil : mcpErrorMessages.joined(separator: " | ")
     )

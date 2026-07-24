@@ -50,6 +50,11 @@ extension AgentLoop {
         await registry.register(LogKnowledgeTool(workspaceRoot: permissions.workspaceRoot))
         await registry.register(SearchKnowledgeTool(workspaceRoot: permissions.workspaceRoot))
 
+        // Lets the orchestrator recover a truncated sub-agent digest by reading
+        // its archived run log directly, instead of spawning another sub-agent
+        // just to read a file. Read-only and sandbox-scoped.
+        await registry.register(ReadSubagentLogTool(permissions: permissions))
+
         // `task` works with or without a loaded local container — remote-backend
         // orchestrators can still delegate to remote-backed roles. Only
         // container-bound tools (LoRA expert routing, local web summarization)

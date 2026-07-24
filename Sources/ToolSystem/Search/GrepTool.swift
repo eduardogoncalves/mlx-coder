@@ -48,7 +48,7 @@ public struct GrepTool: Tool {
         var args = ["-rnI"] // recursive, line numbers, skip binary files
         if caseInsensitive { args.append("-i") }
         if let include { args.append(contentsOf: ["--include", include]) }
-        args.append(contentsOf: ["--exclude-dir=.git", "--exclude-dir=.build", "--exclude-dir=node_modules"])
+        args.append(contentsOf: ["--exclude-dir=.git", "--exclude-dir=.build", "--exclude-dir=node_modules", "--exclude-dir=.native-agent"])
         args.append(pattern)
         args.append(resolvedPath)
 
