@@ -324,3 +324,35 @@ jobs:
             sudo installer -pkg mlx-coder-${{ steps.vars.outputs.version }}-arm64.pkg -target /
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  publish-homebrew:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    name: Publish Homebrew formula
+    runs-on: macos-15
+    needs: create-release
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Determine version from tag
+        id: vars
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Make update script executable
+        run: chmod +x ./scripts/update-formula.sh
+
+      # Bumps packaging/homebrew/mlx-coder.rb to this release and pushes it to
+      # the tap repo (eduardogoncalves/homebrew-tap) so `brew upgrade` sees it.
+      #
+      # Requires a repository secret HOMEBREW_TAP_TOKEN: a GitHub token with
+      # contents:write on the tap repo (and contents:read on this repo, to read
+      # the release .sha256). A classic PAT with `repo` scope covers both.
+      - name: Update and push Homebrew formula
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh auth setup-git
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          ./scripts/update-formula.sh --version "${{ steps.vars.outputs.version }}" --push
