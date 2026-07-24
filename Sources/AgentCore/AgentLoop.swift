@@ -345,6 +345,12 @@ public actor AgentLoop {
         var sameReadOnlyToolStreak = 0
         var readOnlyLoopSteeredSignatures = Set<String>()
         var hasRetriedFailedTurn = false
+        // Tracks the same tool call failing identically turn after turn (e.g. a
+        // malformed/hallucinated call the model keeps re-emitting). Lets us abandon
+        // the turn instead of grinding to `maxToolIterations`.
+        var lastFailedCallSignature: String?
+        var sameFailedCallStreak = 0
+        var repeatedFailureAbortName: String?
 
         while iterations < maxToolIterations {
             await applyDeterministicContextCompactionIfNeeded(reason: "before_generation")
@@ -588,6 +594,16 @@ public actor AgentLoop {
                 if streamResult.isError {
                     iterationAnyToolFailed = true
                     streamedCallFailed = true
+                    let failure = registerFailedCall(
+                        name: streamedCall.toolName,
+                        arguments: ["path": streamedCall.path],
+                        lastSignature: &lastFailedCallSignature,
+                        streak: &sameFailedCallStreak
+                    )
+                    if let steer = failure.steer {
+                        steeringQueue.append(.init(message: steer, origin: .automated))
+                    }
+                    if failure.abort { repeatedFailureAbortName = streamedCall.toolName }
                 }
 
                 // Track file modifications
@@ -652,6 +668,16 @@ public actor AgentLoop {
 
                     if result.isError {
                         iterationAnyToolFailed = true
+                        let failure = registerFailedCall(
+                            name: call.name,
+                            arguments: call.arguments,
+                            lastSignature: &lastFailedCallSignature,
+                            streak: &sameFailedCallStreak
+                        )
+                        if let steer = failure.steer {
+                            steeringQueue.append(.init(message: steer, origin: .automated))
+                        }
+                        if failure.abort { repeatedFailureAbortName = call.name }
                         let deferredNames = toolCalls[(callIndex + 1)...].map(\.name)
                         if !deferredNames.isEmpty {
                             let list = deferredNames.map { "'\($0)'" }.joined(separator: ", ")
@@ -674,6 +700,21 @@ public actor AgentLoop {
                 iterations += 1
             } else {
                 iterations = 0
+                // A clean iteration breaks any identical-failure streak.
+                lastFailedCallSignature = nil
+                sameFailedCallStreak = 0
+            }
+
+            // The model has re-emitted the same failing call too many times in a
+            // row and shows no sign of recovering. Abandon the turn instead of
+            // spending the rest of the iteration budget on it.
+            if let abortName = repeatedFailureAbortName {
+                let hadTransient = history.purgeTransient()
+                if hadTransient {
+                    promptCache.invalidate(reason: "transient turn artifacts purged — repeated tool failure abort")
+                }
+                frontend.emitError("Stopped: '\(abortName)' failed identically \(sameFailedCallStreak) times in a row and the model could not recover. Try rephrasing your request.")
+                return
             }
 
             // After processing all tool calls for this turn, drain the steering queue.
@@ -1031,6 +1072,41 @@ public actor AgentLoop {
 
             return true
         }
+    }
+
+    /// Records that a tool call failed and evaluates the identical-failure streak.
+    /// Returns a one-shot corrective steering message (when the streak first crosses
+    /// the steer threshold) and an `abort` flag once the model has clearly stalled on
+    /// the same broken call. Shared by the streamed and text-parsed execution paths.
+    private func registerFailedCall(
+        name: String,
+        arguments: [String: Any],
+        lastSignature: inout String?,
+        streak: inout Int
+    ) -> (steer: String?, abort: Bool) {
+        let state = LoopDetectionService.evaluateFailedCallLoop(
+            callName: name,
+            arguments: arguments,
+            previousSignature: lastSignature,
+            previousStreak: streak
+        )
+        lastSignature = state.nextSignature
+        streak = state.nextStreak
+
+        if state.shouldBreak {
+            return (nil, true)
+        }
+        guard state.shouldSteer else {
+            return (nil, false)
+        }
+
+        var message = "You have called '\(name)' with the same arguments \(state.nextStreak) times and it failed identically every time. STOP repeating this exact call. Re-read the error above, then either emit a corrected call in the required \(ToolCallPattern.toolCallOpen){\"name\": \"<tool>\", \"arguments\": {…}}\(ToolCallPattern.toolCallClose) format, or take a different action."
+        // A tool name that is itself a JSON object is the classic "double-wrapped"
+        // mistake — point the model straight at it.
+        if name.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("{") {
+            message += " The tool name you sent is itself a JSON object — put the tool's real name (e.g. \"todo\") in the \"name\" field and its parameters in \"arguments\", not a nested JSON string."
+        }
+        return (message, false)
     }
 
     /// Executes a single parsed tool call with all checks (policy, approval, loop detection, corrections).

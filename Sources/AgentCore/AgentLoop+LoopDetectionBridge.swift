@@ -37,6 +37,24 @@ extension AgentLoop {
         )
     }
 
+    static func evaluateFailedCallLoop(
+        callName: String,
+        arguments: [String: Any],
+        previousSignature: String?,
+        previousStreak: Int,
+        steerLimit: Int = LoopDetectionService.repeatedFailedCallSteerLimit,
+        breakLimit: Int = LoopDetectionService.repeatedFailedCallBreakLimit
+    ) -> (nextSignature: String, nextStreak: Int, shouldSteer: Bool, shouldBreak: Bool) {
+        LoopDetectionService.evaluateFailedCallLoop(
+            callName: callName,
+            arguments: arguments,
+            previousSignature: previousSignature,
+            previousStreak: previousStreak,
+            steerLimit: steerLimit,
+            breakLimit: breakLimit
+        )
+    }
+
     static func missingRequiredArgumentNames(required: [String]?, arguments: [String: Any]) -> [String] {
         LoopDetectionService.missingRequiredArgumentNames(required: required, arguments: arguments)
     }

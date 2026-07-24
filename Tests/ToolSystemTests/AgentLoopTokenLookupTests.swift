@@ -188,6 +188,48 @@ final class AgentLoopTokenLookupTests: XCTestCase {
         XCTAssertFalse(state.shouldBlock)
     }
 
+    func testEvaluateFailedCallLoopSteersThenBreaksOnIdenticalFailures() {
+        let args: [String: Any] = ["action": "uncomplete", "item": 2]
+
+        let first = AgentLoop.evaluateFailedCallLoop(
+            callName: "todo", arguments: args,
+            previousSignature: nil, previousStreak: 0
+        )
+        let second = AgentLoop.evaluateFailedCallLoop(
+            callName: "todo", arguments: args,
+            previousSignature: first.nextSignature, previousStreak: first.nextStreak
+        )
+        let third = AgentLoop.evaluateFailedCallLoop(
+            callName: "todo", arguments: args,
+            previousSignature: second.nextSignature, previousStreak: second.nextStreak
+        )
+
+        // 1st failure: nothing yet. 2nd: steer once. 3rd: abandon the turn.
+        XCTAssertFalse(first.shouldSteer)
+        XCTAssertFalse(first.shouldBreak)
+        XCTAssertTrue(second.shouldSteer)
+        XCTAssertFalse(second.shouldBreak)
+        XCTAssertFalse(third.shouldSteer)
+        XCTAssertTrue(third.shouldBreak)
+        XCTAssertEqual(third.nextStreak, 3)
+    }
+
+    func testEvaluateFailedCallLoopResetsWhenCallChanges() {
+        let first = AgentLoop.evaluateFailedCallLoop(
+            callName: "todo", arguments: ["action": "uncomplete"],
+            previousSignature: nil, previousStreak: 0
+        )
+        // A different call (or different args) restarts the streak.
+        let second = AgentLoop.evaluateFailedCallLoop(
+            callName: "todo", arguments: ["action": "complete"],
+            previousSignature: first.nextSignature, previousStreak: first.nextStreak
+        )
+
+        XCTAssertEqual(second.nextStreak, 1)
+        XCTAssertFalse(second.shouldSteer)
+        XCTAssertFalse(second.shouldBreak)
+    }
+
     func testApprovalCommandKeyForBashUsesSortedJSON() {
         let key = AgentLoop.approvalCommandKey(
             toolName: "bash",

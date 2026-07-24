@@ -9,6 +9,12 @@ enum LoopDetectionService {
 
     static let repeatedReadFileStreakLimit = 2
     static let repeatedReadOnlyToolStreakLimit = 1
+    /// After the same call fails identically this many times in a row, inject one
+    /// forceful corrective steer. Gives the model a clear last chance to change shape.
+    static let repeatedFailedCallSteerLimit = 2
+    /// After this many identical consecutive failures, abandon the turn rather than
+    /// keep burning tokens on a call the model plainly cannot fix.
+    static let repeatedFailedCallBreakLimit = 3
     static let repeatedReadOnlyLoopTools: Set<String> = [
         "list_dir",
         "glob",
@@ -57,11 +63,37 @@ enum LoopDetectionService {
         }
 
         let normalizedArgs = normalizedReadOnlyLoopArguments(arguments)
-        let argsSignature = stableReadOnlyLoopArgumentsSignature(normalizedArgs)
+        let argsSignature = stableArgumentsSignature(normalizedArgs)
         let currentSignature = "\(callName)|\(argsSignature)"
         let nextStreak = (currentSignature == previousSignature) ? (previousStreak + 1) : 1
         let shouldBlock = nextStreak > limit
         return (currentSignature, nextStreak, shouldBlock, currentSignature)
+    }
+
+    /// Tracks a streak of identical *failing* tool calls (same name + arguments).
+    /// Unlike the read-loop detectors this is tool-agnostic: it fires for any call
+    /// — including hallucinated/malformed ones that error with "Unknown tool" — so a
+    /// model that keeps re-emitting the same broken call is caught instead of
+    /// grinding to the iteration cap.
+    static func evaluateFailedCallLoop(
+        callName: String,
+        arguments: [String: Any],
+        previousSignature: String?,
+        previousStreak: Int,
+        steerLimit: Int = LoopDetectionService.repeatedFailedCallSteerLimit,
+        breakLimit: Int = LoopDetectionService.repeatedFailedCallBreakLimit
+    ) -> (nextSignature: String, nextStreak: Int, shouldSteer: Bool, shouldBreak: Bool) {
+        let currentSignature = failedCallSignature(callName: callName, arguments: arguments)
+        let nextStreak = (currentSignature == previousSignature) ? (previousStreak + 1) : 1
+        // `shouldSteer` fires exactly once (at the steer limit); at/after the break
+        // limit we stop steering and let the caller abandon the turn.
+        let shouldSteer = nextStreak == steerLimit
+        let shouldBreak = nextStreak >= breakLimit
+        return (currentSignature, nextStreak, shouldSteer, shouldBreak)
+    }
+
+    static func failedCallSignature(callName: String, arguments: [String: Any]) -> String {
+        "\(callName)|\(stableArgumentsSignature(arguments))"
     }
 
     static func missingRequiredArgumentNames(required: [String]?, arguments: [String: Any]) -> [String] {
@@ -140,7 +172,7 @@ enum LoopDetectionService {
         return normalized
     }
 
-    private static func stableReadOnlyLoopArgumentsSignature(_ arguments: [String: Any]) -> String {
+    private static func stableArgumentsSignature(_ arguments: [String: Any]) -> String {
         guard JSONSerialization.isValidJSONObject(arguments),
               let data = try? JSONSerialization.data(withJSONObject: arguments, options: [.sortedKeys]),
               let text = String(data: data, encoding: .utf8) else {

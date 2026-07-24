@@ -329,7 +329,31 @@ public struct ToolCallParser: Sendable {
         }
 
         let arguments = json["arguments"] as? [String: Any] ?? [:]
+
+        // Recover a "double-wrapped" call: some smaller/quantized checkpoints emit
+        // the entire intended tool call as a JSON *string* in the name field, e.g.
+        //   {"name": "{\"name\":\"todo\",\"arguments\":{...}}", "arguments": {}}
+        // Left as-is this dispatches with the raw JSON as the tool name and fails
+        // with "Unknown tool: {…json…}"; the model then sees the error and keeps
+        // re-wrapping instead of converging. Unwrap the inner call so it reaches a
+        // real tool. Recursion terminates once the inner name is a plain identifier.
+        if looksLikeJSONObject(name), let nested = tryParse(name) {
+            // Prefer the inner arguments; fall back to the outer ones only when the
+            // inner call carried none.
+            if nested.arguments.isEmpty && !arguments.isEmpty {
+                return ParsedToolCall(name: nested.name, arguments: arguments)
+            }
+            return nested
+        }
+
         return ParsedToolCall(name: name, arguments: arguments)
+    }
+
+    /// True when `text` looks like a JSON object literal (a wrapped tool call
+    /// smuggled into a string field), not a plain tool-name identifier.
+    private static func looksLikeJSONObject(_ text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.hasPrefix("{") && trimmed.hasSuffix("}")
     }
 
     private static func tryParseWithFallbacks(_ jsonString: String) -> ParsedToolCall? {

@@ -33,6 +33,37 @@ final class ToolCallParserTests: XCTestCase {
         XCTAssertEqual(calls.first?.arguments["profile"] as? String, "planner")
     }
 
+    /// Regression test: some checkpoints "double-wrap" a call, emitting the entire
+    /// intended tool call as a JSON string inside the name field with empty outer
+    /// arguments. This previously dispatched with the raw JSON as the tool name and
+    /// failed as "Unknown tool", sending the model into a re-wrapping loop.
+    func testParseUnwrapsDoubleWrappedToolCall() {
+        let text = """
+        <tool_call>
+        {"arguments":{},"name":"{\\"arguments\\":{\\"action\\":\\"uncomplete\\",\\"item\\":2},\\"name\\":\\"todo\\"}"}
+        </tool_call>
+        """
+        let calls = ToolCallParser.parse(text)
+        XCTAssertEqual(calls.count, 1)
+        XCTAssertEqual(calls.first?.name, "todo")
+        XCTAssertEqual(calls.first?.arguments["action"] as? String, "uncomplete")
+        XCTAssertEqual(calls.first?.arguments["item"] as? Int, 2)
+    }
+
+    /// When the inner wrapped call carries no arguments but the outer object does,
+    /// the outer arguments should be preserved against the recovered inner name.
+    func testParseDoubleWrappedFallsBackToOuterArguments() {
+        let text = """
+        <tool_call>
+        {"arguments":{"path":"README.md"},"name":"{\\"name\\":\\"read_file\\"}"}
+        </tool_call>
+        """
+        let calls = ToolCallParser.parse(text)
+        XCTAssertEqual(calls.count, 1)
+        XCTAssertEqual(calls.first?.name, "read_file")
+        XCTAssertEqual(calls.first?.arguments["path"] as? String, "README.md")
+    }
+
     func testParseMultipleToolCalls() {
         let text = """
         <tool_call>
