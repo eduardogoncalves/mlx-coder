@@ -52,6 +52,13 @@ public final class SwiftCoderTUIFrontend: AgentFrontend, @unchecked Sendable {
     private var generationActive: Bool = false
     private var thinkingActive: Bool = false
     private var pendingGenerationEnd: Bool = false
+    // True from `.toolCallStarted` to `.toolCallResult`. By the time a tool
+    // actually runs, the model has already finished emitting text for this
+    // round — tokenProcessingActive/generationActive/thinkingActive are all
+    // false — so without this flag a slow tool call (e.g. a `bash` command
+    // with a long timeout) left the spinner dead with no indication anything
+    // was happening, indistinguishable from a hang.
+    private var toolExecuting: Bool = false
     private var markdownTableNormalizer = StreamingMarkdownTableNormalizer()
 
     // Live token counters for the spinner label.
@@ -323,6 +330,12 @@ public final class SwiftCoderTUIFrontend: AgentFrontend, @unchecked Sendable {
             let entry = SessionEntry(role: .toolCall, content: content)
             await renderer.printScrollLine(entry.render())
 
+            toolExecuting = true
+            spinnerBaseLabel = "Running \(snap.name)…"
+            await renderer.setThinking(spinnerLabel())
+            await renderer.renderFooter()
+            startSpinnerTicker()
+
         case .toolCallResult(let snap):
             let body = snap.content.isEmpty ? "(no output)" : snap.content
             let entry = SessionEntry(role: .toolOutput, content: body)
@@ -330,6 +343,11 @@ public final class SwiftCoderTUIFrontend: AgentFrontend, @unchecked Sendable {
             if snap.isError {
                 await renderer.printScrollLine("\(DesignSystem.brightRed)tool error\(DesignSystem.reset)")
             }
+
+            toolExecuting = false
+            stopSpinnerTicker()
+            await renderer.setThinking("")
+            await renderer.renderFooter()
 
         case .status(let s):
             // Internal status noise (e.g. tool-call writer debug progress)
@@ -517,7 +535,7 @@ public final class SwiftCoderTUIFrontend: AgentFrontend, @unchecked Sendable {
             case .ended:
                 activeSubAgent = nil
             }
-            if tokenProcessingActive || generationActive || thinkingActive {
+            if tokenProcessingActive || generationActive || thinkingActive || toolExecuting {
                 await renderer.setThinking(spinnerLabel())
                 await renderer.renderFooter()
             }
@@ -544,6 +562,7 @@ public final class SwiftCoderTUIFrontend: AgentFrontend, @unchecked Sendable {
         generationActive = false
         thinkingActive = false
         pendingGenerationEnd = false
+        toolExecuting = false
         stopSpinnerTicker()
         thinkingBuffer = ""
         isFirstContentToken = true
@@ -560,7 +579,7 @@ public final class SwiftCoderTUIFrontend: AgentFrontend, @unchecked Sendable {
     }
 
     private func renderSpinnerTick() async {
-        guard tokenProcessingActive || generationActive else { return }
+        guard tokenProcessingActive || generationActive || toolExecuting else { return }
         await renderer.advanceSpinner()
         await renderer.renderSpinnerTick()
     }

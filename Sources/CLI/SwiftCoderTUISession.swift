@@ -73,9 +73,26 @@ public func runSwiftCoderTUISession(
     let dynamicCommandNames: Set<String> = ["/model", "/effort", "/caffeinate", "/memory", "/login", "/logout"]
     let staticItems = frontend.appConfig.commands
         .filter { !dynamicCommandNames.contains($0.name) }
-        .map {
-        AutocompleteItem(value: String($0.name.dropFirst()), label: $0.name, description: $0.description)
-    }
+        .map { command -> AutocompleteItem in
+            let commandBody = String(command.name.dropFirst()) // drop leading "/"
+            // Some entries document a trailing argument placeholder for the palette
+            // (e.g. "/terminal <msg>"). Accepting the item inserts `value` verbatim
+            // (see AutocompleteProvider.completionString), so a placeholder left in
+            // `value` would land as literal text in the input buffer — and because
+            // it then contains an embedded space, the accept-result no longer looks
+            // like a just-completed slash command, so Enter submits it immediately
+            // instead of leaving the cursor ready for a real message. Strip it from
+            // `value` (keeping it in `label` for display) so accepting inserts just
+            // "/terminal " and waits for the user to type the actual message.
+            let value: String
+            if let lastSpace = commandBody.lastIndex(of: " ") {
+                let trailingToken = commandBody[commandBody.index(after: lastSpace)...]
+                value = trailingToken.hasPrefix("<") ? String(commandBody[..<lastSpace]) : commandBody
+            } else {
+                value = commandBody
+            }
+            return AutocompleteItem(value: value, label: command.name, description: command.description)
+        }
     // Session-local model list. Starts from appConfig (built at startup) but is
     // mutated when a remote provider's catalog is refreshed so the user sees
     // fresh entries without relaunching. AppConfig.models is `let`, so we keep
@@ -499,7 +516,13 @@ public func runSwiftCoderTUISession(
             } else if await renderer.isAutocompleteActive() {
                 await renderer.clearAutocomplete()
                 await renderer.renderFooter()
-            } else if await renderer.getIsGenerating() {
+            } else if activeStreamTask != nil {
+                // activeStreamTask, not renderer.getIsGenerating(): a turn stays
+                // in flight through tool execution (e.g. a slow bash call), but
+                // isGenerating already clears once the model finishes emitting
+                // text. Gating on isGenerating meant Esc silently did nothing
+                // while a tool was still running — the one key meant to bail out
+                // of exactly that "looks stuck" state.
                 activeStreamTask?.cancel()
                 await frontend.abortGeneration()
             }
@@ -752,8 +775,14 @@ public func runSwiftCoderTUISession(
                 continue
             }
             if commandInput == "/retry" {
-                if await renderer.getIsGenerating() {
-                    await renderer.printScrollLine("\(DesignSystem.brightRed)✗ /retry unavailable while generation is active. Press Esc first.\(DesignSystem.reset)")
+                // activeStreamTask, not renderer.getIsGenerating(): a turn stays
+                // "in flight" through tool execution (e.g. a slow bash call), but
+                // isGenerating already clears once the model finishes emitting
+                // text, well before tools run. Gating on isGenerating let /retry
+                // start a second, concurrent turn while the first was still
+                // running its tool calls.
+                if activeStreamTask != nil {
+                    await renderer.printScrollLine("\(DesignSystem.brightRed)✗ /retry unavailable while a turn is in progress. Press Esc first.\(DesignSystem.reset)")
                     continue
                 }
                 guard let retryPrompt = lastUserPrompt else {
@@ -779,8 +808,8 @@ public func runSwiftCoderTUISession(
                 continue
             }
             if commandInput == "/undo" || commandInput == "/revert" {
-                if await renderer.getIsGenerating() {
-                    await renderer.printScrollLine("\(DesignSystem.brightRed)✗ /undo unavailable while generation is active. Press Esc first.\(DesignSystem.reset)")
+                if activeStreamTask != nil {
+                    await renderer.printScrollLine("\(DesignSystem.brightRed)✗ /undo unavailable while a turn is in progress. Press Esc first.\(DesignSystem.reset)")
                     continue
                 }
                 await agentLoop.undoLastTurn()
@@ -828,8 +857,8 @@ public func runSwiftCoderTUISession(
                 let sub = String(commandInput.dropFirst("/memory".count))
                     .trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
                 if sub == "remove" || sub == "edit" {
-                    if await renderer.getIsGenerating() {
-                        await renderer.printScrollLine("\(DesignSystem.brightRed)✗ Cannot edit/remove entries while generating. Press Esc first.\(DesignSystem.reset)")
+                    if activeStreamTask != nil {
+                        await renderer.printScrollLine("\(DesignSystem.brightRed)✗ Cannot edit/remove entries while a turn is in progress. Press Esc first.\(DesignSystem.reset)")
                         await renderer.renderFooter()
                     } else {
                         let isEdit = sub == "edit"
@@ -903,8 +932,8 @@ public func runSwiftCoderTUISession(
                 continue
             }
             if TUIFeatureDevCommand.matches(commandInput) {
-                if await renderer.getIsGenerating() {
-                    await renderer.printScrollLine("\(DesignSystem.brightRed)✗ /feature-dev unavailable while generation is active. Press Esc first.\(DesignSystem.reset)")
+                if activeStreamTask != nil {
+                    await renderer.printScrollLine("\(DesignSystem.brightRed)✗ /feature-dev unavailable while a turn is in progress. Press Esc first.\(DesignSystem.reset)")
                     continue
                 }
                 let args = TUIFeatureDevCommand.arguments(from: commandInput)
@@ -937,8 +966,8 @@ public func runSwiftCoderTUISession(
                     await renderer.printScrollLine("\(DesignSystem.brightRed)✗ Usage: /ask <question>\(DesignSystem.reset)")
                     continue
                 }
-                if await renderer.getIsGenerating() {
-                    await renderer.printScrollLine("\(DesignSystem.brightRed)✗ /ask unavailable while generation is active. Press Esc first.\(DesignSystem.reset)")
+                if activeStreamTask != nil {
+                    await renderer.printScrollLine("\(DesignSystem.brightRed)✗ /ask unavailable while a turn is in progress. Press Esc first.\(DesignSystem.reset)")
                     continue
                 }
                 let askUserEntry = SessionEntry(role: .user, content: question)
@@ -961,8 +990,8 @@ public func runSwiftCoderTUISession(
                 continue
             }
             if let shortcut = TUITaskShortcutParser.parse(commandInput) {
-                if await renderer.getIsGenerating() {
-                    await renderer.printScrollLine("\(DesignSystem.brightRed)✗ /\(shortcut.profile) unavailable while generation is active. Press Esc first.\(DesignSystem.reset)")
+                if activeStreamTask != nil {
+                    await renderer.printScrollLine("\(DesignSystem.brightRed)✗ /\(shortcut.profile) unavailable while a turn is in progress. Press Esc first.\(DesignSystem.reset)")
                     continue
                 }
                 let shortcutUserEntry = SessionEntry(role: .user, content: commandInput)

@@ -97,6 +97,10 @@ extension AgentLoop {
             if Task.isCancelled { throw CancellationError() }
             var hasTokenProcessingEnded = false
             var hasGenerationStarted = false
+            // Tracks an open `.thinkingActivity(.started)` with no matching `.ended`
+            // yet. Declared here (rather than next to beginThinkingIfNeeded/
+            // endThinkingIfNeeded below) so the defer can close it out — see its use there.
+            var hasOpenThinkingActivity = false
             // Updated by the text-path template application below; VLM paths leave it at enableThinking.
             var actuallyStartedThinking = enableThinking
 
@@ -114,6 +118,18 @@ extension AgentLoop {
             var turnInputTokenCount: Int = 0
 
             defer {
+                // If generation threw or was cancelled mid-stream while a think block
+                // was still open, the normal close path (parser.flush below) never
+                // runs — close it here so `.generationActivity(.ended)` below always
+                // has a matching `.thinkingActivity(.ended)` in front of it. Without
+                // this, SwiftCoderTUIFrontend defers clearing "isGenerating" forever
+                // waiting for an `.ended` that will never arrive (see its
+                // `.generationActivity(.ended)` handler), leaving the TUI stuck
+                // thinking a turn is still in flight.
+                if hasOpenThinkingActivity {
+                    frontend.emit(.thinkingActivity(.ended))
+                    hasOpenThinkingActivity = false
+                }
                 if hasGenerationStarted {
                     frontend.emit(.generationActivity(.ended))
                 }
@@ -484,7 +500,6 @@ extension AgentLoop {
             frontend.emit(.tokenProcessingActivity(.ended))
             hasGenerationStarted = true
             frontend.emit(.generationActivity(.started))
-            var hasOpenThinkingActivity = false
 
             func beginThinkingIfNeeded() {
                 guard !hasOpenThinkingActivity else { return }
