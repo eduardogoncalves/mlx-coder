@@ -1,6 +1,46 @@
 # Installation & Setup Guide
 
-This guide covers building mlx-coder from source and setting up the required ML models.
+This guide covers installing mlx-coder (via Homebrew or a release download) and building it from source, plus setting up the required ML models.
+
+## Quick Install (Homebrew) — recommended
+
+The easiest and most trustworthy way to install on macOS. Homebrew installs the
+prebuilt Apple Silicon binary without any Gatekeeper prompts (a `brew`-installed
+CLI is not quarantined), so there is nothing to "allow" in System Settings.
+
+```bash
+brew install eduardogoncalves/tap/mlx-coder
+mlx-coder --version
+```
+
+To upgrade later:
+
+```bash
+brew update && brew upgrade mlx-coder
+```
+
+## Installing from a GitHub Release download
+
+If you download the `.pkg` or `.tar.gz` directly from the
+[Releases page](https://github.com/eduardogoncalves/mlx-coder/releases) with a
+browser, macOS tags the file as quarantined and Gatekeeper will block it with
+"unidentified developer" / "cannot verify" — the binary is **not signed or
+notarized**. This is expected. To run it anyway:
+
+```bash
+# .tar.gz
+tar -xzf mlx-coder-*-arm64.tar.gz
+xattr -d com.apple.quarantine mlx-coder mlx-swift_Cmlx.bundle 2>/dev/null || true
+sudo cp mlx-coder /usr/local/bin/
+sudo cp -R mlx-swift_Cmlx.bundle /usr/local/bin/   # keep the bundle next to the binary
+
+# .pkg
+sudo xattr -d com.apple.quarantine mlx-coder-*-arm64.pkg 2>/dev/null || true
+sudo installer -pkg mlx-coder-*-arm64.pkg -target /
+```
+
+> Prefer `brew install` above — it avoids all of this. Direct downloads need the
+> `xattr` step until the project ships Apple-signed + notarized artifacts.
 
 ## System Requirements
 
