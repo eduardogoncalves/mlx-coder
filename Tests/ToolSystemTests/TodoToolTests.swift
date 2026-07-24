@@ -272,6 +272,174 @@ final class TodoToolTests: XCTestCase {
         XCTAssertTrue(result.content.contains("warning: failed to persist todo file changes"))
     }
 
+    // MARK: - Session namespacing (R2: fresh orchestrator run doesn't inherit stale items)
+
+    func testDifferentSessionNamespacesDoNotShareItems() async throws {
+        let workspace = try makeWorkspace()
+        defer { try? FileManager.default.removeItem(at: workspace) }
+
+        let toolA = TodoTool(workspaceRoot: workspace.path, sessionNamespace: "session-a")
+        _ = try await toolA.execute(arguments: ["action": "add", "item_text": "session A item"])
+
+        let toolB = TodoTool(workspaceRoot: workspace.path, sessionNamespace: "session-b")
+        let readB = try await toolB.execute(arguments: ["action": "read"])
+
+        XCTAssertFalse(readB.content.contains("session A item"), "session-b should not see session-a's items, got: \(readB.content)")
+        XCTAssertEqual(readB.content, "(no todos)")
+    }
+
+    func testSameSessionNamespacePersistsAcrossInstances() async throws {
+        let workspace = try makeWorkspace()
+        defer { try? FileManager.default.removeItem(at: workspace) }
+
+        let toolA1 = TodoTool(workspaceRoot: workspace.path, sessionNamespace: "session-same")
+        _ = try await toolA1.execute(arguments: ["action": "add", "item_text": "persisted item"])
+
+        // A second TodoTool instance constructed with the SAME namespace (as
+        // happens across turns within one AgentLoop run, since sessionId is
+        // stable for the loop's lifetime) must still see the item.
+        let toolA2 = TodoTool(workspaceRoot: workspace.path, sessionNamespace: "session-same")
+        let read = try await toolA2.execute(arguments: ["action": "read"])
+
+        XCTAssertTrue(read.content.contains("persisted item"), "same-namespace instance should see prior items, got: \(read.content)")
+    }
+
+    func testSessionNamespaceUsesDistinctFileFromDefaultTodoFile() async throws {
+        let workspace = try makeWorkspace()
+        defer { try? FileManager.default.removeItem(at: workspace) }
+
+        let defaultTool = TodoTool(workspaceRoot: workspace.path)
+        _ = try await defaultTool.execute(arguments: ["action": "add", "item_text": "default item"])
+
+        let namespacedTool = TodoTool(workspaceRoot: workspace.path, sessionNamespace: "some-session")
+        let read = try await namespacedTool.execute(arguments: ["action": "read"])
+
+        XCTAssertEqual(read.content, "(no todos)", "namespaced tool should not see the un-namespaced default file's items")
+
+        let defaultFile = workspace.appendingPathComponent(".mlx-coder-todo")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: defaultFile.path), "default file should be untouched")
+        let defaultContent = try String(contentsOf: defaultFile, encoding: .utf8)
+        XCTAssertTrue(defaultContent.contains("default item"))
+    }
+
+    func testConstructingNamespacedToolCleansUpOtherStaleNamespacedFiles() throws {
+        let workspace = try makeWorkspace()
+        defer { try? FileManager.default.removeItem(at: workspace) }
+
+        let staleFile1 = workspace.appendingPathComponent(".mlx-coder-todo-old-session-1")
+        let staleFile2 = workspace.appendingPathComponent(".mlx-coder-todo-old-session-2")
+        try "[ ] leftover from an old run".write(to: staleFile1, atomically: true, encoding: .utf8)
+        try "[ ] another leftover".write(to: staleFile2, atomically: true, encoding: .utf8)
+
+        // Constructing a TodoTool for a brand-new session namespace should
+        // sweep away stale namespaced files from earlier runs.
+        _ = TodoTool(workspaceRoot: workspace.path, sessionNamespace: "fresh-session")
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: staleFile1.path), "stale namespaced file should be cleaned up on startup")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: staleFile2.path), "stale namespaced file should be cleaned up on startup")
+    }
+
+    func testStaleNamespaceCleanupDoesNotTouchDefaultOrLegacyFiles() throws {
+        let workspace = try makeWorkspace()
+        defer { try? FileManager.default.removeItem(at: workspace) }
+
+        let defaultFile = workspace.appendingPathComponent(".mlx-coder-todo")
+        let legacyFile = workspace.appendingPathComponent(".native-agent-todo.md")
+        try "[ ] default item".write(to: defaultFile, atomically: true, encoding: .utf8)
+        try "[ ] legacy item".write(to: legacyFile, atomically: true, encoding: .utf8)
+
+        _ = TodoTool(workspaceRoot: workspace.path, sessionNamespace: "fresh-session")
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: defaultFile.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: legacyFile.path))
+    }
+
+    // MARK: - Ephemeral (sub-agent) todos (R1: isolated scratch space, no leakage)
+
+    func testEphemeralTodoStartsEmptyEvenWithExistingPersistentItems() async throws {
+        let workspace = try makeWorkspace()
+        defer { try? FileManager.default.removeItem(at: workspace) }
+
+        let persistentTool = TodoTool(workspaceRoot: workspace.path)
+        _ = try await persistentTool.execute(arguments: ["action": "add", "item_text": "orchestrator item"])
+
+        let ephemeralTool = TodoTool(workspaceRoot: workspace.path, ephemeral: true)
+        let read = try await ephemeralTool.execute(arguments: ["action": "read"])
+
+        XCTAssertEqual(read.content, "(no todos)", "ephemeral todo must start empty, got: \(read.content)")
+    }
+
+    func testEphemeralTodoDoesNotModifyThePersistentFile() async throws {
+        let workspace = try makeWorkspace()
+        defer { try? FileManager.default.removeItem(at: workspace) }
+
+        let persistentTool = TodoTool(workspaceRoot: workspace.path)
+        _ = try await persistentTool.execute(arguments: ["action": "add", "item_text": "orchestrator item"])
+
+        let ephemeralTool = TodoTool(workspaceRoot: workspace.path, ephemeral: true)
+        _ = try await ephemeralTool.execute(arguments: ["action": "add", "item_text": "sub-agent scratch item"])
+        _ = try await ephemeralTool.execute(arguments: ["action": "complete", "item": 1])
+
+        let defaultFile = workspace.appendingPathComponent(".mlx-coder-todo")
+        let content = try String(contentsOf: defaultFile, encoding: .utf8)
+        XCTAssertEqual(content, "[ ] orchestrator item", "ephemeral writes must never reach the persistent file")
+
+        // And no stray file was created anywhere in the workspace for the
+        // ephemeral instance either.
+        let entries = try FileManager.default.contentsOfDirectory(atPath: workspace.path)
+        XCTAssertEqual(Set(entries), [".mlx-coder-todo"])
+    }
+
+    func testEphemeralTodoReadsAndWritesWithinItsOwnLifetime() async throws {
+        let workspace = try makeWorkspace()
+        defer { try? FileManager.default.removeItem(at: workspace) }
+
+        let ephemeralTool = TodoTool(workspaceRoot: workspace.path, ephemeral: true)
+        _ = try await ephemeralTool.execute(arguments: ["action": "add", "item_text": "scratch item"])
+        let read = try await ephemeralTool.execute(arguments: ["action": "read"])
+
+        XCTAssertEqual(read.content, "1. [ ] scratch item")
+    }
+
+    func testTwoEphemeralTodoInstancesAreIsolatedFromEachOther() async throws {
+        let workspace = try makeWorkspace()
+        defer { try? FileManager.default.removeItem(at: workspace) }
+
+        let ephemeralA = TodoTool(workspaceRoot: workspace.path, ephemeral: true)
+        _ = try await ephemeralA.execute(arguments: ["action": "add", "item_text": "sub-agent A item"])
+
+        let ephemeralB = TodoTool(workspaceRoot: workspace.path, ephemeral: true)
+        let readB = try await ephemeralB.execute(arguments: ["action": "read"])
+
+        XCTAssertEqual(readB.content, "(no todos)", "sibling sub-agents must not share ephemeral todo state")
+    }
+
+    // MARK: - Back-compat (default constructor keeps today's exact behavior)
+
+    func testDefaultConstructorStillReadsLegacyAndWritesDefaultFile() async throws {
+        let workspace = try makeWorkspace()
+        defer { try? FileManager.default.removeItem(at: workspace) }
+
+        try "[ ] legacy item".write(
+            to: workspace.appendingPathComponent(".native-agent-todo.md"),
+            atomically: true,
+            encoding: .utf8
+        )
+
+        let tool = TodoTool(workspaceRoot: workspace.path)
+        let read = try await tool.execute(arguments: ["action": "read"])
+        XCTAssertEqual(read.content, "1. [ ] legacy item")
+
+        _ = try await tool.execute(arguments: ["action": "add", "item_text": "new item"])
+
+        let defaultFile = workspace.appendingPathComponent(".mlx-coder-todo")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: defaultFile.path))
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: workspace.appendingPathComponent(".native-agent-todo.md").path),
+            "legacy file should be migrated away after a successful persist, same as before"
+        )
+    }
+
     private func makeWorkspace() throws -> URL {
         let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
             .appendingPathComponent(".build", isDirectory: true)

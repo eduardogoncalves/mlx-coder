@@ -27,8 +27,13 @@ extension AgentLoop {
         // Shell
         await registry.register(BashTool(permissions: permissions, useSandbox: useSandbox))
 
-        // Agent tools that don't need a model container
-        await registry.register(TodoTool(workspaceRoot: permissions.workspaceRoot))
+        // Agent tools that don't need a model container. Namespaced by this
+        // AgentLoop's stable per-instance sessionId so a fresh top-level run
+        // (fresh process, fresh sessionId) never inherits todo items left
+        // over by a previous, unrelated run — it still persists across turns
+        // within this one run, since sessionId is stable for the loop's
+        // lifetime. See TodoTool's `sessionNamespace` docs.
+        await registry.register(TodoTool(workspaceRoot: permissions.workspaceRoot, sessionNamespace: sessionId))
 
         // Skills
         await registry.register(ReadSkillTool(skills: SkillsRegistry(workspaceRoot: permissions.workspaceRoot)))

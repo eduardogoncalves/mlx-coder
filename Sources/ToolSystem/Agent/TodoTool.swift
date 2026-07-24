@@ -19,10 +19,62 @@ public struct TodoTool: Tool {
 
     private let todoFilePath: String
     private let legacyTodoFilePath: String
+    /// Non-nil only for ephemeral (sub-agent) instances — when set, all reads
+    /// and writes go through this in-memory store instead of the filesystem,
+    /// so `todoFilePath`/`legacyTodoFilePath` are unused placeholders.
+    private let ephemeralStore: EphemeralTodoStore?
 
-    public init(workspaceRoot: String) {
-        self.todoFilePath = (workspaceRoot as NSString).appendingPathComponent(".mlx-coder-todo")
+    /// Prefix shared by all session-namespaced todo files, used both to build
+    /// a namespaced path and to recognize stale ones left behind by earlier
+    /// runs so they can be swept up on startup.
+    private static let namespacedFilePrefix = ".mlx-coder-todo-"
+
+    /// - Parameters:
+    ///   - workspaceRoot: Root directory the todo file(s) live under.
+    ///   - sessionNamespace: When non-nil/non-empty, scopes persistence to a
+    ///     `.mlx-coder-todo-<namespace>` file instead of the shared
+    ///     `.mlx-coder-todo` file, so a fresh top-level run (fresh namespace)
+    ///     never inherits items left over by a previous, unrelated run.
+    ///     Constructing with a namespace also sweeps any other
+    ///     `.mlx-coder-todo-*` files out of the workspace, so stale
+    ///     namespaced files from earlier runs don't accumulate. Leave `nil`
+    ///     to reproduce the original, un-namespaced single-file behavior
+    ///     exactly (back-compat default for existing callers).
+    ///   - ephemeral: When true, ignores `workspaceRoot`/`sessionNamespace`
+    ///     entirely and backs this instance with a private in-memory store —
+    ///     used for sub-agent todos, which must start empty, never touch the
+    ///     orchestrator's persisted file, and leave nothing behind once the
+    ///     sub-agent (and this instance) goes out of scope.
+    public init(workspaceRoot: String, sessionNamespace: String? = nil, ephemeral: Bool = false) {
+        if ephemeral {
+            self.ephemeralStore = EphemeralTodoStore()
+            self.todoFilePath = ""
+            self.legacyTodoFilePath = ""
+            return
+        }
+
+        self.ephemeralStore = nil
         self.legacyTodoFilePath = (workspaceRoot as NSString).appendingPathComponent(".native-agent-todo.md")
+        if let sessionNamespace, !sessionNamespace.isEmpty {
+            let fileName = "\(TodoTool.namespacedFilePrefix)\(sessionNamespace)"
+            self.todoFilePath = (workspaceRoot as NSString).appendingPathComponent(fileName)
+            TodoTool.cleanupStaleNamespacedFiles(workspaceRoot: workspaceRoot, keepingFileName: fileName)
+        } else {
+            self.todoFilePath = (workspaceRoot as NSString).appendingPathComponent(".mlx-coder-todo")
+        }
+    }
+
+    /// Removes any `.mlx-coder-todo-<other-namespace>` files left behind by
+    /// earlier runs, keeping only the file for the namespace currently being
+    /// constructed. Best-effort: failures are silently ignored (a leftover
+    /// file is a minor annoyance, not a correctness issue).
+    private static func cleanupStaleNamespacedFiles(workspaceRoot: String, keepingFileName: String) {
+        let fm = FileManager.default
+        guard let entries = try? fm.contentsOfDirectory(atPath: workspaceRoot) else { return }
+        for entry in entries {
+            guard entry.hasPrefix(namespacedFilePrefix), entry != keepingFileName else { continue }
+            try? fm.removeItem(atPath: (workspaceRoot as NSString).appendingPathComponent(entry))
+        }
     }
 
     public func execute(arguments: [String: Any]) async throws -> ToolResult {
@@ -61,6 +113,10 @@ public struct TodoTool: Tool {
     // MARK: - Private
 
     private func loadTodos() -> [String] {
+        if let ephemeralStore {
+            return ephemeralStore.load()
+        }
+
         let content =
             (try? String(contentsOfFile: todoFilePath, encoding: .utf8))
             ?? (try? String(contentsOfFile: legacyTodoFilePath, encoding: .utf8))
@@ -74,7 +130,14 @@ public struct TodoTool: Tool {
     }
 
     private func saveTodos(_ todos: [String]) -> Bool {
-        let content = todos.map(normalizeTodoFormat).joined(separator: "\n")
+        let normalized = todos.map(normalizeTodoFormat)
+
+        if let ephemeralStore {
+            ephemeralStore.save(normalized)
+            return true
+        }
+
+        let content = normalized.joined(separator: "\n")
         do {
             try content.write(toFile: todoFilePath, atomically: true, encoding: .utf8)
             if FileManager.default.fileExists(atPath: legacyTodoFilePath) {
@@ -228,5 +291,27 @@ public struct TodoTool: Tool {
             return prefix + remainder
         }
         return prefix + " " + remainder
+    }
+}
+
+/// Thread-safe in-memory backing store for ephemeral `TodoTool` instances
+/// (sub-agent todos). Deliberately never touches disk: state lives only for
+/// as long as this instance is referenced (i.e. for the lifetime of the
+/// sub-agent's tool registry), and is simply released — no cleanup step is
+/// needed because nothing was ever persisted.
+private final class EphemeralTodoStore: @unchecked Sendable {
+    private let lock = NSLock()
+    private var todos: [String] = []
+
+    func load() -> [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return todos
+    }
+
+    func save(_ newTodos: [String]) {
+        lock.lock()
+        defer { lock.unlock() }
+        todos = newTodos
     }
 }
