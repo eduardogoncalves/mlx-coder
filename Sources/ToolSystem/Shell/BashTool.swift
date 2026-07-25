@@ -143,31 +143,37 @@ public struct BashTool: Tool {
             collector.appendStderr(data)
         }
 
-        // Set up timeout
+        try process.run()
+        let childPID = process.processIdentifier
+        BashTool.timingLog("armed \(timeout)s timeout for pid \(childPID): \(command.prefix(80))")
+
+        // Timeout: when it fires, kill the WHOLE process tree — not just the
+        // `zsh` wrapper. `process.terminate()` (SIGTERM to the tracked PID
+        // only) leaves pipeline children like `curl`/`head` orphaned and, for
+        // a network-stalled `curl`, running forever. Escalate to SIGKILL after
+        // a short grace for anything that ignores SIGTERM. The first sleep is a
+        // plain `try await` so that a command finishing before the deadline
+        // (which cancels this task) aborts here and never signals a live tree.
         let timeoutTask = Task {
             try await Task.sleep(for: .seconds(timeout))
-            // `terminate()` is a no-op if the process has already exited.
-            process.terminate()
+            BashTool.timingLog("timeout fired for pid \(childPID) — SIGTERM process tree")
+            ProcessTreeKiller.killTree(root: childPID, signal: SIGTERM)
+            try? await Task.sleep(for: .seconds(2))
+            BashTool.timingLog("grace elapsed for pid \(childPID) — SIGKILL survivors")
+            ProcessTreeKiller.killTree(root: childPID, signal: SIGKILL)
         }
 
-        try process.run()
-
-        // Wait on a background dispatch queue so the actor thread isn't
-        // blocked, and wire cooperative cancellation (ESC / Ctrl+C) to
-        // `process.terminate()` via withTaskCancellationHandler.
-        await withTaskCancellationHandler {
-            await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
-                DispatchQueue.global(qos: .userInitiated).async {
-                    process.waitUntilExit()
-                    cont.resume()
-                }
-            }
-        } onCancel: {
-            // Best-effort terminate on cancel. SIGTERM first; the child has
-            // until the timeoutTask (or natural exit) to clean up.
-            process.terminate()
+        // Wait for exit without parking a thread in a blocking
+        // `waitUntilExit()` (which, called off the launching thread, races
+        // Foundation's SIGCHLD reaper and can hang forever under load — see
+        // ProcessIO.waitForExit). Cooperative cancellation (ESC / Ctrl+C / the
+        // loop-level watchdog) tears the whole process tree down so `zsh`
+        // exits and orphaned network children don't linger.
+        await ProcessIO.waitForExit(process: process) {
+            ProcessTreeKiller.killTree(root: childPID, signal: SIGTERM)
         }
 
+        BashTool.timingLog("waitUntilExit returned for pid \(childPID)")
         timeoutTask.cancel()
 
         // Tear down readability handlers and drain any final bytes. Uses a
@@ -270,6 +276,16 @@ public struct BashTool: Tool {
     }
 
     // MARK: - Helpers
+
+    /// Timestamped diagnostics for the timeout/kill path, gated by
+    /// `MLXCODER_DEBUG_TOOL_TIMING` so a "stuck" bash call can be pinpointed
+    /// live. Silent unless the env var is truthy.
+    static func timingLog(_ message: @autoclosure () -> String) {
+        let raw = (ProcessInfo.processInfo.environment["MLXCODER_DEBUG_TOOL_TIMING"] ?? "").lowercased()
+        guard raw == "1" || raw == "true" || raw == "yes" else { return }
+        let stamp = ISO8601DateFormatter().string(from: Date())
+        FileHandle.standardError.write(Data("[mlx-coder timing \(stamp)] bash: \(message())\n".utf8))
+    }
 
     private func safeEnvironment() -> [String: String] {
         // Set up environment with whitelisted variables only
