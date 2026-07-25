@@ -1312,19 +1312,43 @@ public actor AgentLoop {
                     // before crossing isolation boundaries into tool execution.
                     nonisolated(unsafe) let isolatedExecutionArguments = executionArguments
 
-                    do {
+                    // Loop-level watchdog: a leaf tool that hangs (e.g. a `bash`
+                    // call stuck on a stalled network request) must never freeze
+                    // the whole turn. Race the tool call against a hard wall-clock
+                    // deadline; on expiry, cancel it and record a failed result so
+                    // the loop keeps going. `task` is exempt — it delegates to a
+                    // full sub-agent loop whose own leaf tool calls are each
+                    // watchdog-bounded, and legitimate delegations can run long,
+                    // so the leaf ceiling would wrongly kill valid work. See
+                    // ToolWatchdog.swift.
+                    let watchdogSeconds = ToolWatchdogConfig.seconds
+                    let watchdogToolName = call.name
+                    let applyWatchdog = call.name != "task"
+                    let toolStart = Date()
+                    ToolWatchdogConfig.log("dispatching tool \(watchdogToolName)\(applyWatchdog ? " (watchdog \(Int(watchdogSeconds))s)" : " (no watchdog)")")
+                    let invoke: @Sendable () async throws -> ToolResult = {
                         if let progressTool = tool as? ProgressReportingTool {
-                            result = try await progressTool.execute(arguments: isolatedExecutionArguments) { phase in
+                            return try await progressTool.execute(arguments: isolatedExecutionArguments) { phase in
                                 if showToolSpinner {
-                                    toolSpinner.updateMessage("\(call.name): \(phase)")
+                                    toolSpinner.updateMessage("\(watchdogToolName): \(phase)")
                                 }
                             }
                         } else {
-                            result = try await tool.execute(arguments: isolatedExecutionArguments)
+                            return try await tool.execute(arguments: isolatedExecutionArguments)
                         }
+                    }
+                    do {
+                        if applyWatchdog {
+                            result = try await runWithToolWatchdog(seconds: watchdogSeconds, toolName: watchdogToolName, operation: invoke)
+                        } else {
+                            result = try await invoke()
+                        }
+                    } catch let timeout as ToolWatchdogTimeout {
+                        result = .error("Tool '\(timeout.toolName)' exceeded the \(Int(timeout.seconds))s watchdog and was cancelled — it likely hung on a network or subprocess call. The turn is continuing; retry with a smaller scope or a shorter timeout.")
                     } catch {
                         result = .error("Tool execution failed: \(error.localizedDescription)")
                     }
+                    ToolWatchdogConfig.log("tool \(watchdogToolName) returned after \(String(format: "%.1f", Date().timeIntervalSince(toolStart)))s isError=\(result.isError)")
 
                     // Semantic correction: if edit_file failed due to old_text mismatch, use LLM to fix it
                     if result.isError && call.name == "edit_file" {
