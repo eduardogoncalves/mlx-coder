@@ -333,6 +333,7 @@ public final class SwiftCoderTUIFrontend: AgentFrontend, @unchecked Sendable {
             toolExecuting = true
             spinnerBaseLabel = "Running \(snap.name)…"
             await renderer.setThinking(spinnerLabel())
+            await renderer.setToolExecuting(true)
             await renderer.renderFooter()
             startSpinnerTicker()
 
@@ -347,6 +348,7 @@ public final class SwiftCoderTUIFrontend: AgentFrontend, @unchecked Sendable {
             toolExecuting = false
             stopSpinnerTicker()
             await renderer.setThinking("")
+            await renderer.setToolExecuting(false)
             await renderer.renderFooter()
 
         case .status(let s):
