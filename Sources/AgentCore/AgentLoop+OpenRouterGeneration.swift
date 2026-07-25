@@ -16,7 +16,7 @@ import Foundation
 
 extension AgentLoop {
 
-    func generateResponseViaRemote() async throws -> (text: String, writer: StreamingToolCallWriter, startedThinking: Bool, turnStats: (promptTokens: Int, completionTokens: Int, elapsed: TimeInterval, tokensPerSecond: Double?)?) {
+    func generateResponseViaRemote() async throws -> (text: String, writer: StreamingToolCallWriter, startedThinking: Bool, turnStats: (promptTokens: Int, completionTokens: Int, elapsed: TimeInterval, tokensPerSecond: Double?)?, finishReason: String?) {
         guard case .remote(let providerID, let modelID) = backend else {
             throw NSError(
                 domain: "AgentLoop",
@@ -90,6 +90,7 @@ extension AgentLoop {
         var pending: [Int: PartialToolCall] = [:]
         var usagePrompt = 0
         var usageCompletion = 0
+        var finishReason: String? = nil
         let generationStart = Date()
 
         do {
@@ -106,9 +107,15 @@ extension AgentLoop {
                     if let name { entry.name = name }
                     entry.arguments += argumentsChunk
                     pending[index] = entry
-                case .done:
+                case .done(let reason):
                     // Stream may emit `.done` mid-completion (per-choice finish_reason)
                     // before `[DONE]`; let the loop continue and exit naturally.
+                    // The real finish_reason ("length"/"stop"/"tool_calls") arrives in
+                    // its own frame, then a terminal `.done(nil)` fires at the `[DONE]`
+                    // sentinel — so keep the first non-nil reason and never let the
+                    // sentinel clobber it back to nil (otherwise length-truncation would
+                    // go undetected downstream).
+                    if let reason { finishReason = reason }
                     break
                 case .usage(let prompt, let completion):
                     usagePrompt = prompt
@@ -173,7 +180,7 @@ extension AgentLoop {
             onStatusChange: nil
         )
 
-        return (text: responseText, writer: writer, startedThinking: false, turnStats: capturedTurnStats)
+        return (text: responseText, writer: writer, startedThinking: false, turnStats: capturedTurnStats, finishReason: finishReason)
     }
 
     static func formatGenerationStats(

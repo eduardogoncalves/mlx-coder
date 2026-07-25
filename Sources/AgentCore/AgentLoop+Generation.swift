@@ -12,7 +12,7 @@ extension AgentLoop {
     /// Generate a response from the model using the current conversation history.
     /// Returns the response text, the streaming writer (for streamed tool calls),
     /// and whether the response began inside a pre-filled `<think>` block.
-    func generateResponse() async throws -> (text: String, writer: StreamingToolCallWriter, startedThinking: Bool, turnStats: (promptTokens: Int, completionTokens: Int, elapsed: TimeInterval, tokensPerSecond: Double?)?) {
+    func generateResponse() async throws -> (text: String, writer: StreamingToolCallWriter, startedThinking: Bool, turnStats: (promptTokens: Int, completionTokens: Int, elapsed: TimeInterval, tokensPerSecond: Double?)?, finishReason: String?) {
         // Route online backends through their HTTP client — local MLX path below
         // assumes a loaded ModelContainer, which online providers never produce.
         if backend.isOnline {
@@ -93,7 +93,7 @@ extension AgentLoop {
         let draftModel = self.draftModel
         let promptCache = self.promptCache
         let promptCacheStats = self.promptCacheStats
-        let result = try await modelContainer.perform { [currentGenerationConfig, frontend, chatML, templateMessages, enableThinking, imageURLs, vlmMessageData, vlmLastUserIndex, shouldUseProcessorPath, isVLM, dialect, draftModel, promptCache, promptCacheStats] context in
+        let result = try await modelContainer.perform { [currentGenerationConfig, frontend, chatML, templateMessages, enableThinking, imageURLs, vlmMessageData, vlmLastUserIndex, shouldUseProcessorPath, isVLM, dialect, draftModel, promptCache, promptCacheStats] (context: ModelContext) in
             if Task.isCancelled { throw CancellationError() }
             var hasTokenProcessingEnded = false
             var hasGenerationStarted = false
@@ -764,7 +764,7 @@ extension AgentLoop {
             }
             rawResponseText = rawResponseText.trimmingCharacters(in: .whitespacesAndNewlines)
 
-            return (text: rawResponseText, writer: writer, startedThinking: actuallyStartedThinking, turnStats: capturedTurnStats)
+            return (text: rawResponseText, writer: writer, startedThinking: actuallyStartedThinking, turnStats: capturedTurnStats, finishReason: nil as String?)
         }
 
         return result

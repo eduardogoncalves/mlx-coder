@@ -359,21 +359,10 @@ public actor AgentLoop {
             // drain below handles the normal path, but the malformed-tool-call path uses
             // `continue` to skip it — so we drain here too to guarantee the model sees
             // the correction prompt on its next attempt.
-            if !steeringQueue.isEmpty {
-                let pending = steeringQueue
-                steeringQueue.removeAll()
-                for item in pending {
-                    frontend.emitStatus("↩️  Steering: \(item.message)")
-                    switch item.origin {
-                    case .human:     history.addUser(item.message)
-                    case .automated: history.addAutomated(item.message)
-                    }
-                    await hooks.emit(.steeringInjected(message: item.message))
-                }
-            }
+            _ = await drainSteeringQueue()
 
             // Generate response
-            let generationResult: (text: String, writer: StreamingToolCallWriter, startedThinking: Bool, turnStats: (promptTokens: Int, completionTokens: Int, elapsed: TimeInterval, tokensPerSecond: Double?)?)
+            let generationResult: (text: String, writer: StreamingToolCallWriter, startedThinking: Bool, turnStats: (promptTokens: Int, completionTokens: Int, elapsed: TimeInterval, tokensPerSecond: Double?)?, finishReason: String?)
             do {
                 generationResult = try await generateResponse()
             } catch is CancellationError {
@@ -415,6 +404,7 @@ public actor AgentLoop {
             let response = generationResult.text
             let writer = generationResult.writer
             let startedThinking = generationResult.startedThinking
+            let finishReason = generationResult.finishReason
             if let stats = generationResult.turnStats {
                 turnTotalPromptTokens += stats.promptTokens
                 turnTotalCompletionTokens += stats.completionTokens
@@ -483,6 +473,20 @@ public actor AgentLoop {
                 (toolCalls.isEmpty && streamedCalls.isEmpty && ToolCallParser.containsToolCall(response, dialect: toolCallDialect, startsThinking: startedThinking))
                 || responseLooksLikeBareJSONToolCall
 
+            if toolCalls.isEmpty && streamedCalls.isEmpty && finishReason == "length" && !hasMalformedToolCall {
+                // Generation was cut off by the server's token limit mid-thought, before
+                // any tool call was emitted. Treat the fragment as transient and ask the
+                // model to continue — otherwise a truncated line is accepted as the final
+                // answer (and, for sub-agents, becomes the digest summary).
+                history.addAssistant(response, transient: true)
+                frontend.emitStatus("Response truncated (length limit); asking the model to continue.", severity: .warning)
+                steeringQueue.append(.init(
+                    message: "Your previous response was cut off because it hit the length limit. Continue from where you left off and complete your response, then make any tool call you intended.",
+                    origin: .automated))
+                iterations += 1
+                continue
+            }
+
             if toolCalls.isEmpty && streamedCalls.isEmpty {
                 if hasMalformedToolCall {
                     // Rejected generation attempt — kept in context so the model can
@@ -520,6 +524,14 @@ public actor AgentLoop {
 
                 // No tool calls — this is the final response
                 history.addAssistant(response)
+
+                // If the user queued steering while this plain reply was streaming, don't
+                // finalize the turn — keep the reply in history, drain the queue, and loop
+                // so the model responds now instead of waiting for the next user message.
+                if await drainSteeringQueue() {
+                    iterations += 1
+                    continue
+                }
 
                 // Turn completed successfully: drop the ephemeral recovery artifacts
                 // (malformed attempts, failed tool-call iterations, automated steering)
@@ -732,18 +744,7 @@ public actor AgentLoop {
 
             // After processing all tool calls for this turn, drain the steering queue.
             // Steering messages redirect the agent on the next generation turn.
-            if !steeringQueue.isEmpty {
-                let pending = steeringQueue
-                steeringQueue.removeAll()
-                for item in pending {
-                    frontend.emitStatus("↩️  Steering: \(item.message)")
-                    switch item.origin {
-                    case .human:     history.addUser(item.message)
-                    case .automated: history.addAutomated(item.message)
-                    }
-                    await hooks.emit(.steeringInjected(message: item.message))
-                }
-            }
+            _ = await drainSteeringQueue()
         }
 
         // Turn is ending (iteration cap reached); still drop transient recovery
@@ -756,6 +757,23 @@ public actor AgentLoop {
     }
 
     // MARK: - Private Helpers (used only by processUserMessage)
+
+    /// Drains queued steering messages into history, emitting status + hooks.
+    /// Returns true if anything was drained.
+    private func drainSteeringQueue() async -> Bool {
+        guard !steeringQueue.isEmpty else { return false }
+        let pending = steeringQueue
+        steeringQueue.removeAll()
+        for item in pending {
+            frontend.emitStatus("↩️  Steering: \(item.message)")
+            switch item.origin {
+            case .human:     history.addUser(item.message)
+            case .automated: history.addAutomated(item.message)
+            }
+            await hooks.emit(.steeringInjected(message: item.message))
+        }
+        return true
+    }
 
     /// Commits a partially-streamed write to its target path, records the
     /// recovery as an assistant turn + tool response, and steers the model to
