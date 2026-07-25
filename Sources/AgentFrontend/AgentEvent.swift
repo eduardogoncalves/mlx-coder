@@ -140,11 +140,43 @@ public struct StatsSnapshot: Sendable {
     public let tokensPerSecond: Double
     public let promptTokens: Int
     public let promptTokensPerSecond: Double
-    public init(generationTokens: Int, tokensPerSecond: Double, promptTokens: Int, promptTokensPerSecond: Double) {
+    /// Wall-clock time this round of generation took. Drives the elapsed
+    /// segment of `formatted`; 0 renders as `0.0s`.
+    public let elapsed: TimeInterval
+    public init(
+        generationTokens: Int,
+        tokensPerSecond: Double,
+        promptTokens: Int,
+        promptTokensPerSecond: Double,
+        elapsed: TimeInterval = 0
+    ) {
         self.generationTokens = generationTokens
         self.tokensPerSecond = tokensPerSecond
         self.promptTokens = promptTokens
         self.promptTokensPerSecond = promptTokensPerSecond
+        self.elapsed = elapsed
+    }
+
+    /// Canonical one-line render — `↑ <prompt> · ↓ <gen> tokens · <elapsed>
+    /// [· <tps> tok/s]` — shared by the per-message stats line and the
+    /// turn-total appended to "Turn complete." so both always match.
+    public var formatted: String {
+        func kilo(_ n: Int) -> String {
+            n >= 1000 ? String(format: "%.1fk", Double(n) / 1000) : "\(n)"
+        }
+        let elapsedStr: String
+        if elapsed >= 60 {
+            let m = Int(elapsed) / 60
+            let s = Int(elapsed) % 60
+            elapsedStr = "\(m)m \(s)s"
+        } else {
+            elapsedStr = String(format: "%.1fs", elapsed)
+        }
+        var result = "↑ \(kilo(promptTokens)) · ↓ \(kilo(generationTokens)) tokens · \(elapsedStr)"
+        if tokensPerSecond > 0 {
+            result += String(format: " · %.1f tok/s", tokensPerSecond)
+        }
+        return result
     }
 }
 

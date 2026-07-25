@@ -420,6 +420,19 @@ public actor AgentLoop {
                 turnTotalCompletionTokens += stats.completionTokens
                 turnTotalElapsed += stats.elapsed
                 hasTurnStats = true
+                // Per-message stats: surface this round's own cost right after
+                // its assistant message so the user can see which step spent
+                // what. The turn-complete line still shows the running sum of
+                // every round (see the `hasTurnStats` block on the exit path).
+                let roundTps = stats.tokensPerSecond
+                    ?? (stats.elapsed > 0 ? Double(stats.completionTokens) / stats.elapsed : 0)
+                frontend.emit(.stats(StatsSnapshot(
+                    generationTokens: stats.completionTokens,
+                    tokensPerSecond: roundTps,
+                    promptTokens: stats.promptTokens,
+                    promptTokensPerSecond: 0,
+                    elapsed: stats.elapsed
+                )))
             }
 
             // Get streamed tool calls from the writer

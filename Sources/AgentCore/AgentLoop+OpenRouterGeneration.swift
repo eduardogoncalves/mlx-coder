@@ -182,21 +182,14 @@ extension AgentLoop {
         elapsed: TimeInterval,
         tokensPerSecond: Double? = nil
     ) -> String {
-        func kilo(_ n: Int) -> String {
-            n >= 1000 ? String(format: "%.1fk", Double(n) / 1000) : "\(n)"
-        }
-        let elapsedStr: String
-        if elapsed >= 60 {
-            let m = Int(elapsed) / 60
-            let s = Int(elapsed) % 60
-            elapsedStr = "\(m)m \(s)s"
-        } else {
-            elapsedStr = String(format: "%.1fs", elapsed)
-        }
-        var result = "↑ \(kilo(promptTokens)) · ↓ \(kilo(completionTokens)) tokens · \(elapsedStr)"
-        if let tps = tokensPerSecond, tps > 0 {
-            result += String(format: " · %.1f tok/s", tps)
-        }
-        return result
+        // Single source of truth: `StatsSnapshot.formatted` renders both this
+        // (the turn-total) and the per-message stats line.
+        StatsSnapshot(
+            generationTokens: completionTokens,
+            tokensPerSecond: tokensPerSecond ?? 0,
+            promptTokens: promptTokens,
+            promptTokensPerSecond: 0,
+            elapsed: elapsed
+        ).formatted
     }
 }

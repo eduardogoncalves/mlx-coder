@@ -102,7 +102,7 @@ public final class DebugEventFrontend: AgentFrontend, @unchecked Sendable {
             log("[\(ts)] error: \(err)")
 
         case .stats(let s):
-            log("[\(ts)] stats: \(s.generationTokens) tokens @ \(String(format: "%.1f", s.tokensPerSecond)) tok/s")
+            log("[\(ts)] stats: \(s.formatted)")
 
         case .subAgentActivity(let activity):
             switch activity {

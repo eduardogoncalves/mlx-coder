@@ -168,13 +168,9 @@ public final class LegacyTerminalFrontend: AgentFrontend, @unchecked Sendable {
             renderer.printError(text)
 
         case .stats(let stats):
-            let msg = String(
-                format: "Generated %d tokens (%.1f tok/s), prompt: %d tokens (%.1f tok/s)",
-                stats.generationTokens, stats.tokensPerSecond,
-                stats.promptTokens, stats.promptTokensPerSecond
-            )
+            // Per-message generation stats — same shape as the turn-total line.
             print()
-            renderer.printStatus(msg)
+            renderer.printStatus(stats.formatted)
             print()
 
         case .modeChanged(let snap):

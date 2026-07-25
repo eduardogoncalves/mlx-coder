@@ -407,15 +407,16 @@ public final class SwiftCoderTUIFrontend: AgentFrontend, @unchecked Sendable {
             }
 
         case .stats(let stats):
+            // Per-message generation stats, printed as a dim line right after
+            // the round's assistant message. Same `↑ ↓ · s · tok/s` shape as
+            // the turn-total appended to "Turn complete." For remote providers
+            // these can arrive before generationActivity.ended, so finalize the
+            // live generation UI first, just like the turn-total path above.
+            if tokenProcessingActive || generationActive || thinkingActive || pendingGenerationEnd {
+                await finalizeGenerationUI()
+            }
             await renderer.flushStreamLine()
-            let entry = SessionEntry(
-                role: .stats,
-                content: "",
-                tokenCount: stats.generationTokens,
-                tokensPerSecond: stats.tokensPerSecond,
-                elapsed: 0
-            )
-            await renderer.printScrollLine(entry.render())
+            await renderer.printScrollLine("\(DesignSystem.dim)· \(stats.formatted)\(DesignSystem.reset)")
 
         case .modeChanged(let mode):
             if let modeIndex = modeIndex(for: mode) {
