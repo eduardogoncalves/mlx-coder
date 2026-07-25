@@ -24,6 +24,22 @@ mlx-coder is built to run local LLM workflows on macOS with a native MLX app arc
 - **Swift 6.3.1** / Xcode 16.4+
 - A local MLX model or a configured remote provider (default local model: `mlx-community/Qwen3.5-9B-5bit` — downloaded automatically from Hugging Face Hub on first use)
 
+## Install
+
+The simplest, trust-warning-free way to install on macOS is Homebrew — a
+`brew`-installed CLI is not quarantined, so Gatekeeper stays out of the way:
+
+```bash
+brew install eduardogoncalves/tap/mlx-coder
+mlx-coder --version
+```
+
+Prefer building it yourself, or downloading a `.pkg`/`.tar.gz` from
+[Releases](https://github.com/eduardogoncalves/mlx-coder/releases)? See the
+[Installation Guide](INSTALL.md) — note that direct downloads need a one-time
+`xattr -d com.apple.quarantine` step because the artifacts are not yet
+Apple-signed/notarized.
+
 ## Building
 
 Related docs:
