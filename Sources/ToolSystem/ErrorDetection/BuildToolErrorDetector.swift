@@ -72,7 +72,7 @@ public actor BuildToolErrorDetector {
         ]
         process.currentDirectoryURL = URL(fileURLWithPath: projectInfo.buildWorkingDirectory)
         
-        let (output, _) = try runProcess(process)
+        let (output, _) = try await runProcess(process)
         
         // Parse .NET build output for errors
         return parseNetErrors(output)
@@ -96,7 +96,7 @@ public actor BuildToolErrorDetector {
         process.currentDirectoryURL = URL(fileURLWithPath: projectInfo.buildWorkingDirectory)
         
         // This might fail, which is expected if build fails
-        let (output, _) = try runProcess(process, allowNonZeroExit: true)
+        let (output, _) = try await runProcess(process, allowNonZeroExit: true)
         
         return parseNodeErrors(output)
     }
@@ -107,7 +107,7 @@ public actor BuildToolErrorDetector {
         process.arguments = ["build", "./..."]
         process.currentDirectoryURL = URL(fileURLWithPath: projectInfo.buildWorkingDirectory)
         
-        let (_, errors) = try runProcess(process, allowNonZeroExit: true)
+        let (_, errors) = try await runProcess(process, allowNonZeroExit: true)
         
         return parseGoErrors(errors)
     }
@@ -118,7 +118,7 @@ public actor BuildToolErrorDetector {
         process.arguments = ["check", "--message-format", "json"]
         process.currentDirectoryURL = URL(fileURLWithPath: projectInfo.buildWorkingDirectory)
         
-        let (output, _) = try runProcess(process, allowNonZeroExit: true)
+        let (output, _) = try await runProcess(process, allowNonZeroExit: true)
         
         return parseRustErrors(output)
     }
@@ -130,7 +130,7 @@ public actor BuildToolErrorDetector {
         process.arguments = ["-m", "py_compile", "."]
         process.currentDirectoryURL = URL(fileURLWithPath: projectInfo.buildWorkingDirectory)
         
-        let (_, errors) = try runProcess(process, allowNonZeroExit: true)
+        let (_, errors) = try await runProcess(process, allowNonZeroExit: true)
         
         return parsePythonErrors(errors)
     }
@@ -320,72 +320,40 @@ public actor BuildToolErrorDetector {
     
     // MARK: - Utilities
     
-    private func runProcess(_ process: Process, allowNonZeroExit: Bool = false) throws -> (stdout: String, stderr: String) {
+    private func runProcess(_ process: Process, allowNonZeroExit: Bool = false) async throws -> (stdout: String, stderr: String) {
         let stdoutPipe = Pipe()
         let stderrPipe = Pipe()
 
         process.standardOutput = stdoutPipe
         process.standardError = stderrPipe
 
-        // Install readability handlers BEFORE the child starts so it can
-        // produce output of arbitrary size without blocking on the pipe.
-        // Without this, `swift build` / `tsc` / `cargo` output (frequently
-        // hundreds of KiB of warnings) overflows the kernel pipe buffer and
-        // wedges the loop below forever.
-        let collector = PipeOutputCollector()
-        stdoutPipe.fileHandleForReading.readabilityHandler = { handle in
-            let data = handle.availableData
-            if data.isEmpty {
-                handle.readabilityHandler = nil
-                return
-            }
-            collector.appendStdout(data)
-        }
-        stderrPipe.fileHandleForReading.readabilityHandler = { handle in
-            let data = handle.availableData
-            if data.isEmpty {
-                handle.readabilityHandler = nil
-                return
-            }
-            collector.appendStderr(data)
-        }
-
         try process.run()
 
-        // Cooperative timeout: poll until the deadline. `terminate()` is a
-        // no-op if the child has already exited, so we don't need an
-        // `isRunning` TOCTOU check around it.
-        let stopDate = Date().addingTimeInterval(timeout)
-        while process.isRunning && Date() < stopDate {
-            usleep(100_000) // 100ms
-        }
+        // Off-pool wait with a hard deadline: `detect(workspace:projectInfo:)`
+        // runs on this actor, so a synchronous `waitUntilExit()` (or the
+        // previous `while process.isRunning { usleep(...) }` busy-poll, which
+        // is just as bad — it parks the calling thread the whole time) would
+        // park a cooperative-pool thread for up to `timeout`, starving every
+        // other component relying on `Task.sleep`-based timeouts. See
+        // `ProcessIO.drainAndWaitDataAsync` / `GitService.runGitCommand` for
+        // the same pattern.
+        let startedAt = Date()
+        ToolTimingLog.log("build check start: \(process.executableURL?.lastPathComponent ?? "process") (timeout=\(timeout)s)")
+        let (outData, errData, timedOut) = await ProcessIO.drainAndWaitDataAsync(
+            process: process,
+            stdoutPipe: stdoutPipe,
+            stderrPipe: stderrPipe,
+            timeout: timeout
+        )
+        let elapsed = Date().timeIntervalSince(startedAt)
+        ToolTimingLog.log("build check end: \(process.executableURL?.lastPathComponent ?? "process") elapsed=\(String(format: "%.2f", elapsed))s timedOut=\(timedOut)")
 
-        if process.isRunning {
-            process.terminate()
-            // Wait for terminate to take effect so the handlers settle and
-            // we don't leak a still-running child past this scope.
-            process.waitUntilExit()
-            stdoutPipe.fileHandleForReading.readabilityHandler = nil
-            stderrPipe.fileHandleForReading.readabilityHandler = nil
+        if timedOut {
             throw NSError(domain: "BuildToolErrorDetector", code: -1, userInfo: [NSLocalizedDescriptionKey: "Build check timed out"])
         }
 
-        // Make sure we have collected all bytes the child emitted before we
-        // read termination status. Uses a non-blocking read (see
-        // `ProcessIO.nonBlockingDrain`) — a detached grandchild (e.g. an
-        // MSBuild node-reuse worker) can still hold the pipe's write end
-        // open after `waitUntilExit` returns, and a blocking `.availableData`
-        // read here would then hang forever.
-        process.waitUntilExit()
-        stdoutPipe.fileHandleForReading.readabilityHandler = nil
-        stderrPipe.fileHandleForReading.readabilityHandler = nil
-        let tailOut = ProcessIO.nonBlockingDrain(stdoutPipe.fileHandleForReading)
-        let tailErr = ProcessIO.nonBlockingDrain(stderrPipe.fileHandleForReading)
-        if !tailOut.isEmpty { collector.appendStdout(tailOut) }
-        if !tailErr.isEmpty { collector.appendStderr(tailErr) }
-
-        let stdout = String(data: collector.stdoutSnapshot(), encoding: .utf8) ?? ""
-        let stderr = String(data: collector.stderrSnapshot(), encoding: .utf8) ?? ""
+        let stdout = String(data: outData, encoding: .utf8) ?? ""
+        let stderr = String(data: errData, encoding: .utf8) ?? ""
 
         if !allowNonZeroExit && process.terminationStatus != 0 {
             // Include both stdout and stderr in the diagnostic — many build

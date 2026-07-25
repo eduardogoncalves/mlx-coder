@@ -64,7 +64,9 @@ public struct GrepTool: Tool {
         // large workspace can easily emit tens of MiB of matches, far past
         // the kernel pipe buffer (~16-64 KiB). Without concurrent draining
         // the child blocks in `write(2)` and `waitUntilExit` never returns.
-        let (output, _) = ProcessIO.drainAndWait(
+        // Waits off the cooperative-pool thread (this `execute` runs on an
+        // async context) so a slow/large search can't park a pool thread.
+        let (output, _, _) = await ProcessIO.drainAndWaitAsync(
             process: process,
             stdoutPipe: pipe,
             stderrPipe: errPipe

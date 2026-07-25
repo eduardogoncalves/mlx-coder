@@ -9,6 +9,22 @@ public actor GitService {
         public let branch: String?
     }
 
+    /// Wall-clock timeout applied to every `git` subprocess invocation
+    /// (`runGitCommand`). Without a deadline, a stalled network `push`/
+    /// `pull`/`fetch` against a black-holed remote blocks this actor —
+    /// and therefore every other queued `GitService` call — forever.
+    ///
+    /// Not `private`: it's used as a default-parameter value on `public`
+    /// methods, and a default-value expression must be at least as visible
+    /// as the parameter it defaults.
+    public static let gitCommandTimeout: TimeInterval = 120
+
+    /// Wall-clock timeout applied to `runVerification` (arbitrary lint/
+    /// build/test commands). Longer than `gitCommandTimeout` since builds
+    /// legitimately take longer than a git round-trip, but still bounded so
+    /// a hung verification command can't wedge this actor indefinitely.
+    public static let verificationCommandTimeout: TimeInterval = 300
+
     private let projectRoot: String
     
     public init(projectRoot: String) throws {
@@ -44,99 +60,99 @@ public actor GitService {
     }
     
     /// Initialize git repository
-    public func initializeRepository() throws -> String {
+    public func initializeRepository() async throws -> String {
         let gitDir = (projectRoot as NSString).appendingPathComponent(".git")
         let fileManager = FileManager.default
         var isDir: ObjCBool = false
         guard !(fileManager.fileExists(atPath: gitDir, isDirectory: &isDir) && isDir.boolValue) else {
             return "Repository already initialized"
         }
-        
-        let output = try runGitCommand(["init"], cwd: projectRoot)
-        _ = try runGitCommand(["config", "user.email", "agent@mlx-coder.local"], cwd: projectRoot)
-        _ = try runGitCommand(["config", "user.name", "Native Agent"], cwd: projectRoot)
-        
+
+        let output = try await runGitCommand(["init"], cwd: projectRoot)
+        _ = try await runGitCommand(["config", "user.email", "agent@mlx-coder.local"], cwd: projectRoot)
+        _ = try await runGitCommand(["config", "user.name", "Native Agent"], cwd: projectRoot)
+
         // Create initial commit if there are files to commit
-        let statusOutput = try runGitCommand(["status", "--porcelain"], cwd: projectRoot)
+        let statusOutput = try await runGitCommand(["status", "--porcelain"], cwd: projectRoot)
         if !statusOutput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            _ = try runGitCommand(["add", "."], cwd: projectRoot)
-            _ = try runGitCommand(["commit", "-m", "Initial commit by mlx-coder"], cwd: projectRoot)
+            _ = try await runGitCommand(["add", "."], cwd: projectRoot)
+            _ = try await runGitCommand(["commit", "-m", "Initial commit by mlx-coder"], cwd: projectRoot)
         }
-        
+
         return output.trimmingCharacters(in: .whitespacesAndNewlines)
     }
-    
+
     /// Get current branch name
-    public func getCurrentBranch(in workingDirectory: String? = nil) throws -> String {
+    public func getCurrentBranch(in workingDirectory: String? = nil) async throws -> String {
         guard isRepositoryInitialized() else {
             throw GitError.repositoryNotInitialized
         }
 
         let cwd = resolveWorkingDirectory(workingDirectory)
-        let output = try runGitCommand(["rev-parse", "--abbrev-ref", "HEAD"], cwd: cwd)
+        let output = try await runGitCommand(["rev-parse", "--abbrev-ref", "HEAD"], cwd: cwd)
         return output.trimmingCharacters(in: .whitespacesAndNewlines)
     }
-    
+
     /// Check if repository has remote origin
-    public func hasRemote() throws -> Bool {
+    public func hasRemote() async throws -> Bool {
         guard isRepositoryInitialized() else {
             return false
         }
-        
+
         do {
-            let output = try runGitCommand(["remote", "get-url", "origin"], cwd: projectRoot)
+            let output = try await runGitCommand(["remote", "get-url", "origin"], cwd: projectRoot)
             let url = output.trimmingCharacters(in: .whitespacesAndNewlines)
             return !url.isEmpty && !url.contains("fatal:")
         } catch {
             return false
         }
     }
-    
+
     /// Get list of available branches
-    public func listBranches() throws -> [String] {
+    public func listBranches() async throws -> [String] {
         guard isRepositoryInitialized() else {
             throw GitError.repositoryNotInitialized
         }
-        
-        let output = try runGitCommand(["branch", "-a"], cwd: projectRoot)
+
+        let output = try await runGitCommand(["branch", "-a"], cwd: projectRoot)
         let branches = output.components(separatedBy: "\n")
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty }
             .map { $0.hasPrefix("* ") ? String($0.dropFirst(2)) : $0 }
-        
+
         return branches
     }
 
     /// Get list of local branches only.
-    public func listLocalBranches() throws -> [String] {
+    public func listLocalBranches() async throws -> [String] {
         guard isRepositoryInitialized() else {
             throw GitError.repositoryNotInitialized
         }
 
-        let output = try runGitCommand(["branch", "--format=%(refname:short)"], cwd: projectRoot)
+        let output = try await runGitCommand(["branch", "--format=%(refname:short)"], cwd: projectRoot)
         return output
             .components(separatedBy: "\n")
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
     }
-    
+
     /// Create a new worktree for a branch
-    public func createWorktree(branchName: String, fromBranch: String = "main") throws -> String {
+    public func createWorktree(branchName: String, fromBranch: String = "main") async throws -> String {
         guard isRepositoryInitialized() else {
             throw GitError.repositoryNotInitialized
         }
-        
+
         // Validate branch name format (accept both auto-generated and custom)
         guard BranchNamer.isValidBranchName(branchName) || BranchNamer.isValidCustomBranchName(branchName) else {
             throw GitError.invalidBranchName(branchName)
         }
-        
+
         // Create worktree directory path (absolute path)
         let worktreeDir = (projectRoot as NSString).appendingPathComponent(".mlx-coder-work-\(UUID().uuidString.prefix(8))")
-        
+
         do {
             // Create worktree with new branch based on fromBranch
-            _ = try runGitCommand(
+            _ = try await runGitCommand(
                 ["worktree", "add", "-b", branchName, worktreeDir, fromBranch],
                 cwd: projectRoot
             )
@@ -163,28 +179,28 @@ public actor GitService {
     }
     
     /// Commit staged changes
-    public func commit(message: String, in workingDirectory: String? = nil) throws -> String {
+    public func commit(message: String, in workingDirectory: String? = nil) async throws -> String {
         guard isRepositoryInitialized() else {
             throw GitError.repositoryNotInitialized
         }
-        
+
         guard !message.trimmingCharacters(in: .whitespaces).isEmpty else {
             throw GitError.commitFailed(reason: "Commit message cannot be empty")
         }
-        
+
         do {
             // Check if there are changes to commit
             let cwd = resolveWorkingDirectory(workingDirectory)
-            let statusOutput = try runGitCommand(["status", "--porcelain"], cwd: cwd)
+            let statusOutput = try await runGitCommand(["status", "--porcelain"], cwd: cwd)
             guard !statusOutput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                 throw GitError.nothingToCommit
             }
-            
+
             // Stage all changes
-            _ = try runGitCommand(["add", "-A"], cwd: cwd)
-            
+            _ = try await runGitCommand(["add", "-A"], cwd: cwd)
+
             // Commit
-            let output = try runGitCommand(["commit", "-m", message], cwd: cwd)
+            let output = try await runGitCommand(["commit", "-m", message], cwd: cwd)
             return output.trimmingCharacters(in: .whitespacesAndNewlines)
         } catch GitError.nothingToCommit {
             throw GitError.nothingToCommit
@@ -192,21 +208,21 @@ public actor GitService {
             throw GitError.commitFailed(reason: error.localizedDescription)
         }
     }
-    
+
     /// Push current branch to remote
-    public func push(in workingDirectory: String? = nil) throws -> String {
+    public func push(in workingDirectory: String? = nil) async throws -> String {
         guard isRepositoryInitialized() else {
             throw GitError.repositoryNotInitialized
         }
-        
-        guard try hasRemote() else {
+
+        guard try await hasRemote() else {
             throw GitError.remoteNotConfigured
         }
-        
+
         do {
             let cwd = resolveWorkingDirectory(workingDirectory)
-            let currentBranch = try getCurrentBranch(in: cwd)
-            let output = try runGitCommand(
+            let currentBranch = try await getCurrentBranch(in: cwd)
+            let output = try await runGitCommand(
                 ["push", "-u", "origin", currentBranch],
                 cwd: cwd
             )
@@ -215,35 +231,35 @@ public actor GitService {
             throw GitError.pushFailed(reason: error.localizedDescription)
         }
     }
-    
+
     /// Get git log for current branch vs base branch
-    public func getCommitsSince(baseBranch: String, in workingDirectory: String? = nil) throws -> [String] {
+    public func getCommitsSince(baseBranch: String, in workingDirectory: String? = nil) async throws -> [String] {
         guard isRepositoryInitialized() else {
             throw GitError.repositoryNotInitialized
         }
 
         let cwd = resolveWorkingDirectory(workingDirectory)
-        let output = try runGitCommand(
+        let output = try await runGitCommand(
             ["log", "\(baseBranch)..HEAD", "--pretty=format:%h %s"],
             cwd: cwd
         )
-        
+
         let commits = output.components(separatedBy: "\n")
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty }
-        
+
         return commits
     }
 
     /// Keep base branch up to date with origin when a remote exists.
-    public func syncBaseBranch(_ baseBranch: String) throws -> String {
-        guard try hasRemote() else {
+    public func syncBaseBranch(_ baseBranch: String) async throws -> String {
+        guard try await hasRemote() else {
             return "No remote configured - skipping '\(baseBranch)' sync"
         }
 
         do {
-            _ = try runGitCommand(["checkout", baseBranch], cwd: projectRoot)
-            let output = try runGitCommand(["pull", "--ff-only", "origin", baseBranch], cwd: projectRoot)
+            _ = try await runGitCommand(["checkout", baseBranch], cwd: projectRoot)
+            let output = try await runGitCommand(["pull", "--ff-only", "origin", baseBranch], cwd: projectRoot)
             return output.trimmingCharacters(in: .whitespacesAndNewlines)
         } catch {
             throw GitError.gitCommandFailed(
@@ -254,18 +270,18 @@ public actor GitService {
     }
 
     /// Return review log between base branch and HEAD.
-    public func getCommitLogSince(baseBranch: String, in workingDirectory: String? = nil) throws -> String {
+    public func getCommitLogSince(baseBranch: String, in workingDirectory: String? = nil) async throws -> String {
         guard isRepositoryInitialized() else {
             throw GitError.repositoryNotInitialized
         }
 
         let cwd = resolveWorkingDirectory(workingDirectory)
-        let output = try runGitCommand(["log", "\(baseBranch)..HEAD", "--oneline"], cwd: cwd)
+        let output = try await runGitCommand(["log", "\(baseBranch)..HEAD", "--oneline"], cwd: cwd)
         return output.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     /// Return diff between base branch and HEAD.
-    public func getDiff(baseBranch: String, in workingDirectory: String? = nil, filePath: String? = nil) throws -> String {
+    public func getDiff(baseBranch: String, in workingDirectory: String? = nil, filePath: String? = nil) async throws -> String {
         guard isRepositoryInitialized() else {
             throw GitError.repositoryNotInitialized
         }
@@ -276,32 +292,32 @@ public actor GitService {
             args.append("--")
             args.append(filePath)
         }
-        let output = try runGitCommand(args, cwd: cwd)
+        let output = try await runGitCommand(args, cwd: cwd)
         return output.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     /// Return working tree diff relative to HEAD in the selected working directory.
-    public func getWorkingTreeDiff(in workingDirectory: String? = nil) throws -> String {
+    public func getWorkingTreeDiff(in workingDirectory: String? = nil) async throws -> String {
         guard isRepositoryInitialized() else {
             throw GitError.repositoryNotInitialized
         }
 
         let cwd = resolveWorkingDirectory(workingDirectory)
-        let output = try runGitCommand(["diff", "HEAD"], cwd: cwd)
+        let output = try await runGitCommand(["diff", "HEAD"], cwd: cwd)
         return output.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     /// Merge branch into base branch using `--squash`.
-    public func mergeSquash(baseBranch: String, sourceBranch: String, commitMessage: String) throws -> String {
+    public func mergeSquash(baseBranch: String, sourceBranch: String, commitMessage: String) async throws -> String {
         guard isRepositoryInitialized() else {
             throw GitError.repositoryNotInitialized
         }
 
         do {
-            let baseCwd = try resolveWorktreePath(for: baseBranch) ?? projectRoot
-            _ = try runGitCommand(["checkout", baseBranch], cwd: baseCwd)
-            _ = try runGitCommand(["merge", "--squash", sourceBranch], cwd: baseCwd)
-            let output = try runGitCommand(["commit", "-m", commitMessage], cwd: baseCwd)
+            let baseCwd = try await resolveWorktreePath(for: baseBranch) ?? projectRoot
+            _ = try await runGitCommand(["checkout", baseBranch], cwd: baseCwd)
+            _ = try await runGitCommand(["merge", "--squash", sourceBranch], cwd: baseCwd)
+            let output = try await runGitCommand(["commit", "-m", commitMessage], cwd: baseCwd)
             return output.trimmingCharacters(in: .whitespacesAndNewlines)
         } catch {
             throw GitError.mergeFailed(reason: error.localizedDescription)
@@ -309,15 +325,15 @@ public actor GitService {
     }
 
     /// Merge branch into base branch preserving history.
-    public func mergeNoFastForward(baseBranch: String, sourceBranch: String, mergeMessage: String) throws -> String {
+    public func mergeNoFastForward(baseBranch: String, sourceBranch: String, mergeMessage: String) async throws -> String {
         guard isRepositoryInitialized() else {
             throw GitError.repositoryNotInitialized
         }
 
         do {
-            let baseCwd = try resolveWorktreePath(for: baseBranch) ?? projectRoot
-            _ = try runGitCommand(["checkout", baseBranch], cwd: baseCwd)
-            let output = try runGitCommand(["merge", "--no-ff", sourceBranch, "-m", mergeMessage], cwd: baseCwd)
+            let baseCwd = try await resolveWorktreePath(for: baseBranch) ?? projectRoot
+            _ = try await runGitCommand(["checkout", baseBranch], cwd: baseCwd)
+            let output = try await runGitCommand(["merge", "--no-ff", sourceBranch, "-m", mergeMessage], cwd: baseCwd)
             return output.trimmingCharacters(in: .whitespacesAndNewlines)
         } catch {
             throw GitError.mergeFailed(reason: error.localizedDescription)
@@ -325,19 +341,19 @@ public actor GitService {
     }
 
     /// Rebase branch on base and fast-forward merge into base.
-    public func rebaseAndFastForward(baseBranch: String, sourceBranch: String) throws -> String {
+    public func rebaseAndFastForward(baseBranch: String, sourceBranch: String) async throws -> String {
         guard isRepositoryInitialized() else {
             throw GitError.repositoryNotInitialized
         }
 
         do {
-            let sourceCwd = try resolveWorktreePath(for: sourceBranch) ?? projectRoot
-            let baseCwd = try resolveWorktreePath(for: baseBranch) ?? projectRoot
+            let sourceCwd = try await resolveWorktreePath(for: sourceBranch) ?? projectRoot
+            let baseCwd = try await resolveWorktreePath(for: baseBranch) ?? projectRoot
 
-            _ = try runGitCommand(["checkout", sourceBranch], cwd: sourceCwd)
-            _ = try runGitCommand(["rebase", baseBranch], cwd: sourceCwd)
-            _ = try runGitCommand(["checkout", baseBranch], cwd: baseCwd)
-            let output = try runGitCommand(["merge", "--ff-only", sourceBranch], cwd: baseCwd)
+            _ = try await runGitCommand(["checkout", sourceBranch], cwd: sourceCwd)
+            _ = try await runGitCommand(["rebase", baseBranch], cwd: sourceCwd)
+            _ = try await runGitCommand(["checkout", baseBranch], cwd: baseCwd)
+            let output = try await runGitCommand(["merge", "--ff-only", sourceBranch], cwd: baseCwd)
             return output.trimmingCharacters(in: .whitespacesAndNewlines)
         } catch {
             throw GitError.rebaseFailed(reason: error.localizedDescription)
@@ -345,27 +361,27 @@ public actor GitService {
     }
 
     /// Remove an existing worktree path.
-    public func removeWorktree(path: String) throws {
+    public func removeWorktree(path: String) async throws {
         do {
-            _ = try runGitCommand(["worktree", "remove", path], cwd: projectRoot)
+            _ = try await runGitCommand(["worktree", "remove", path], cwd: projectRoot)
         } catch {
             throw GitError.cleanupFailed(reason: error.localizedDescription)
         }
     }
 
     /// Delete a local branch.
-    public func deleteBranch(_ branchName: String, force: Bool = false) throws {
+    public func deleteBranch(_ branchName: String, force: Bool = false) async throws {
         do {
             let deleteFlag = force ? "-D" : "-d"
-            _ = try runGitCommand(["branch", deleteFlag, branchName], cwd: projectRoot)
+            _ = try await runGitCommand(["branch", deleteFlag, branchName], cwd: projectRoot)
         } catch {
             throw GitError.cleanupFailed(reason: error.localizedDescription)
         }
     }
 
     /// List active worktrees.
-    public func listWorktrees() throws -> [String] {
-        let output = try runGitCommand(["worktree", "list"], cwd: projectRoot)
+    public func listWorktrees() async throws -> [String] {
+        let output = try await runGitCommand(["worktree", "list"], cwd: projectRoot)
         return output
             .split(separator: "\n")
             .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -373,8 +389,8 @@ public actor GitService {
     }
 
     /// List active worktrees with structured path/branch information.
-    public func listWorktreeInfos() throws -> [WorktreeInfo] {
-        let output = try runGitCommand(["worktree", "list", "--porcelain"], cwd: projectRoot)
+    public func listWorktreeInfos() async throws -> [WorktreeInfo] {
+        let output = try await runGitCommand(["worktree", "list", "--porcelain"], cwd: projectRoot)
         let blocks = output
             .split(separator: "\n\n")
             .map(String.init)
@@ -405,16 +421,20 @@ public actor GitService {
     }
 
     /// Prune stale worktree metadata.
-    public func pruneWorktrees() throws {
+    public func pruneWorktrees() async throws {
         do {
-            _ = try runGitCommand(["worktree", "prune"], cwd: projectRoot)
+            _ = try await runGitCommand(["worktree", "prune"], cwd: projectRoot)
         } catch {
             throw GitError.cleanupFailed(reason: error.localizedDescription)
         }
     }
 
     /// Run verification command (e.g. lint/test/build) in the selected working directory.
-    public func runVerification(command: String, in workingDirectory: String? = nil) throws -> String {
+    public func runVerification(
+        command: String,
+        in workingDirectory: String? = nil,
+        timeout: TimeInterval = GitService.verificationCommandTimeout
+    ) async throws -> String {
         let cwd = resolveWorkingDirectory(workingDirectory)
         let shell = Process()
         shell.executableURL = URL(fileURLWithPath: "/bin/zsh")
@@ -431,9 +451,30 @@ public actor GitService {
         shell.standardOutput = stdout
         shell.standardError = stderr
 
+        let startedAt = Date()
+        ToolTimingLog.log("verification start: \(command) (cwd=\(cwd))")
+
         try shell.run()
-        let (out, err) = Self.drainAndWait(process: shell, stdoutPipe: stdout, stderrPipe: stderr)
+        // Off-pool wait (see `runGitCommand`) plus a hard deadline — this
+        // actor must never block indefinitely on an arbitrary verification
+        // command (e.g. a test that itself makes a network call and hangs).
+        let (out, err, timedOut) = await ProcessIO.drainAndWaitAsync(
+            process: shell,
+            stdoutPipe: stdout,
+            stderrPipe: stderr,
+            timeout: timeout
+        )
         let merged = (out + err).trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let elapsed = Date().timeIntervalSince(startedAt)
+        ToolTimingLog.log("verification end: \(command) elapsed=\(String(format: "%.2f", elapsed))s timedOut=\(timedOut)")
+
+        if timedOut {
+            throw GitError.gitCommandFailed(
+                command: command,
+                stderr: "Timed out after \(Int(timeout))s running verification command"
+            )
+        }
 
         guard shell.terminationStatus == 0 else {
             throw GitError.gitCommandFailed(command: command, stderr: merged.isEmpty ? "Command failed" : merged)
@@ -441,9 +482,22 @@ public actor GitService {
 
         return merged
     }
-    
-    /// Run a git command and return output
-    private func runGitCommand(_ args: [String], cwd: String) throws -> String {
+
+    /// Run a git command and return output.
+    ///
+    /// Every invocation is bounded by `timeout` (default `gitCommandTimeout`)
+    /// and waits off the cooperative-pool thread (`ProcessIO.drainAndWaitDataAsync`)
+    /// so a stalled network operation (`push`/`pull`/`fetch` against a
+    /// black-holed remote) can neither wedge this actor forever nor starve
+    /// other components that rely on `Task.sleep`-based timeouts. On
+    /// expiry the child is killed (SIGTERM, then SIGKILL) — best-effort as
+    /// a process-group kill (see `ProcessIO.makeProcessGroupLeader`) so
+    /// transport helper children (e.g. git's http/askpass helpers) die too.
+    private func runGitCommand(
+        _ args: [String],
+        cwd: String,
+        timeout: TimeInterval = GitService.gitCommandTimeout
+    ) async throws -> String {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
         process.arguments = args
@@ -459,16 +513,39 @@ public actor GitService {
         process.standardOutput = standardOutput
         process.standardError = standardError
 
+        let commandDescription = "git \(args.joined(separator: " "))"
+        let startedAt = Date()
+        ToolTimingLog.log("git start: \(commandDescription) (cwd=\(cwd))")
+
         try process.run()
-        let (output, errorOutput) = Self.drainAndWait(
+        // Best-effort process-group leader so a timeout kill can reach
+        // transport helper children, not just the tracked git PID.
+        let isGroupLeader = ProcessIO.makeProcessGroupLeader(process)
+
+        let (outputData, errorData, timedOut) = await ProcessIO.drainAndWaitDataAsync(
             process: process,
             stdoutPipe: standardOutput,
-            stderrPipe: standardError
+            stderrPipe: standardError,
+            timeout: timeout,
+            killProcessGroup: isGroupLeader
         )
+
+        let elapsed = Date().timeIntervalSince(startedAt)
+        ToolTimingLog.log("git end: \(commandDescription) elapsed=\(String(format: "%.2f", elapsed))s timedOut=\(timedOut)")
+
+        let output = String(data: outputData, encoding: .utf8) ?? ""
+        let errorOutput = String(data: errorData, encoding: .utf8) ?? ""
+
+        if timedOut {
+            throw GitError.gitCommandFailed(
+                command: commandDescription,
+                stderr: "Timed out after \(Int(timeout))s waiting for '\(commandDescription)' (likely a stalled network operation)"
+            )
+        }
 
         guard process.terminationStatus == 0 else {
             throw GitError.gitCommandFailed(
-                command: "git \(args.joined(separator: " "))",
+                command: commandDescription,
                 stderr: errorOutput.isEmpty ? "Unknown error" : errorOutput
             )
         }
@@ -476,24 +553,8 @@ public actor GitService {
         return output
     }
 
-    /// Drain stdout and stderr pipes concurrently with the child process to
-    /// avoid the pipe-buffer deadlock that occurs when a child writes more
-    /// than ~16-64 KiB before exiting. Delegates to the shared `ProcessIO`
-    /// helper used across the codebase.
-    private static func drainAndWait(
-        process: Process,
-        stdoutPipe: Pipe,
-        stderrPipe: Pipe
-    ) -> (stdout: String, stderr: String) {
-        return ProcessIO.drainAndWait(
-            process: process,
-            stdoutPipe: stdoutPipe,
-            stderrPipe: stderrPipe
-        )
-    }
-
-    private func resolveWorktreePath(for branch: String) throws -> String? {
-        let infos = try listWorktreeInfos()
+    private func resolveWorktreePath(for branch: String) async throws -> String? {
+        let infos = try await listWorktreeInfos()
         guard let match = infos.first(where: { $0.branch == branch }) else {
             return nil
         }
@@ -538,6 +599,17 @@ public actor GitService {
     private func gitEnvironment() -> [String: String] {
         var env = safeEnvironment()
         let parent = ProcessInfo.processInfo.environment
+
+        // Harden git's network transports against a stalled/black-holed
+        // remote: abort the transfer if throughput drops below ~1000
+        // bytes/sec for more than 15s, and never block waiting on a
+        // credential prompt (which would hang this actor exactly like a
+        // stalled TCP connection — there's no TTY to prompt on here anyway).
+        // These are defaults; a user-set `GIT_*` value re-added below still
+        // wins, so explicit configuration is never clobbered.
+        env["GIT_HTTP_LOW_SPEED_LIMIT"] = "1000"
+        env["GIT_HTTP_LOW_SPEED_TIME"] = "15"
+        env["GIT_TERMINAL_PROMPT"] = "0"
 
         // Auth/transport passthrough keys that are safe (not loader variables).
         let authKeys = [

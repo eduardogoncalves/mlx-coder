@@ -424,6 +424,49 @@ final class GitWorktreeWorkflowTests: XCTestCase {
         XCTAssertEqual(latestMessage, squashMessage)
     }
 
+    /// Regression test for the actor-hang this fix addresses: `GitService`
+    /// subprocess calls (`runGitCommand`/`runVerification`) used to call
+    /// `Process.waitUntilExit()` synchronously with no deadline, so a hung
+    /// child (classically: `git push`/`pull` against a black-holed remote)
+    /// would block this actor — and every other queued `GitService` call —
+    /// forever. `runVerification` exercises the exact same off-pool-wait +
+    /// timeout + hard-kill path `runGitCommand` uses internally, via a public
+    /// `timeout` parameter, without needing a real stalled network remote.
+    ///
+    /// If the fix regressed back to an unbounded `waitUntilExit()`, this test
+    /// would hang for the child's full 30s sleep (and the suite would too).
+    func testRunVerificationTimesOutOnHungCommandInsteadOfHangingTheActor() async throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("git-worktree-verification-timeout-tests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let service = try GitService(projectRoot: tempDir.path)
+
+        let start = Date()
+        do {
+            _ = try await service.runVerification(command: "sleep 30", timeout: 1.0)
+            XCTFail("Expected a hung verification command to time out")
+        } catch let error as GitError {
+            guard case .gitCommandFailed(_, let stderr) = error else {
+                XCTFail("Expected gitCommandFailed, got \(error)")
+                return
+            }
+            XCTAssertTrue(stderr.contains("Timed out"), "Expected a timeout error, got: \(stderr)")
+        }
+        let elapsed = Date().timeIntervalSince(start)
+
+        // Bounded by the 1s timeout plus the SIGKILL escalation grace (2s)
+        // and scheduling slack — must return nowhere near the child's 30s
+        // sleep, and this actor call must not have blocked indefinitely.
+        XCTAssertLessThan(elapsed, 6.0, "GitService.runVerification did not bound a hung command to its timeout")
+
+        // The actor must still be usable afterwards — proves the timed-out
+        // call didn't wedge the actor for subsequent callers.
+        let echoOutput = try await service.runVerification(command: "echo still-alive")
+        XCTAssertEqual(echoOutput, "still-alive")
+    }
+
     private func runGit(_ arguments: [String], cwd: String) throws {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/git")

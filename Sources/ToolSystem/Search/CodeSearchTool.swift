@@ -62,7 +62,10 @@ public struct CodeSearchTool: Tool {
 
             try process.run()
             // Drain concurrently — see GrepTool for the deadlock rationale.
-            let (output, _) = ProcessIO.drainAndWait(
+            // Off-pool wait: this `execute` runs on an async context, and a
+            // synchronous `waitUntilExit()` here would park a
+            // cooperative-pool thread for the duration of the search.
+            let (output, _, _) = await ProcessIO.drainAndWaitAsync(
                 process: process,
                 stdoutPipe: pipe,
                 stderrPipe: errPipe
@@ -80,7 +83,7 @@ public struct CodeSearchTool: Tool {
             allResults.append(contentsOf: lines)
         }
 
-        allResults.append(contentsOf: pathMatches(for: query, in: resolvedPath, language: language))
+        allResults.append(contentsOf: await pathMatches(for: query, in: resolvedPath, language: language))
 
         if allResults.isEmpty {
             return .success("No code symbols matching '\(query)' found")
@@ -141,7 +144,7 @@ public struct CodeSearchTool: Tool {
         return ["--include", "*.\(ext)"]
     }
 
-    private func pathMatches(for query: String, in resolvedPath: String, language: String?) -> [String] {
+    private func pathMatches(for query: String, in resolvedPath: String, language: String?) async -> [String] {
         let process = Process()
         process.executableURL = URL(filePath: "/usr/bin/find")
 
@@ -165,7 +168,8 @@ public struct CodeSearchTool: Tool {
             return []
         }
         // Drain concurrently — see GrepTool for the deadlock rationale.
-        let (output, _) = ProcessIO.drainAndWait(
+        // Off-pool wait — see rationale above.
+        let (output, _, _) = await ProcessIO.drainAndWaitAsync(
             process: process,
             stdoutPipe: pipe,
             stderrPipe: errPipe

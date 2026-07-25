@@ -75,8 +75,10 @@ public struct GlobTool: Tool {
         try process.run()
         // Drain concurrently — `find` over a deep workspace can produce more
         // than the kernel pipe buffer (~16-64 KiB) of paths, deadlocking the
-        // child if we wait for exit before reading.
-        let (output, _) = ProcessIO.drainAndWait(
+        // child if we wait for exit before reading. Off-pool wait — this
+        // `execute` runs on an async context, so a synchronous
+        // `waitUntilExit()` here would park a cooperative-pool thread.
+        let (output, _, _) = await ProcessIO.drainAndWaitAsync(
             process: process,
             stdoutPipe: pipe,
             stderrPipe: errPipe
