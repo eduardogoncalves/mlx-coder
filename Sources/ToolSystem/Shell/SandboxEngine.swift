@@ -136,6 +136,39 @@ public struct SandboxEngine: Sendable {
             }
             .joined(separator: "\n")
 
+        // Metadata-only reads on the workspace's ancestor directories. Tools
+        // that resolve modules or find a project root walk up the directory
+        // tree, `lstat`-ing each parent (npm's arborist is the canonical case:
+        // it fails with `EPERM: lstat '/Users'` when a parent can't be
+        // stat'd). The broad home/`/Users` denies above block that metadata
+        // read. Re-allow `file-read-metadata` — but only via `(literal ...)`
+        // on the exact ancestor paths, never `(subpath ...)`. `literal` matches
+        // that directory alone, so a walk-up can `stat` it without gaining the
+        // ability to read file contents or list siblings' data (that still
+        // needs `file-read-data`, which stays denied).
+        let ancestorMetadataRules = ancestorDirectories(of: canonicalWorkspaceRoot)
+            .map { "        (allow file-read-metadata (literal \"\(escapeForProfileString($0))\"))" }
+            .joined(separator: "\n")
+
+        // Node config store used by the `env-paths`/`Conf` libraries: on macOS
+        // the config dir resolves to ~/Library/Preferences/<name>-nodejs, and
+        // env-paths honours no override env var there, so the BashTool
+        // NPM_CONFIG_* redirects can't retarget it — the access has to be
+        // granted in the profile. Rather than open the whole ~/Library/Preferences
+        // tree (which would expose every app's preference plist to read and
+        // tamper), scope it to the `-nodejs` suffix that env-paths always
+        // appends. A `subpath` can't suffix-match, so use a `regex` anchored at
+        // the Preferences dir and requiring the `-nodejs`-suffixed directory
+        // name; real macOS prefs (com.apple.*, com.google.*, …) never match.
+        // Both write and read are granted: Conf reads its existing config
+        // before writing, and a denied (vs. missing) read throws.
+        let prefsDir = escapeForProfileRegex("\(home)/Library/Preferences")
+        let nodeConfigPattern = escapeForProfileString("^\(prefsDir)/[^/]+-nodejs(/|$)")
+        let nodeConfigRules = [
+            "        (allow file-write* (regex \"\(nodeConfigPattern)\"))",
+            "        (allow file-read* (regex \"\(nodeConfigPattern)\"))",
+        ].joined(separator: "\n")
+
         let networkRule: String
         switch networkPolicy {
         case .allow:
@@ -196,11 +229,39 @@ public struct SandboxEngine: Sendable {
             "        ;; (overrides the broad home-read deny above).",
             readableHomeRules,
             "        ",
+            "        ;; Node env-paths/Conf config dirs (~/Library/Preferences/*-nodejs)",
+            "        ;; only — scoped by suffix so the rest of Preferences stays denied.",
+            nodeConfigRules,
+            "        ",
+            "        ;; Metadata-only reads on the workspace's ancestor dirs so",
+            "        ;; tools that walk up the tree (npm/node, git) can stat them.",
+            ancestorMetadataRules,
+            "        ",
             "        ;; Allow process execution and networking (permissive-open style)",
             "        (allow process*)",
             networkRule,
         ]
         return lines.joined(separator: "\n")
+    }
+
+    /// Returns every ancestor directory of `path`, from the top-level entry
+    /// (`/Users`) down to the immediate parent, excluding `/` itself (always
+    /// readable) and `path`. Used to grant metadata-only reads so directory
+    /// tree walk-ups can `stat` each parent.
+    func ancestorDirectories(of path: String) -> [String] {
+        let components = path
+            .split(separator: "/", omittingEmptySubsequences: true)
+            .map(String.init)
+        guard components.count > 1 else { return [] }
+
+        var ancestors: [String] = []
+        var current = ""
+        // Drop the last component (that's `path` itself, already fully allowed).
+        for component in components.dropLast() {
+            current += "/" + component
+            ancestors.append(current)
+        }
+        return ancestors
     }
 
     private func canonicalWorkspacePath(_ workspaceRoot: String) -> String {
@@ -214,5 +275,24 @@ public struct SandboxEngine: Sendable {
         value
             .replacingOccurrences(of: "\\", with: "\\\\")
             .replacingOccurrences(of: "\"", with: "\\\"")
+    }
+
+    /// Escapes regex metacharacters in a literal path so it can be embedded in
+    /// a Seatbelt `(regex "...")` pattern without the path's own characters
+    /// (e.g. a `.` or `+` in a username) being interpreted as regex operators.
+    /// The result is still passed through `escapeForProfileString` afterwards,
+    /// which doubles any backslashes this adds for the S-expression string
+    /// literal layer.
+    private func escapeForProfileRegex(_ value: String) -> String {
+        let specials: Set<Character> = [
+            "\\", ".", "^", "$", "|", "?", "*", "+", "(", ")", "[", "]", "{", "}",
+        ]
+        var result = ""
+        result.reserveCapacity(value.count)
+        for character in value {
+            if specials.contains(character) { result.append("\\") }
+            result.append(character)
+        }
+        return result
     }
 }

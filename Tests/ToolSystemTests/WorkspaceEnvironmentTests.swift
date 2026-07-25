@@ -118,6 +118,41 @@ final class WorkspaceEnvironmentTests: XCTestCase {
         XCTAssertTrue(result.content.contains("cli_home=/tmp/custom-dotnet-home"))
     }
 
+    func testSandboxedBashRedirectsNodeToolchainToWorkspace() async throws {
+        let workspace = try makeTempWorkspace()
+        defer { try? FileManager.default.removeItem(at: workspace) }
+
+        let permissions = PermissionEngine(workspaceRoot: workspace.path)
+        let tool = BashTool(permissions: permissions, useSandbox: true)
+        let root = permissions.effectiveWorkspaceRoot
+
+        let result = try await tool.execute(arguments: [
+            "command": "echo cache=$NPM_CONFIG_CACHE prefix=$NPM_CONFIG_PREFIX nvm=$NVM_DIR",
+        ])
+
+        XCTAssertFalse(result.isError)
+        XCTAssertTrue(result.content.contains("cache=\(root)/.npm"), result.content)
+        XCTAssertTrue(result.content.contains("prefix=\(root)/.npm-global"), result.content)
+        XCTAssertTrue(result.content.contains("nvm=\(root)/.nvm"), result.content)
+    }
+
+    func testWorkspaceEnvOverridesSandboxNodeDefaults() async throws {
+        let workspace = try makeTempWorkspace()
+        defer { try? FileManager.default.removeItem(at: workspace) }
+
+        try """
+        NPM_CONFIG_PREFIX=/tmp/custom-npm-prefix
+        """.write(to: workspace.appendingPathComponent(WorkspaceEnvironment.fileName), atomically: true, encoding: .utf8)
+
+        let permissions = PermissionEngine(workspaceRoot: workspace.path)
+        let tool = BashTool(permissions: permissions, useSandbox: true)
+
+        let result = try await tool.execute(arguments: ["command": "echo prefix=$NPM_CONFIG_PREFIX"])
+
+        XCTAssertFalse(result.isError)
+        XCTAssertTrue(result.content.contains("prefix=/tmp/custom-npm-prefix"), result.content)
+    }
+
     private func makeTempWorkspace() throws -> URL {
         let root = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
             .appendingPathComponent("mlx-coder-workspace-env-tests-\(UUID().uuidString)", isDirectory: true)

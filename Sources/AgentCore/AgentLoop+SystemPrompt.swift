@@ -79,6 +79,18 @@ extension AgentLoop {
         `--help`, `--help-all`) to learn more. Note that some tools have multiple \
         levels of help, such as `dotnet list --help` and `dotnet list package --help`.
 
+        SANDBOX & PACKAGE MANAGERS: Shell commands run in a workspace sandbox that only \
+        permits writes inside the workspace root. Install and scaffold everything \
+        locally — NEVER install globally or system-wide: no `npm install -g` / `npm i \
+        -g`, `yarn global add`, `pnpm add -g`, `pip install` without `--user`/a venv, \
+        `dotnet tool install -g`, and never `sudo`. Global writes hit denied paths (e.g. \
+        `/opt/homebrew`, `/usr`) and fail with EPERM/permission errors. The npm, nvm, \
+        and dotnet toolchains are already redirected to workspace-local cache/prefix \
+        dirs, so plain `npm install`, `npx create-next-app .`, and `nvm install` work — \
+        run them inside the workspace and let them write there. If a global install \
+        seems required, prefer `npx <pkg>` (no install) or a workspace-local dev \
+        dependency instead.
+
         MEMORY-FIRST POLICY: For workspace-specific operational questions (for example \
         build/test/run/setup commands, prior decisions, gotchas, or project \
         conventions), you MUST query memory first using the available memory tools \

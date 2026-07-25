@@ -316,6 +316,27 @@ public struct BashTool: Tool {
             env["DOTNET_CLI_HOME"] = permissions.effectiveWorkspaceRoot + "/.dotnet"
         }
 
+        // The Node.js toolchain (npm/npx/nvm) has the same home/global-prefix
+        // problem as dotnet under the sandbox: npm's default global prefix is
+        // Homebrew's `/opt/homebrew` (denied for writes) and its cache/config
+        // live under the sandbox-denied home directory, while nvm installs Node
+        // versions under `~/.nvm`. Redirect all of them to workspace-local dirs
+        // so `npm install`, `npm install -g`, `npx`, and `nvm install` write
+        // inside the writable workspace instead of failing with EPERM. Each is
+        // only defaulted when the workspace env hasn't already set it.
+        if useSandbox {
+            let root = permissions.effectiveWorkspaceRoot
+            let nodeDefaults = [
+                "NPM_CONFIG_CACHE": root + "/.npm",
+                "NPM_CONFIG_PREFIX": root + "/.npm-global",
+                "NPM_CONFIG_USERCONFIG": root + "/.npmrc",
+                "NVM_DIR": root + "/.nvm",
+            ]
+            for (key, value) in nodeDefaults where env[key] == nil {
+                env[key] = value
+            }
+        }
+
         // `dotnet build`/`dotnet restore`/`dotnet test` leave a detached
         // MSBuild "node reuse" worker process running in the background by
         // default, to speed up subsequent builds. That worker inherits this
