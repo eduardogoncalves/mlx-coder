@@ -62,9 +62,6 @@ public enum AgentEvent: Sendable {
     /// History compaction happened.
     case contextCompaction(before: Int, after: Int, target: Int, reason: String)
 
-    /// A queued steering message was injected before this turn.
-    case steeringInjected(String)
-
     /// Prompt/token processing lifecycle. This wraps prompt encoding and
     /// preparation *before* inference begins.
     case tokenProcessingActivity(ActivityLifecycle)
@@ -126,7 +123,7 @@ public struct ToolResultSnapshot: Sendable {
 }
 
 public struct StatusMessage: Sendable {
-    public enum Severity: Sendable { case info, success, warning, debug }
+    public enum Severity: Sendable, Equatable { case info, success, warning, debug }
     public let severity: Severity
     public let text: String
     public init(_ text: String, severity: Severity = .info) {

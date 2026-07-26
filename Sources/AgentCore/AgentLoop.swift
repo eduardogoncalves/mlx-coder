@@ -94,6 +94,14 @@ public actor AgentLoop {
     var loadedTurboQuantBits: Int?
     var pendingReload: Bool = false
     var pendingImages: [URL] = []
+    /// One-shot override consumed at the top of `generateResponse()`: when
+    /// true, thinking is force-disabled for the *next* local generation call
+    /// regardless of `thinkingLevel`, then reset back to false. Set after a
+    /// thinking-budget breach (see `ThinkingBudget.swift` /
+    /// `AgentLoop+Generation.swift`) so the immediate follow-up turn doesn't
+    /// just blow through the same budget again while the model is still
+    /// mid-deliberation on the same problem.
+    var forceThinkingOffNextTurn: Bool = false
 
     /// Persistent cross-turn KV (prompt) cache for the plain-text generation path.
     /// Holds the previous turn's KV cache plus the exact tokens it represents so
@@ -128,6 +136,19 @@ public actor AgentLoop {
     let contextReserveTokens: Int = 1024
     /// Number of most-recent conversation turns to always keep verbatim during compaction.
     let contextKeepRecentTurns: Int = 6
+
+    /// Percent-of-window usage at which the proactive mid-run compaction watchdog
+    /// fires (see `AgentLoop+ContextManagement.swift: applyContextWatchdogIfNeeded`
+    /// and `ContextWatchdog`). Mirrors little-coder's `context-watchdog`
+    /// `DEFAULT_PERCENT`. Denominated against `currentGenerationConfig.longContextThreshold`,
+    /// treated as the effective context window.
+    let contextWatchdogThresholdPercent: Double = 80
+    /// Set when a watchdog-triggered compaction ran but failed to free enough
+    /// headroom (or found nothing left to compact) — see `ContextWatchdog.compactionHelped`.
+    /// Prevents immediately firing a second, likely-doomed compaction back-to-back
+    /// (little-coder issue #68). Cleared automatically once usage drops back below
+    /// `contextWatchdogThresholdPercent` (hysteresis; see `ContextWatchdog.shouldReArm`).
+    var contextWatchdogPaused: Bool = false
 
     /// A steering message queued for injection between turns, tagged with its origin so the
     /// drain knows whether to inject it as a human user turn or an agent-authored control notice.
@@ -354,6 +375,7 @@ public actor AgentLoop {
 
         while iterations < maxToolIterations {
             await applyDeterministicContextCompactionIfNeeded(reason: "before_generation")
+            await applyContextWatchdogIfNeeded()
 
             // Flush any pending steering messages before generating. The post-execution
             // drain below handles the normal path, but the malformed-tool-call path uses
@@ -362,7 +384,7 @@ public actor AgentLoop {
             _ = await drainSteeringQueue()
 
             // Generate response
-            let generationResult: (text: String, writer: StreamingToolCallWriter, startedThinking: Bool, turnStats: (promptTokens: Int, completionTokens: Int, elapsed: TimeInterval, tokensPerSecond: Double?)?, finishReason: String?)
+            let generationResult: (text: String, writer: StreamingToolCallWriter, startedThinking: Bool, turnStats: (promptTokens: Int, completionTokens: Int, elapsed: TimeInterval, tokensPerSecond: Double?)?, finishReason: String?, thinkingBudgetBreached: Bool)
             do {
                 generationResult = try await generateResponse()
             } catch is CancellationError {
@@ -370,7 +392,10 @@ public actor AgentLoop {
             } catch {
                 if !hasRetriedFailedTurn {
                     hasRetriedFailedTurn = true
-                    frontend.emitStatus("⚠️  Generation failed: \(error.localizedDescription). Retrying the current turn once.")
+                    frontend.harnessIntervention(
+                        "generation failed (\(error.localizedDescription)) — retrying the current turn once instead of surfacing the failure immediately.",
+                        severity: .warning
+                    )
                     // If a context-overflow error was thrown, force aggressive compaction
                     // before the retry attempt so the reshape crash (local) or the same
                     // oversized request (remote) cannot recur.
@@ -380,7 +405,10 @@ public actor AgentLoop {
                         ? (error as? OpenRouterError)
                         : nil
                     if isLocalContextOverflow || remoteOverflowError != nil {
-                        frontend.emitStatus("⚠️  Context too large — forcing compaction before retry.")
+                        frontend.harnessIntervention(
+                            "the context is too large for a retry — forcing compaction before attempting it again.",
+                            severity: .warning
+                        )
                         // Abandon in-flight recovery artifacts so the emergency
                         // compaction is unblocked (it skips while transient messages
                         // exist) and so malformed attempts never enter a summary.
@@ -473,13 +501,39 @@ public actor AgentLoop {
                 (toolCalls.isEmpty && streamedCalls.isEmpty && ToolCallParser.containsToolCall(response, dialect: toolCallDialect, startsThinking: startedThinking))
                 || responseLooksLikeBareJSONToolCall
 
+            if toolCalls.isEmpty && streamedCalls.isEmpty && generationResult.thinkingBudgetBreached && !hasMalformedToolCall {
+                // The model blew through its thinking-token budget
+                // (`thinkingLevel.budgetTokens`, plus tolerance — see
+                // `ThinkingBudget.swift`) without ever closing its `<think>`
+                // block. `generateResponse()` already force-closed the think
+                // block and stopped consuming further thinking tokens this
+                // round — treat the fragment as transient (it's raw
+                // reasoning, not a real answer), make sure the intervention
+                // is visible, and force thinking off for the immediate
+                // follow-up so it doesn't just re-enter the same spiral.
+                history.addAssistant(response, transient: true)
+                frontend.harnessIntervention(
+                    "the model has thought long enough (past its \(thinkingLevel.displayName) budget without concluding) — stopping deliberation and pushing it to implement now.",
+                    severity: .warning
+                )
+                forceThinkingOffNextTurn = true
+                steeringQueue.append(.init(
+                    message: "You have spent too long thinking without reaching a conclusion. Stop deliberating now and respond with your best answer or make the tool call you were working toward.",
+                    origin: .automated))
+                iterations += 1
+                continue
+            }
+
             if toolCalls.isEmpty && streamedCalls.isEmpty && finishReason == "length" && !hasMalformedToolCall {
                 // Generation was cut off by the server's token limit mid-thought, before
                 // any tool call was emitted. Treat the fragment as transient and ask the
                 // model to continue — otherwise a truncated line is accepted as the final
                 // answer (and, for sub-agents, becomes the digest summary).
                 history.addAssistant(response, transient: true)
-                frontend.emitStatus("Response truncated (length limit); asking the model to continue.", severity: .warning)
+                frontend.harnessIntervention(
+                    "the model's response was cut off by the length limit — asking it to continue instead of accepting the fragment as final.",
+                    severity: .warning
+                )
                 steeringQueue.append(.init(
                     message: "Your previous response was cut off because it hit the length limit. Continue from where you left off and complete your response, then make any tool call you intended.",
                     origin: .automated))
@@ -493,8 +547,8 @@ public actor AgentLoop {
                     // recover on the retry, but marked transient so it is purged from
                     // persistent history once the turn produces a valid path.
                     history.addAssistant(response, transient: true)
-                    frontend.emitStatus(
-                        "Malformed tool call detected; retrying with strict JSON tool-call format.",
+                    frontend.harnessIntervention(
+                        "the model's tool call was malformed — rejecting it and asking for a strict retry instead of executing anything.",
                         severity: .warning
                     )
                     let example: String
@@ -738,7 +792,7 @@ public actor AgentLoop {
                 if hadTransient {
                     promptCache.invalidate(reason: "transient turn artifacts purged — repeated tool failure abort")
                 }
-                frontend.emitError("Stopped: '\(abortName)' failed identically \(sameFailedCallStreak) times in a row and the model could not recover. Try rephrasing your request.")
+                frontend.harnessInterventionError("stopping the turn — '\(abortName)' failed identically \(sameFailedCallStreak) times in a row and the model couldn't recover. Try rephrasing your request.")
                 return
             }
 
@@ -753,19 +807,32 @@ public actor AgentLoop {
         if hadTransientAtCap {
             promptCache.invalidate(reason: "transient turn artifacts purged — history diverged")
         }
-        frontend.emitError("Exceeded maximum tool iterations (\(maxToolIterations))")
+        frontend.harnessInterventionError("stopping the turn — it exceeded the \(maxToolIterations)-iteration tool budget without finishing.")
     }
 
     // MARK: - Private Helpers (used only by processUserMessage)
 
-    /// Drains queued steering messages into history, emitting status + hooks.
+    /// Drains queued steering messages into history, emitting a harness
+    /// intervention notice (user-visible only — never the text added to
+    /// history below, which the model reads verbatim) plus the audit hook.
     /// Returns true if anything was drained.
+    ///
+    /// This is the single live channel for surfacing a steering injection to
+    /// the user. There used to be a second, dead code path here: the
+    /// `AgentEvent.steeringInjected` frontend event had dedicated rendering
+    /// in both TUI adapters but nothing ever constructed it, so it could
+    /// never actually double-print — but it was exactly the kind of
+    /// same-named, unwired duplicate (`AgentHookEvent.steeringInjected` below
+    /// is a *different*, audit-only channel) that invites a real double
+    /// announcement the next time someone touches this code. That dead event
+    /// case has been removed; `hooks.emit(.steeringInjected(...))` below is
+    /// intentionally kept — it's the audit-log trail, not a UI channel.
     private func drainSteeringQueue() async -> Bool {
         guard !steeringQueue.isEmpty else { return false }
         let pending = steeringQueue
         steeringQueue.removeAll()
         for item in pending {
-            frontend.emitStatus("↩️  Steering: \(item.message)")
+            frontend.harnessIntervention("steering the model — \(item.message)")
             switch item.origin {
             case .human:     history.addUser(item.message)
             case .automated: history.addAutomated(item.message)
@@ -786,8 +853,8 @@ public actor AgentLoop {
         modifiedFilePaths: inout Set<String>
     ) async {
         history.addAssistant(response)
-        frontend.emitStatus(
-            "Generation truncated mid-write — recovering \(truncated.bytesWritten) bytes for \(truncated.path).",
+        frontend.harnessIntervention(
+            "recovering \(truncated.bytesWritten) truncated bytes for \(truncated.path) from disk instead of discarding the partial write.",
             severity: .warning
         )
 
@@ -821,7 +888,7 @@ public actor AgentLoop {
         let tailHint = commit.tail.isEmpty ? "" : "\n\nThe file currently ends with:\n```\n\(commit.tail)\n```"
         let steeringMessage = "Your previous \(truncated.toolName) call to \(truncated.path) was cut off after \(truncated.bytesWritten) bytes because the token budget ran out mid-content. The partial content was already saved to disk — do NOT regenerate it. To finish the file, call append_file with path \"\(truncated.path)\" and only the REMAINING content needed to complete it.\(tailHint)"
 
-        frontend.emitStatus("↩️  Steering: \(steeringMessage)")
+        frontend.harnessIntervention("steering the model — \(steeringMessage)")
         history.addAutomated(steeringMessage)
         await hooks.emit(.steeringInjected(message: steeringMessage))
     }
@@ -1294,7 +1361,7 @@ public actor AgentLoop {
                 // Log corrections if any were made
                 if correctionResult.wasCorrected {
                     for correction in correctionResult.corrections {
-                        frontend.emitStatus("[auto-correct] \(call.name): \(correction)")
+                        frontend.harnessIntervention("auto-corrected \(call.name)'s arguments — \(correction)")
                     }
                     await auditLogger?.logParameterCorrection(
                         toolName: call.name,
@@ -1336,7 +1403,7 @@ public actor AgentLoop {
                         executionArguments["new_text"] = savedNewText
                         preservedEditTmpFiles.removeValue(forKey: path)
                         try? FileManager.default.removeItem(at: tmpURL)
-                        frontend.emitStatus("[auto-correct] edit_file: reusing preserved new_text for \(path)")
+                        frontend.harnessIntervention("reusing the previously generated new_text for \(path) instead of asking the model to regenerate it.")
                     }
 
                     // [String: Any] is not Sendable; take an explicit unsafe snapshot
@@ -1390,7 +1457,7 @@ public actor AgentLoop {
                             arguments: currentArgs,
                             errorResult: currentResult
                         ) {
-                            frontend.emitStatus("[auto-correct] Retrying with corrected arguments...")
+                            frontend.harnessIntervention("retrying \(call.name) with auto-corrected arguments instead of failing the call.")
                             do {
                                 result = try await tool.execute(arguments: ["path": correction.path, "old_text": correction.oldText, "new_text": correction.newText])
                             } catch {

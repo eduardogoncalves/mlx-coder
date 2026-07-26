@@ -235,9 +235,6 @@ public final class LegacyTerminalFrontend: AgentFrontend, @unchecked Sendable {
         case .contextCompaction(let before, let after, let target, let reason):
             renderer.printStatus("[Context] Turn-aware compaction triggered (\(reason)): before≈\(before), after≈\(after), target≈\(target)")
 
-        case .steeringInjected(let msg):
-            renderer.printStatus("↩️  Steering: \(msg)")
-
         case .promptTokensKnown:
             break
 

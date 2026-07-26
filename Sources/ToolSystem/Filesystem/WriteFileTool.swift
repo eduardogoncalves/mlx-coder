@@ -29,6 +29,6 @@ public struct WriteFileTool: Tool {
         guard let content = arguments["content"] as? String else {
             return .error("Missing required argument: content")
         }
-        return FileMutationSupport.writeContent(content, to: path, permissions: permissions)
+        return FileMutationSupport.writeContent(content, to: path, permissions: permissions, blockExistingFile: true)
     }
 }

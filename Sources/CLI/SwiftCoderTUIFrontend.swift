@@ -473,9 +473,6 @@ public final class SwiftCoderTUIFrontend: AgentFrontend, @unchecked Sendable {
         case .contextCompaction(let before, let after, let target, let reason):
             await renderer.printScrollLine("\(DesignSystem.dim)context: \(before)→\(after) (target \(target), \(reason))\(DesignSystem.reset)")
 
-        case .steeringInjected(let s):
-            await renderer.printScrollLine("\(DesignSystem.dim)steering: \(s)\(DesignSystem.reset)")
-
         case .promptTokensKnown(let count):
             promptTokenCount = count
             await renderer.setThinking(spinnerLabel())

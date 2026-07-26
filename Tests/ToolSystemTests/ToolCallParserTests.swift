@@ -330,5 +330,175 @@ final class ToolCallParserTests: XCTestCase {
             .qwen
         )
     }
+
+    // MARK: - LFM2 quote/bracket-aware scanning (correct-by-inspection, previously untested)
+
+    func testLFM2DialectCommaInsideQuotedValueIsNotASplitPoint() {
+        let text = "<|tool_call_start|>[f(a='x, y', b=1)]<|tool_call_end|>"
+        let calls = ToolCallParser.parse(text, dialect: .lfm2)
+        XCTAssertEqual(calls.count, 1)
+        XCTAssertEqual(calls[0].arguments["a"] as? String, "x, y")
+        XCTAssertEqual(calls[0].arguments["b"] as? Int, 1)
+    }
+
+    func testLFM2DialectEqualsSignInsideQuotedValueIsNotTheKeyValueSeparator() {
+        let text = "<|tool_call_start|>[f(cmd='a=b')]<|tool_call_end|>"
+        let calls = ToolCallParser.parse(text, dialect: .lfm2)
+        XCTAssertEqual(calls.count, 1)
+        XCTAssertEqual(calls[0].arguments["cmd"] as? String, "a=b")
+    }
+
+    func testLFM2DialectDecodesEscapedSingleQuote() {
+        let text = "<|tool_call_start|>[f(s='it\\'s')]<|tool_call_end|>"
+        let calls = ToolCallParser.parse(text, dialect: .lfm2)
+        XCTAssertEqual(calls.count, 1)
+        XCTAssertEqual(calls[0].arguments["s"] as? String, "it's")
+    }
+
+    func testLFM2DialectDecodesLiteralNewlineInsideQuotedValue() {
+        let text = "<|tool_call_start|>[f(s='line1\nline2')]<|tool_call_end|>"
+        let calls = ToolCallParser.parse(text, dialect: .lfm2)
+        XCTAssertEqual(calls.count, 1)
+        XCTAssertEqual(calls[0].arguments["s"] as? String, "line1\nline2")
+    }
+
+    func testLFM2DialectZeroArgCallHasEmptyArguments() {
+        let text = "<|tool_call_start|>[f()]<|tool_call_end|>"
+        let calls = ToolCallParser.parse(text, dialect: .lfm2)
+        XCTAssertEqual(calls.count, 1)
+        XCTAssertEqual(calls[0].name, "f")
+        XCTAssertTrue(calls[0].arguments.isEmpty)
+    }
+
+    // MARK: - LFM2 Gap 1: single-quoted Python dict/list literals
+
+    func testLFM2DialectDecodesSingleQuotedDictLiteral() {
+        // Genuine Python syntax (single-quoted keys/strings, bare True/None),
+        // as opposed to the double-quoted JSON dict the prompt instructs the
+        // model to emit. Must not silently degrade to a raw string.
+        let text = "<|tool_call_start|>[some_tool(obj={'k': 'v', 'ok': True, 'n': None})]<|tool_call_end|>"
+        let calls = ToolCallParser.parse(text, dialect: .lfm2)
+        XCTAssertEqual(calls.count, 1)
+        let obj = calls[0].arguments["obj"] as? [String: Any]
+        XCTAssertEqual(obj?["k"] as? String, "v")
+        XCTAssertEqual(obj?["ok"] as? Bool, true)
+        XCTAssertTrue(obj?["n"] is NSNull)
+    }
+
+    func testLFM2DialectDecodesSingleQuotedListLiteral() {
+        let text = "<|tool_call_start|>[some_tool(items=['a', 'b', 'c'])]<|tool_call_end|>"
+        let calls = ToolCallParser.parse(text, dialect: .lfm2)
+        XCTAssertEqual(calls.count, 1)
+        XCTAssertEqual(calls[0].arguments["items"] as? [String], ["a", "b", "c"])
+    }
+
+    func testLFM2DialectSingleQuotedDictPreservesApostrophesInValues() {
+        // Regression guard: normalization must be quote/escape-aware, not a
+        // naive global "'" -> "\"" replace, which would corrupt this value.
+        let text = "<|tool_call_start|>[some_tool(obj={'k': 'it\\'s ok'})]<|tool_call_end|>"
+        let calls = ToolCallParser.parse(text, dialect: .lfm2)
+        XCTAssertEqual(calls.count, 1)
+        let obj = calls[0].arguments["obj"] as? [String: Any]
+        XCTAssertEqual(obj?["k"] as? String, "it's ok")
+    }
+
+    // MARK: - LFM2 Gap 2: truncation detection
+
+    func testLFM2DialectWellFormedCallIsNotFlaggedTruncated() {
+        let text = "<|tool_call_start|>[read_file(path='a.txt')]<|tool_call_end|>"
+        let calls = ToolCallParser.parse(text, dialect: .lfm2)
+        XCTAssertEqual(calls.count, 1)
+        XCTAssertFalse(calls[0].wasTruncated)
+    }
+
+    func testLFM2DialectMissingOuterBracketAloneIsNotTreatedAsTruncated() {
+        // Some checkpoints habitually drop the outer "]" even for an otherwise
+        // complete call. That alone is a benign, well-known quirk (see the
+        // comment in LFM2ToolCallBodyParser.parse) and must not be conflated
+        // with genuine mid-value truncation.
+        let text = "<|tool_call_start|>[read_file(path='a.txt')<|tool_call_end|>"
+        let calls = ToolCallParser.parse(text, dialect: .lfm2)
+        XCTAssertEqual(calls.count, 1)
+        XCTAssertEqual(calls[0].arguments["path"] as? String, "a.txt")
+        XCTAssertFalse(calls[0].wasTruncated)
+    }
+
+    func testLFM2DialectDetectsMidValueTruncationWithMissingClosingParenAndBracket() {
+        // Generation cut off mid-string: no closing quote, no ")", no "]",
+        // but the <|tool_call_end|> marker still made it out.
+        let text = "<|tool_call_start|>[read_file(path='fo<|tool_call_end|>"
+        let calls = ToolCallParser.parse(text, dialect: .lfm2)
+        XCTAssertEqual(calls.count, 1)
+        XCTAssertEqual(calls[0].name, "read_file")
+        XCTAssertEqual(calls[0].arguments["path"] as? String, "fo")
+        XCTAssertTrue(calls[0].wasTruncated)
+    }
+
+    func testLFM2DialectDetectsMidValueTruncationWithMissingCloseTag() {
+        // Same cutoff, but generation stopped before the model ever emitted
+        // <|tool_call_end|>. LFM2 bypasses the streamed-truncation recovery
+        // path entirely (supportsStreamingJSONContent == false), so this
+        // parser is the only place that can catch it.
+        let text = "<|tool_call_start|>[read_file(path='fo"
+        let calls = ToolCallParser.parse(text, dialect: .lfm2)
+        XCTAssertEqual(calls.count, 1)
+        XCTAssertEqual(calls[0].name, "read_file")
+        XCTAssertEqual(calls[0].arguments["path"] as? String, "fo")
+        XCTAssertTrue(calls[0].wasTruncated)
+    }
+
+    func testLFM2DialectDetectsTruncatedDictLiteralValue() {
+        // A dict literal cut off mid-value: not valid JSON, not valid
+        // normalized-Python-JSON either (unterminated string), and not
+        // structurally balanced -> must be flagged rather than silently
+        // returned as a bare string.
+        let text = "<|tool_call_start|>[some_tool(obj={'k': 'v<|tool_call_end|>"
+        let calls = ToolCallParser.parse(text, dialect: .lfm2)
+        XCTAssertEqual(calls.count, 1)
+        XCTAssertTrue(calls[0].wasTruncated)
+    }
+
+    /// Regression test: the model emits two calls in one bracket and
+    /// generation is cut off mid-way through the *second* one. `splitTopLevel`
+    /// must still isolate the first (complete) call from the second
+    /// (truncated) one, and the truncation flag must land only on the call
+    /// it actually belongs to — not leak onto the earlier, complete call.
+    func testLFM2DialectMultiCallTruncationFlagsOnlyTheTruncatedCall() {
+        let text = "<|tool_call_start|>[read_file(path='a.txt'), write_file(path='b.txt', content='partial<|tool_call_end|>"
+        let calls = ToolCallParser.parse(text, dialect: .lfm2)
+        XCTAssertEqual(calls.count, 2)
+
+        XCTAssertEqual(calls[0].name, "read_file")
+        XCTAssertEqual(calls[0].arguments["path"] as? String, "a.txt")
+        XCTAssertFalse(calls[0].wasTruncated)
+
+        XCTAssertEqual(calls[1].name, "write_file")
+        XCTAssertEqual(calls[1].arguments["path"] as? String, "b.txt")
+        XCTAssertEqual(calls[1].arguments["content"] as? String, "partial")
+        XCTAssertTrue(calls[1].wasTruncated)
+    }
+
+    /// Same shape, but generation stopped before `<|tool_call_end|>` (and the
+    /// outer "]") ever appeared — the fallback body-extraction path in
+    /// `ToolCallParser.parseToolCall` hands the LFM2 parser the same
+    /// unterminated text either way.
+    func testLFM2DialectMultiCallTruncationDetectedWithoutCloseTagOrOuterBracket() {
+        let text = "<|tool_call_start|>[read_file(path='a.txt'), write_file(path='b.txt', content='partial"
+        let calls = ToolCallParser.parse(text, dialect: .lfm2)
+        XCTAssertEqual(calls.count, 2)
+        XCTAssertFalse(calls[0].wasTruncated)
+        XCTAssertTrue(calls[1].wasTruncated)
+    }
+
+    /// A bare (keyless) positional value is not the documented LFM2 format —
+    /// every argument is instructed to be `key='value'` — but if a checkpoint
+    /// emits one anyway, it is a format deviation, not evidence that
+    /// generation was cut off, and must not be flagged as truncated.
+    func testLFM2DialectKeylessPositionalValueIsNotFlaggedTruncated() {
+        let text = "<|tool_call_start|>[f('some_value')]<|tool_call_end|>"
+        let calls = ToolCallParser.parse(text, dialect: .lfm2)
+        XCTAssertEqual(calls.count, 1)
+        XCTAssertFalse(calls[0].wasTruncated)
+    }
 }
 

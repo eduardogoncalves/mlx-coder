@@ -6,13 +6,18 @@ enum FileMutationSupport {
     static func writeContent(
         _ content: String,
         to path: String,
-        permissions: PermissionEngine
+        permissions: PermissionEngine,
+        blockExistingFile: Bool = false
     ) -> ToolResult {
         let resolvedPath: String
         do {
             resolvedPath = try permissions.validatePath(path)
         } catch {
             return .error(error.localizedDescription)
+        }
+
+        if blockExistingFile, let blocked = writeGuardBlock(path: path, resolvedPath: resolvedPath) {
+            return blocked
         }
 
         do {
@@ -103,6 +108,35 @@ enum FileMutationSupport {
         } catch {
             return .error("Failed to read file: \(error.localizedDescription)")
         }
+    }
+
+    /// Decides whether the `write_file` hard write-guard should reject a write
+    /// to `resolvedPath`, returning the actionable-recipe error to surface to
+    /// the model. Returns `nil` when the write may proceed — either because
+    /// the target doesn't exist yet (a genuine create), or because the caller
+    /// didn't opt into the guard at all (see `writeContent`'s
+    /// `blockExistingFile` parameter, which `PlanFileTool` deliberately leaves
+    /// `false` so it can keep overwriting the fixed PLAN.MD document).
+    ///
+    /// This is the single source of truth for the block decision + message so
+    /// all three code paths that can land bytes on disk for `write_file` —
+    /// `WriteFileTool` (via `writeContent` above), the large-payload streamed
+    /// commit in `AgentLoop.handleStreamedToolCall`, and the truncated-write
+    /// recovery in `AgentLoop.commitTruncatedStreamedWrite` — apply the exact
+    /// same rule instead of three copies that could drift out of sync.
+    ///
+    /// The recipe deliberately does not just say "use edit_file instead":
+    /// `edit_file` requires an exact, unique `old_text` the model doesn't have
+    /// yet for a file it hasn't read, so the message spells out the two real
+    /// next steps (read-then-edit_file, or append_file) with their exact
+    /// argument names.
+    static func writeGuardBlock(path: String, resolvedPath: String) -> ToolResult? {
+        guard FileManager.default.fileExists(atPath: resolvedPath) else { return nil }
+        return .error("""
+            \(path) already exists. write_file only creates new files — it will not blanket-overwrite an existing one, because replacing the whole file destroys any unrelated content a small model didn't intend to touch. To change it instead:
+            - Read \(path), then call edit_file with path: "\(path)", old_text: <the exact snippet to replace>, new_text: <its replacement> for a targeted change.
+            - Or call append_file with path: "\(path)", content: <text to add> to add content at the end without touching the rest.
+            """)
     }
 
     static func generateUnifiedDiff(original: String, updated: String, path: String) -> String {

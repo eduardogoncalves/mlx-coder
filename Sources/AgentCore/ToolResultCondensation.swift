@@ -33,6 +33,207 @@ enum ToolResultCondensationPolicy {
     // and the tool already bounds its own output via pagination.
     private static let neverCondenseTools: Set<String> = ["todo", "list_dir", "dir_list", "read_skill"]
 
+    // MARK: - Budget-aware trimming (live remaining-context-window awareness)
+    //
+    // Everything above/below this section keys off a STATIC char-count
+    // threshold (`ToolResultCondensationConfig.largeResultTokenThreshold`) with
+    // no knowledge of how much of the context window is actually left. The
+    // functions in this section are a port of little-coder's `read-guard`
+    // (`shouldTrimRead`), generalized from "read file" to "any oversized tool
+    // result about to enter main history," and are layered ON TOP of the
+    // existing static gate as an independent OR-condition — see
+    // `AgentLoop+ToolCondensation.swift: makeToolResponseForHistory` for how
+    // the two are combined. They never loosen existing behavior, only add a
+    // second reason to trim when the static threshold alone would have let a
+    // result through unchanged but live headroom can't actually afford it.
+
+    /// Tools whose mechanical (non-LLM) fallback trim is safe to force purely
+    /// because of tight remaining context budget. This is the single canonical
+    /// definition — `AgentLoop+ToolCondensation.swift` reads it rather than
+    /// keeping its own copy — precisely so the budget-aware gate below can
+    /// never drift out of sync with "which tools are LLM-summarization-safe."
+    /// Re-entrant MLX model invocations during condensation corrupt KV-cache
+    /// state (see that file's doc comment on `nonLLMCondensationTools`'
+    /// original use site), so `isBudgetAwareEligible`/`shouldForceBudgetTrim`
+    /// below only ever return `true` for tools in this set — by construction,
+    /// the budget-aware path can never route a result into LLM summarization.
+    static let nonLLMCondensationTools: Set<String> = ["read_file", "read_many", "web_search", "bash", "task"]
+
+    /// Of `nonLLMCondensationTools`, the subset whose mechanical fallback uses
+    /// the head-N-lines "read guard" message (structure-only slice + explicit
+    /// "don't re-read in full" steering) instead of the generic bounded-raw
+    /// fallback. `read_file`/`read_many` return line-oriented file content
+    /// where a head slice is meaningful; `bash`/`task` output is deliberately
+    /// kept from the TAIL instead (exit status/errors are at the end — see
+    /// `boundedFallbackRawMessage`), and `web_search` keeps the existing
+    /// head-char-based fallback. Preserving that asymmetry is a hard
+    /// requirement, not an oversight.
+    static let readGuardTools: Set<String> = ["read_file", "read_many"]
+
+    /// Number of leading lines kept for the head-N "read guard" message.
+    /// Mirrors little-coder's `read-guard` `HEAD_LINES` constant.
+    static let readGuardHeadLines = 30
+
+    /// Fraction of the effective context window assumed already consumed when
+    /// live usage is unmeasurable (no tokenizer/model loaded — e.g. a
+    /// remote-only OpenRouter session has no local tokenizer at all). Mirrors
+    /// little-coder's `read-guard` `FALLBACK_FRACTION`: rather than never
+    /// trimming when usage is unknown, conservatively assume the window is
+    /// already half spoken for.
+    static let budgetFallbackFraction: Double = 0.5
+
+    /// A remaining-budget snapshot: live token usage against the effective
+    /// context window. `currentTokens` is `nil` exactly when live usage
+    /// couldn't be measured (no tokenizer/model loaded) — see
+    /// `budgetFallbackFraction` for that case. `windowTokens` is meant to be
+    /// `currentGenerationConfig.longContextThreshold` — the same "effective
+    /// window" stand-in `ContextWatchdog` uses for its percent-of-window
+    /// compaction trigger (see that file's doc comment: it's the only number
+    /// in this codebase already playing the "context window" role). This
+    /// deliberately reuses that number rather than inventing a second,
+    /// competing notion of the window.
+    struct BudgetContext: Sendable, Equatable {
+        let currentTokens: Int?
+        let windowTokens: Int
+
+        init(currentTokens: Int?, windowTokens: Int) {
+            self.currentTokens = currentTokens
+            self.windowTokens = windowTokens
+        }
+    }
+
+    /// Tokens of headroom left before `budget.windowTokens` is exhausted.
+    /// `Int.max` when there is no effective window at all (`windowTokens <= 0`)
+    /// — "unbounded," matching the other guard clauses in this section that
+    /// treat a nonpositive window as "budget awareness doesn't apply here."
+    static func remainingBudgetTokens(_ budget: BudgetContext) -> Int {
+        guard budget.windowTokens > 0 else { return Int.max }
+        if let currentTokens = budget.currentTokens {
+            return max(0, budget.windowTokens - currentTokens)
+        }
+        return max(0, Int(Double(budget.windowTokens) * (1 - budgetFallbackFraction)))
+    }
+
+    /// Direct port of little-coder's `read-guard` `shouldTrimRead`, generalized
+    /// from "read file" to "any oversized tool result being written to
+    /// history": given the raw result's line count and a head-line floor below
+    /// which trimming wouldn't shrink anything meaningful, decide whether the
+    /// live remaining budget requires trimming this specific result before it
+    /// enters main history.
+    ///
+    /// - `lineCount <= headLines`: never trim — mirrors the reference's first
+    ///   guard (a head slice of the whole thing isn't smaller than the whole
+    ///   thing).
+    /// - `budget.currentTokens` known: trims once
+    ///   `currentTokens + estimatedResultTokens` would exceed the window
+    ///   (reference's `RESERVE = 0` — no extra safety margin beyond the window
+    ///   itself).
+    /// - `budget.currentTokens` unknown (no tokenizer/model loaded): trims once
+    ///   the result *alone* would exceed `budgetFallbackFraction` of the window
+    ///   — the reference's `FALLBACK_FRACTION` path.
+    static func shouldTrimForBudget(
+        lineCount: Int,
+        headLines: Int,
+        estimatedResultTokens: Int,
+        budget: BudgetContext
+    ) -> Bool {
+        guard budget.windowTokens > 0 else { return false }
+        guard lineCount > headLines else { return false }
+
+        if let currentTokens = budget.currentTokens {
+            return currentTokens + estimatedResultTokens > budget.windowTokens
+        }
+
+        return Double(estimatedResultTokens) > Double(budget.windowTokens) * budgetFallbackFraction
+    }
+
+    /// Whether `toolName` is even a candidate for the budget-aware forced-trim
+    /// path — i.e. it passes the same exemption/eligibility gates as
+    /// `shouldCondense` (never-condense tools, caller-configured eligibility)
+    /// AND is mechanically trimmable without an LLM call. Mirrors
+    /// `shouldCondense`'s exemption checks exactly so a tool exempted from the
+    /// static-threshold path (e.g. `todo`, `list_dir`, `read_skill`) can never
+    /// be pulled into condensation through this side door.
+    static func isBudgetAwareEligible(toolName: String, config: ToolResultCondensationConfig) -> Bool {
+        guard !neverCondenseTools.contains(toolName) else { return false }
+        guard config.eligibleTools.contains(toolName) else { return false }
+        return nonLLMCondensationTools.contains(toolName)
+    }
+
+    /// Whether the mechanical fallback trim should fire purely because of tight
+    /// remaining context budget, for a result the *static* char-count threshold
+    /// (`shouldCondense`) would otherwise let through unchanged. Only ever
+    /// returns `true` for `nonLLMCondensationTools` (via `isBudgetAwareEligible`)
+    /// — by construction this can never route a result into LLM summarization.
+    static func shouldForceBudgetTrim(
+        toolName: String,
+        result: ToolResult,
+        config: ToolResultCondensationConfig,
+        budget: BudgetContext
+    ) -> Bool {
+        guard !result.isError else { return false }
+        guard isBudgetAwareEligible(toolName: toolName, config: config) else { return false }
+
+        let raw = joinedToolOutput(result: result)
+        let estimatedTokens = estimatedTokenCount(for: raw, charsPerToken: config.charsPerTokenEstimate)
+        let headLines = readGuardTools.contains(toolName) ? readGuardHeadLines : 0
+        let lineCount = raw.isEmpty ? 0 : raw.components(separatedBy: "\n").count
+
+        return shouldTrimForBudget(
+            lineCount: lineCount,
+            headLines: headLines,
+            estimatedResultTokens: estimatedTokens,
+            budget: budget
+        )
+    }
+
+    /// Budget-aware cap on how many raw characters the mechanical fallback
+    /// keeps: never more than `staticMaxChars` (so ample-budget behavior is
+    /// unchanged from today — this only ever tightens, never loosens), but
+    /// scaled down to the live remaining budget (converted to chars via
+    /// `charsPerToken`) once headroom is actually scarce. Floors at 512 chars
+    /// so the fallback never collapses to something useless.
+    static func effectiveFallbackRawChars(
+        staticMaxChars: Int,
+        charsPerToken: Int,
+        budget: BudgetContext
+    ) -> Int {
+        let remainingTokens = remainingBudgetTokens(budget)
+        guard remainingTokens != Int.max else { return staticMaxChars }
+        let remainingChars = remainingTokens * max(1, charsPerToken)
+        return max(512, min(staticMaxChars, remainingChars))
+    }
+
+    /// Ports little-coder's `read-guard` trimmed-result message shape for
+    /// `read_file`/`read_many`: keep only the first `headLines` lines (enough
+    /// to see structure — imports, top-level declarations), then explicitly
+    /// steer the model away from ever requesting the file in full again.
+    static func budgetTrimmedReadMessage(
+        toolName: String,
+        raw: String,
+        headLines: Int,
+        estimatedTokens: Int
+    ) -> String {
+        let lines = raw.isEmpty ? [] : raw.components(separatedBy: "\n")
+        let totalLines = lines.count
+        guard totalLines > headLines else {
+            // Caller's budget check established trimming is warranted, but
+            // there's no shorter head to offer here — return unchanged rather
+            // than fabricate a slice that isn't actually smaller.
+            return raw
+        }
+        let kept = lines.prefix(headLines).joined(separator: "\n")
+        return """
+        [Context budget guard] This result has \(totalLines) lines (~\(estimatedTokens) tokens estimated) — reading it in full would exceed the remaining context window, so only the first \(headLines) lines are shown below.
+        Tool: \(toolName)
+        - Use these lines to understand the file's structure (imports, top-level declarations, overall shape).
+        - Narrow down with grep / code_search / glob to find the specific section you need, then call \(toolName) again with a specific start_line/end_line range.
+        - Do NOT re-read this file in full — it will be trimmed again.
+
+        \(kept)
+        """
+    }
+
     static func joinedToolOutput(result: ToolResult) -> String {
         var text = result.content
         if let marker = result.truncationMarker {

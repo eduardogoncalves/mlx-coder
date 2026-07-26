@@ -64,42 +64,69 @@ enum LFM2ToolCallBodyParser {
         guard !name.isEmpty else { return nil }
 
         // Capture from after "(" up to the matching ")". Tolerate a missing
-        // trailing ")" so a truncated stream still yields the partial call.
+        // trailing ")" so a truncated stream still yields the partial call —
+        // but remember that we had to tolerate it, since that almost always
+        // means the argument list (and likely the last value in it) was cut
+        // off mid-generation rather than the model simply forgetting a paren.
         let afterOpen = segment.index(after: openIdx)
         let argsBody: String
+        var truncated = false
         if let closeIdx = indexOfMatchingClose(segment, openAt: openIdx) {
             argsBody = String(segment[afterOpen..<closeIdx])
         } else {
             argsBody = String(segment[afterOpen...])
+            truncated = true
         }
 
-        let arguments = parseArguments(argsBody)
-        return ToolCallParser.ParsedToolCall(name: name, arguments: arguments)
+        let (arguments, argumentsTruncated) = parseArguments(argsBody)
+        return ToolCallParser.ParsedToolCall(
+            name: name,
+            arguments: arguments,
+            wasTruncated: truncated || argumentsTruncated
+        )
     }
 
-    private static func parseArguments(_ body: String) -> [String: Any] {
+    /// Returns the parsed `key: value` map plus whether any part of it had to
+    /// tolerate a missing closing delimiter (see `wasTruncated` on
+    /// `ParsedToolCall` for how callers should use this).
+    private static func parseArguments(_ body: String) -> (arguments: [String: Any], truncated: Bool) {
         let trimmed = body.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return [:] }
+        guard !trimmed.isEmpty else { return ([:], false) }
 
         var result: [String: Any] = [:]
-        for pair in splitTopLevel(trimmed, separator: ",") {
+        var truncated = false
+        let pairs = splitTopLevel(trimmed, separator: ",")
+        for pair in pairs {
             let trimmedPair = pair.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmedPair.isEmpty else { continue }
             guard let eq = indexOfFirstTopLevel(trimmedPair, char: "=") else {
+                // A fragment with no "=" at all is dropped, same as before we
+                // tracked truncation. Deliberately NOT flagged as truncated:
+                // it's indistinguishable from a legitimate (if non-standard)
+                // keyless/positional value (e.g. `f('some_value')`), and any
+                // *genuine* cut-off-before-"=" case already leaves the call's
+                // own closing ")" unmatched — caught by the check in
+                // `parseSingleCall` — so this heuristic would only add false
+                // positives without adding real detection coverage.
                 continue
             }
             let key = String(trimmedPair[..<eq]).trimmingCharacters(in: .whitespacesAndNewlines)
             let valueRaw = String(trimmedPair[trimmedPair.index(after: eq)...])
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             guard !key.isEmpty else { continue }
-            result[key] = parseValue(valueRaw)
+            let (value, valueTruncated) = parseValue(valueRaw)
+            result[key] = value
+            if valueTruncated { truncated = true }
         }
-        return result
+        return (result, truncated)
     }
 
-    private static func parseValue(_ raw: String) -> Any {
+    /// Returns the decoded value plus whether it had to tolerate a missing
+    /// closing quote/bracket/brace (a truncation signal — see `wasTruncated`
+    /// on `ParsedToolCall`).
+    private static func parseValue(_ raw: String) -> (value: Any, truncated: Bool) {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let first = trimmed.first else { return "" }
+        guard let first = trimmed.first else { return ("", false) }
 
         // Quoted string (single or double quote). LFM2 emits single quotes by
         // default per the chat template, but accept double quotes too.
@@ -111,31 +138,46 @@ enum LFM2ToolCallBodyParser {
         if first == "{" || first == "[" {
             if let data = trimmed.data(using: .utf8),
                let json = try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]) {
-                return json
+                return (json, false)
             }
-            // Fall through to literal handling if JSON parse fails.
+            // Strict JSON failed. A model emitting genuine Python syntax
+            // (single-quoted keys/strings, bare True/False/None) produces a
+            // structure that is invalid JSON but perfectly well-formed
+            // Python — normalize it to JSON and retry before giving up.
+            if let normalized = normalizePythonLiteralToJSON(trimmed),
+               let data = normalized.data(using: .utf8),
+               let json = try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]) {
+                return (json, false)
+            }
+            // Neither decodes. If the literal isn't even balanced at the top
+            // level (an unterminated string, or an unmatched `{`/`[`), that's
+            // very likely mid-value truncation rather than just unsupported
+            // syntax — flag it. Fall through to the bare-string last resort
+            // either way so behavior doesn't regress.
+            return (trimmed, !isBalanced(trimmed))
         }
 
         // Python literals.
         switch trimmed {
-        case "True": return true
-        case "False": return false
-        case "None", "null": return NSNull()
+        case "True": return (true, false)
+        case "False": return (false, false)
+        case "None", "null": return (NSNull(), false)
         default: break
         }
 
-        if let intValue = Int(trimmed) { return intValue }
-        if let doubleValue = Double(trimmed) { return doubleValue }
+        if let intValue = Int(trimmed) { return (intValue, false) }
+        if let doubleValue = Double(trimmed) { return (doubleValue, false) }
 
         // Last resort: treat as bare string.
-        return trimmed
+        return (trimmed, false)
     }
 
-    private static func unquote(_ token: String, quote: Character) -> String {
+    private static func unquote(_ token: String, quote: Character) -> (value: String, truncated: Bool) {
         var s = token
-        guard let first = s.first, first == quote else { return s }
+        guard let first = s.first, first == quote else { return (s, false) }
         s.removeFirst()
-        if s.last == quote {
+        let closed = s.last == quote
+        if closed {
             s.removeLast()
         }
         // Decode standard escape sequences. Single-quoted strings in LFM2
@@ -146,9 +188,122 @@ enum LFM2ToolCallBodyParser {
         if let data = wrapped.data(using: .utf8),
            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
            let value = json["v"] as? String {
-            return value
+            return (value, !closed)
         }
-        return s
+        return (s, !closed)
+    }
+
+    /// Converts a Python dict/list literal into JSON text by re-quoting only
+    /// the string tokens it actually scans as string delimiters (never a
+    /// naive global `'` → `"` replace, which would corrupt values containing
+    /// apostrophes) and mapping bare `True`/`False`/`None` identifiers to
+    /// their JSON equivalents. Returns `nil` if a quoted string inside the
+    /// literal never closes (caller treats that as a truncation signal via
+    /// `isBalanced` instead of guessing at a repair).
+    private static func normalizePythonLiteralToJSON(_ raw: String) -> String? {
+        let chars = Array(raw)
+        let n = chars.count
+        var out = ""
+        out.reserveCapacity(n + 8)
+        var i = 0
+
+        func isIdentifierStart(_ c: Character) -> Bool { c.isLetter || c == "_" }
+        func isIdentifierChar(_ c: Character) -> Bool { c.isLetter || c.isNumber || c == "_" }
+
+        while i < n {
+            let ch = chars[i]
+
+            if ch == "'" || ch == "\"" {
+                let quote = ch
+                var body = ""
+                var j = i + 1
+                var closed = false
+                while j < n {
+                    let c = chars[j]
+                    if c == "\\", j + 1 < n {
+                        let next = chars[j + 1]
+                        if quote == "'" && next == "'" {
+                            // Python's `\'` escape (only meaningful inside a
+                            // single-quoted string) — unescape to a literal
+                            // apostrophe; `escapeForJSONStringValue` will
+                            // re-escape it correctly for the JSON string.
+                            body.append("'")
+                        } else {
+                            body.append(c)
+                            body.append(next)
+                        }
+                        j += 2
+                        continue
+                    }
+                    if c == quote {
+                        closed = true
+                        j += 1
+                        break
+                    }
+                    body.append(c)
+                    j += 1
+                }
+                guard closed else { return nil }
+                out.append("\"")
+                out.append(escapeForJSONStringValue(body, originalQuote: quote))
+                out.append("\"")
+                i = j
+                continue
+            }
+
+            if isIdentifierStart(ch) {
+                var word = ""
+                var j = i
+                while j < n, isIdentifierChar(chars[j]) {
+                    word.append(chars[j])
+                    j += 1
+                }
+                switch word {
+                case "True": out.append("true")
+                case "False": out.append("false")
+                case "None": out.append("null")
+                default: out.append(word)
+                }
+                i = j
+                continue
+            }
+
+            out.append(ch)
+            i += 1
+        }
+
+        return out
+    }
+
+    /// True when `s` has no unterminated quote and every `{`/`[` it opens is
+    /// closed by the end of the string. Used as a last-ditch truncation
+    /// signal for a `{`/`[` value that failed both strict-JSON and
+    /// Python-literal decoding.
+    private static func isBalanced(_ s: String) -> Bool {
+        var depthBrace = 0
+        var depthBracket = 0
+        var quote: Character? = nil
+        var escape = false
+        for ch in s {
+            if escape {
+                escape = false
+                continue
+            }
+            if let q = quote {
+                if ch == "\\" { escape = true }
+                else if ch == q { quote = nil }
+                continue
+            }
+            switch ch {
+            case "'", "\"": quote = ch
+            case "{": depthBrace += 1
+            case "}": depthBrace -= 1
+            case "[": depthBracket += 1
+            case "]": depthBracket -= 1
+            default: break
+            }
+        }
+        return quote == nil && !escape && depthBrace == 0 && depthBracket == 0
     }
 
     /// Re-escape the captured token so it slots into a JSON string literal

@@ -12,7 +12,13 @@ extension AgentLoop {
     /// Generate a response from the model using the current conversation history.
     /// Returns the response text, the streaming writer (for streamed tool calls),
     /// and whether the response began inside a pre-filled `<think>` block.
-    func generateResponse() async throws -> (text: String, writer: StreamingToolCallWriter, startedThinking: Bool, turnStats: (promptTokens: Int, completionTokens: Int, elapsed: TimeInterval, tokensPerSecond: Double?)?, finishReason: String?) {
+    func generateResponse() async throws -> (text: String, writer: StreamingToolCallWriter, startedThinking: Bool, turnStats: (promptTokens: Int, completionTokens: Int, elapsed: TimeInterval, tokensPerSecond: Double?)?, finishReason: String?, thinkingBudgetBreached: Bool) {
+        // Consumed unconditionally (even on the remote path, which ignores it)
+        // so a breach on a previous local turn can never leak a stale
+        // suppression into some later turn after the backend changes.
+        let suppressThinkingThisTurn = forceThinkingOffNextTurn
+        forceThinkingOffNextTurn = false
+
         // Route online backends through their HTTP client — local MLX path below
         // assumes a loaded ModelContainer, which online providers never produce.
         if backend.isOnline {
@@ -47,7 +53,14 @@ extension AgentLoop {
         // turns. Some VLM checkpoints require processor-driven preparation to ensure
         // auxiliary tensors (e.g. image/video masks) stay consistent with prompt length.
         let shouldUseProcessorPath = isVLM && hasProcessorConfig
-        let enableThinking = thinkingLevel != .fast && !isGemma4Model
+        let enableThinking = thinkingLevel != .fast && !isGemma4Model && !suppressThinkingThisTurn
+        // The budget the per-token loop enforces this turn. When thinking was
+        // forced off (a breach on the prior turn), use `.fast`'s budget (0)
+        // rather than the configured level's — if the model ignores
+        // `enableThinking: false` and starts a think block anyway, it should
+        // be cut off almost immediately, not given the full budget for a
+        // level that was just deliberately suppressed.
+        let thinkingBudgetTokens = suppressThinkingThisTurn ? ThinkingLevel.fast.budgetTokens : thinkingLevel.budgetTokens
         let chatML = history.formatChatML(messages: transformedMessages, enableThinking: enableThinking)
         // Template messages for applyChatTemplate() — model-native prompt formatting.
         let templateMessages: [[String: any Sendable]] = transformedMessages.map { msg in
@@ -93,7 +106,7 @@ extension AgentLoop {
         let draftModel = self.draftModel
         let promptCache = self.promptCache
         let promptCacheStats = self.promptCacheStats
-        let result = try await modelContainer.perform { [currentGenerationConfig, frontend, chatML, templateMessages, enableThinking, imageURLs, vlmMessageData, vlmLastUserIndex, shouldUseProcessorPath, isVLM, dialect, draftModel, promptCache, promptCacheStats] (context: ModelContext) in
+        let result = try await modelContainer.perform { [currentGenerationConfig, frontend, chatML, templateMessages, enableThinking, thinkingBudgetTokens, imageURLs, vlmMessageData, vlmLastUserIndex, shouldUseProcessorPath, isVLM, dialect, draftModel, promptCache, promptCacheStats] (context: ModelContext) in
             if Task.isCancelled { throw CancellationError() }
             var hasTokenProcessingEnded = false
             var hasGenerationStarted = false
@@ -548,6 +561,19 @@ extension AgentLoop {
             // the caller for accumulation across tool-call rounds within one turn.
             var capturedTurnStats: (promptTokens: Int, completionTokens: Int, elapsed: TimeInterval, tokensPerSecond: Double?)? = nil
 
+            // Thinking-token budget enforcement (see ThinkingBudget.swift).
+            // Counts generated tokens while `parser.isThinking` is true — real
+            // token ids from the stream, not decoded characters, since the
+            // budget itself is denominated in tokens. Reset per call (i.e. per
+            // generation round), matching the fact that `budgetTokens` is a
+            // per-turn allowance.
+            var thinkingTokenCount = 0
+            // Set when the budget is breached and the think block is force-
+            // closed; threaded back to `AgentLoop.swift` through the return
+            // tuple exactly like `finishReason`, since this Sendable closure
+            // cannot touch `self.steeringQueue` directly.
+            var thinkingBudgetBreached = false
+
             // Build the set of stop-token ids we must intercept in the stream.
             // `buildStopTokenIds` in MLXLMCommon/Evaluate.swift is private, so we
             // replicate the same logic here. With includeStopToken: true, the stop
@@ -605,7 +631,7 @@ extension AgentLoop {
                     )
                 }
             }
-            for await item in tokenStream {
+            tokenLoop: for await item in tokenStream {
                 if Task.isCancelled {
                     throw CancellationError()
                 }
@@ -644,6 +670,15 @@ extension AgentLoop {
                         segment = newSegment
                     }
 
+                    // Captured before feeding the parser: whether this token's
+                    // text was generated while still inside the think block.
+                    // Used below to count thinking tokens toward the budget —
+                    // captured pre-feed (rather than post-feed) so the token
+                    // that carries the closing `</think>` tag itself still
+                    // counts as the last thinking token, not the first
+                    // response token.
+                    let wasThinkingBeforeFeed = parser.isThinking
+
                     // Route each token through the think-block parser. Thinking tokens
                     // are emitted directly; response tokens flow through the tool-call
                     // writer so it can detect <tool_call> blocks without being confused
@@ -678,6 +713,31 @@ extension AgentLoop {
                             break
                         }
                     }
+
+                    // Thinking-token budget enforcement (see ThinkingBudget.swift).
+                    // Placed after the generatedTokenIds append / rawResponseText
+                    // bookkeeping above and after this token's parser events have
+                    // already been emitted to the frontend, so breaking out below
+                    // never corrupts KV-cache accounting or drops an already-
+                    // decided event. On breach we don't throw (that would abort
+                    // the whole turn) and don't touch `self.steeringQueue` (this
+                    // closure can't) — we just stop consuming the stream here;
+                    // `parser.flush(closeUnterminatedThinkingBlock: true)` below
+                    // then closes the think block exactly as it would for a
+                    // naturally-ending stream, and the breach is threaded back to
+                    // `AgentLoop.swift` through the return tuple.
+                    if wasThinkingBeforeFeed {
+                        thinkingTokenCount += 1
+                    }
+                    if AgentLoop.shouldStopThinking(
+                        thinkingTokensSoFar: thinkingTokenCount,
+                        budgetTokens: thinkingBudgetTokens,
+                        isThinking: parser.isThinking
+                    ) {
+                        thinkingBudgetBreached = true
+                        break tokenLoop
+                    }
+
                     // Yield to the Swift cooperative scheduler so the consumer task
                     // (SwiftCoderTUIFrontend) can render the events we just emitted
                     // before we generate the next token. Without this yield, the
@@ -764,7 +824,7 @@ extension AgentLoop {
             }
             rawResponseText = rawResponseText.trimmingCharacters(in: .whitespacesAndNewlines)
 
-            return (text: rawResponseText, writer: writer, startedThinking: actuallyStartedThinking, turnStats: capturedTurnStats, finishReason: nil as String?)
+            return (text: rawResponseText, writer: writer, startedThinking: actuallyStartedThinking, turnStats: capturedTurnStats, finishReason: nil as String?, thinkingBudgetBreached: thinkingBudgetBreached)
         }
 
         return result

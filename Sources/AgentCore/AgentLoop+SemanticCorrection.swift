@@ -49,7 +49,7 @@ extension AgentLoop {
             return nil
         }
 
-        frontend.emitStatus("[auto-correct] \(toolName): old_text not found — using LLM to find correct match...")
+        frontend.harnessIntervention("\(toolName)'s old_text didn't match the file — running a quick correction pass to locate the right text before failing the call.")
 
         // Build a focused, token-efficient prompt
         let maxFileChars = 8000
@@ -151,17 +151,17 @@ extension AgentLoop {
 
             // Verify the corrected text actually exists in the file
             guard fileContent.contains(cleanedOldText) else {
-                frontend.emitStatus("[auto-correct] LLM suggestion didn't match file — skipping correction")
+                frontend.harnessIntervention("the correction pass's suggested old_text still doesn't match the file — leaving the original edit_file failure in place.")
                 return nil
             }
 
             // Verify it's different from the original attempt
             guard cleanedOldText != oldText else {
-                frontend.emitStatus("[auto-correct] LLM returned same text — skipping correction")
+                frontend.harnessIntervention("the correction pass returned the same old_text that already failed — leaving the original edit_file failure in place.")
                 return nil
             }
 
-            frontend.emitStatus("[auto-correct] Found correct old_text (\(cleanedOldText.count) chars vs original \(oldText.count) chars)")
+            frontend.harnessIntervention("corrected edit_file's old_text automatically (\(cleanedOldText.count) chars vs the model's original \(oldText.count) chars) — retrying with the fix.")
 
             await auditLogger?.logParameterCorrection(
                 toolName: toolName,
@@ -175,7 +175,7 @@ extension AgentLoop {
         } catch is CancellationError {
             return nil
         } catch {
-            frontend.emitStatus("[auto-correct] LLM correction failed: \(error.localizedDescription)")
+            frontend.harnessIntervention("the automatic correction pass itself failed (\(error.localizedDescription)) — leaving the original edit_file failure in place.")
             return nil
         }
     }

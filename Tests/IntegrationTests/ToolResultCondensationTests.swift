@@ -188,4 +188,235 @@ final class ToolResultCondensationTests: XCTestCase {
         XCTAssertTrue(instruction.contains("structural snapshot"))
         XCTAssertTrue(instruction.contains("line ranges"))
     }
+
+    // MARK: - Budget-aware trimming (`shouldTrimForBudget` and friends)
+
+    func testShouldTrimForBudgetBelowBudgetDoesNotTrim() {
+        // 100 current + 50 estimated = 150, well under a 1000-token window.
+        let budget = ToolResultCondensationPolicy.BudgetContext(currentTokens: 100, windowTokens: 1000)
+        XCTAssertFalse(
+            ToolResultCondensationPolicy.shouldTrimForBudget(
+                lineCount: 100,
+                headLines: 30,
+                estimatedResultTokens: 50,
+                budget: budget
+            )
+        )
+    }
+
+    func testShouldTrimForBudgetAtExactBudgetDoesNotTrim() {
+        // Exactly at the window: reference semantics are a strict ">" comparison
+        // (RESERVE = 0), so landing exactly on the line should NOT trim.
+        let budget = ToolResultCondensationPolicy.BudgetContext(currentTokens: 900, windowTokens: 1000)
+        XCTAssertFalse(
+            ToolResultCondensationPolicy.shouldTrimForBudget(
+                lineCount: 100,
+                headLines: 30,
+                estimatedResultTokens: 100,
+                budget: budget
+            )
+        )
+    }
+
+    func testShouldTrimForBudgetAboveBudgetTrims() {
+        let budget = ToolResultCondensationPolicy.BudgetContext(currentTokens: 950, windowTokens: 1000)
+        XCTAssertTrue(
+            ToolResultCondensationPolicy.shouldTrimForBudget(
+                lineCount: 100,
+                headLines: 30,
+                estimatedResultTokens: 100,
+                budget: budget
+            )
+        )
+    }
+
+    func testShouldTrimForBudgetUnknownCurrentUsageFallsBackToFraction() {
+        // No tokenizer/model loaded: currentTokens is nil. A result estimated at
+        // 600 tokens against a 1000-token window exceeds the 0.5 fallback
+        // fraction (500), so it should trim even though we have no idea what
+        // the rest of history looks like.
+        let overFraction = ToolResultCondensationPolicy.BudgetContext(currentTokens: nil, windowTokens: 1000)
+        XCTAssertTrue(
+            ToolResultCondensationPolicy.shouldTrimForBudget(
+                lineCount: 100,
+                headLines: 30,
+                estimatedResultTokens: 600,
+                budget: overFraction
+            )
+        )
+
+        // 400 tokens is under the 500-token fallback fraction line — no trim.
+        XCTAssertFalse(
+            ToolResultCondensationPolicy.shouldTrimForBudget(
+                lineCount: 100,
+                headLines: 30,
+                estimatedResultTokens: 400,
+                budget: overFraction
+            )
+        )
+    }
+
+    func testShouldTrimForBudgetHeadLineNoOpCase() {
+        // lineCount <= headLines: a head slice wouldn't shrink anything, so this
+        // must never trim regardless of how tight the budget is.
+        let starvedBudget = ToolResultCondensationPolicy.BudgetContext(currentTokens: 999, windowTokens: 1000)
+        XCTAssertFalse(
+            ToolResultCondensationPolicy.shouldTrimForBudget(
+                lineCount: 30,
+                headLines: 30,
+                estimatedResultTokens: 5000,
+                budget: starvedBudget
+            )
+        )
+        XCTAssertFalse(
+            ToolResultCondensationPolicy.shouldTrimForBudget(
+                lineCount: 10,
+                headLines: 30,
+                estimatedResultTokens: 5000,
+                budget: starvedBudget
+            )
+        )
+    }
+
+    func testShouldTrimForBudgetNoWindowNeverTrims() {
+        let noWindow = ToolResultCondensationPolicy.BudgetContext(currentTokens: 10, windowTokens: 0)
+        XCTAssertFalse(
+            ToolResultCondensationPolicy.shouldTrimForBudget(
+                lineCount: 1000,
+                headLines: 30,
+                estimatedResultTokens: 100_000,
+                budget: noWindow
+            )
+        )
+    }
+
+    func testIsBudgetAwareEligibleRespectsNeverCondenseAndEligibleToolsExemptions() {
+        let config = ToolResultCondensationConfig(eligibleTools: ["todo", "read_file"])
+
+        // todo is in `neverCondenseTools` — must stay exempt even though it's
+        // in the caller's eligibleTools set.
+        XCTAssertFalse(ToolResultCondensationPolicy.isBudgetAwareEligible(toolName: "todo", config: config))
+
+        // read_skill paginates itself and must stay exempt regardless of config.
+        let permissiveConfig = ToolResultCondensationConfig(eligibleTools: ["read_skill", "read_file"])
+        XCTAssertFalse(ToolResultCondensationPolicy.isBudgetAwareEligible(toolName: "read_skill", config: permissiveConfig))
+
+        // read_file is eligible, in nonLLMCondensationTools, and not exempt.
+        XCTAssertTrue(ToolResultCondensationPolicy.isBudgetAwareEligible(toolName: "read_file", config: config))
+
+        // A hypothetical tool not in `nonLLMCondensationTools` (e.g. one that
+        // would route through the LLM-summarization path) must never be
+        // budget-aware-eligible — this is the guarantee that budget-aware
+        // trimming can never increase LLM-summarization frequency.
+        let grepConfig = ToolResultCondensationConfig(eligibleTools: ["grep"])
+        XCTAssertFalse(ToolResultCondensationPolicy.isBudgetAwareEligible(toolName: "grep", config: grepConfig))
+    }
+
+    func testShouldForceBudgetTrimNeverFiresForErrorResults() {
+        let config = ToolResultCondensationConfig()
+        let budget = ToolResultCondensationPolicy.BudgetContext(currentTokens: 8000, windowTokens: 8192)
+        let bigLines = Array(repeating: "line of content", count: 200).joined(separator: "\n")
+        let errorResult = ToolResult(content: bigLines, isError: true)
+
+        XCTAssertFalse(
+            ToolResultCondensationPolicy.shouldForceBudgetTrim(
+                toolName: "read_file",
+                result: errorResult,
+                config: config,
+                budget: budget
+            )
+        )
+    }
+
+    func testShouldForceBudgetTrimFiresForReadFileWhenBudgetIsTight() {
+        let config = ToolResultCondensationConfig()
+        // Window 8192, already at 8000 tokens used → only ~192 tokens of
+        // headroom left. A 300-line result (well over readGuardHeadLines) whose
+        // estimated size exceeds that headroom should force a trim even though
+        // it is nowhere near the static 1000-token `largeResultTokenThreshold`.
+        let budget = ToolResultCondensationPolicy.BudgetContext(currentTokens: 8000, windowTokens: 8192)
+        let manyLines = (1...300).map { "line \($0) of file content" }.joined(separator: "\n")
+        let result = ToolResult(content: manyLines)
+
+        XCTAssertTrue(
+            ToolResultCondensationPolicy.shouldForceBudgetTrim(
+                toolName: "read_file",
+                result: result,
+                config: config,
+                budget: budget
+            )
+        )
+    }
+
+    func testShouldForceBudgetTrimNeverFiresForExemptToolsEvenUnderTightBudget() {
+        let config = ToolResultCondensationConfig(eligibleTools: ["todo", "list_dir", "read_skill"])
+        let budget = ToolResultCondensationPolicy.BudgetContext(currentTokens: 8190, windowTokens: 8192)
+        let manyLines = Array(repeating: "task line", count: 500).joined(separator: "\n")
+
+        for toolName in ["todo", "list_dir", "dir_list", "read_skill"] {
+            let result = ToolResult(content: manyLines)
+            XCTAssertFalse(
+                ToolResultCondensationPolicy.shouldForceBudgetTrim(
+                    toolName: toolName,
+                    result: result,
+                    config: config,
+                    budget: budget
+                ),
+                "\(toolName) must remain exempt from budget-forced trim"
+            )
+        }
+    }
+
+    func testEffectiveFallbackRawCharsNeverExceedsStaticCapWithAmpleBudget() {
+        // Plenty of headroom (window 8192, current 100): the effective cap must
+        // equal the static cap unchanged — existing small/medium-result
+        // behavior must not regress.
+        let budget = ToolResultCondensationPolicy.BudgetContext(currentTokens: 100, windowTokens: 8192)
+        let effective = ToolResultCondensationPolicy.effectiveFallbackRawChars(
+            staticMaxChars: 4000,
+            charsPerToken: 4,
+            budget: budget
+        )
+        XCTAssertEqual(effective, 4000)
+    }
+
+    func testEffectiveFallbackRawCharsShrinksUnderTightBudget() {
+        // Only ~92 tokens of headroom left (window 8192, current 8100) → ~368
+        // chars at 4 chars/token, well under the 4000-char static cap.
+        let budget = ToolResultCondensationPolicy.BudgetContext(currentTokens: 8100, windowTokens: 8192)
+        let effective = ToolResultCondensationPolicy.effectiveFallbackRawChars(
+            staticMaxChars: 4000,
+            charsPerToken: 4,
+            budget: budget
+        )
+        XCTAssertLessThan(effective, 4000)
+        XCTAssertGreaterThanOrEqual(effective, 512) // floor
+    }
+
+    func testBudgetTrimmedReadMessageKeepsOnlyHeadLinesAndSteersAwayFromRereading() {
+        let manyLines = (1...100).map { "line \($0)" }.joined(separator: "\n")
+        let message = ToolResultCondensationPolicy.budgetTrimmedReadMessage(
+            toolName: "read_file",
+            raw: manyLines,
+            headLines: 30,
+            estimatedTokens: 2500
+        )
+
+        XCTAssertTrue(message.contains("line 1"))
+        XCTAssertTrue(message.contains("line 30"))
+        XCTAssertFalse(message.contains("line 31"))
+        XCTAssertTrue(message.lowercased().contains("do not re-read this file in full"))
+        XCTAssertTrue(message.contains("grep"))
+    }
+
+    func testBudgetTrimmedReadMessageIsNoOpWhenAlreadyAtOrBelowHeadLines() {
+        let shortContent = (1...10).map { "line \($0)" }.joined(separator: "\n")
+        let message = ToolResultCondensationPolicy.budgetTrimmedReadMessage(
+            toolName: "read_file",
+            raw: shortContent,
+            headLines: 30,
+            estimatedTokens: 50
+        )
+        XCTAssertEqual(message, shortContent)
+    }
 }

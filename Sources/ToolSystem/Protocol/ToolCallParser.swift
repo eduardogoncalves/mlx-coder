@@ -17,9 +17,33 @@ public struct ToolCallParser: Sendable {
         public let name: String
         public let arguments: [String: Any]
 
-        public init(name: String, arguments: [String: Any]) {
+        /// Set when the parser detected that the source text for this call was
+        /// structurally incomplete — e.g. a quoted argument value, a Python
+        /// dict/list literal, or the argument list itself was cut off before a
+        /// closing delimiter appeared. This is distinct from `arguments` being
+        /// merely empty or from the call being unparsable entirely (which
+        /// yields no `ParsedToolCall` at all); it flags a call that *looks*
+        /// complete but may carry a truncated value.
+        ///
+        /// Only the LFM2 "Pythonic" dialect (`LFM2ToolCallBodyParser`) sets
+        /// this to `true` today — it deliberately tolerates missing closing
+        /// brackets/parens/quotes for robustness, so this flag is how it still
+        /// surfaces that tolerance was exercised. The qwen and glm4 paths
+        /// leave it at its default `false`, since a truncated JSON/XML body
+        /// for those dialects already fails to produce a `ParsedToolCall` in
+        /// the first place (see `tryParseWithTrailingBraceRecovery`, etc.),
+        /// so there is no analogous "looks complete but isn't" case to flag.
+        ///
+        /// Callers that want truncation-aware retry/steering behavior (e.g.
+        /// treating a truncated call the same as a malformed one instead of
+        /// silently executing it) should check this flag per-call rather than
+        /// relying solely on `toolCalls.isEmpty`.
+        public let wasTruncated: Bool
+
+        public init(name: String, arguments: [String: Any], wasTruncated: Bool = false) {
             self.name = name
             self.arguments = arguments
+            self.wasTruncated = wasTruncated
         }
     }
 

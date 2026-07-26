@@ -269,6 +269,23 @@ extension AgentLoop {
             return TruncatedWriteCommit(result: .error("Failed to read truncated streamed content for \(call.path)"), tail: "")
         }
 
+        // Hard write-guard: this is the third and final code path that can
+        // land write_file bytes on disk (recovery of a generation truncated
+        // mid-write). Apply the same block WriteFileTool/handleStreamedToolCall
+        // do so a truncated generation can't be used to sneak past the guard.
+        if call.toolName == "write_file",
+           let blocked = FileMutationSupport.writeGuardBlock(path: call.path, resolvedPath: resolvedPath) {
+            // The tool-result text in `blocked` is what the MODEL reads — an
+            // actionable recipe (read-then-edit_file, or append_file) — and
+            // must stay verbatim (see FileMutationSupport.writeGuardBlock's
+            // doc comment). This is a separate, user-facing notice that the
+            // guard fired at all, so the human sees a harness-intervention
+            // line even though the tool result itself keeps its own wording.
+            frontend.harnessIntervention("blocked a write_file overwrite of \(call.path) — the model must use edit_file or append_file on an existing file instead.", severity: .warning)
+            try? FileManager.default.removeItem(at: call.contentFile)
+            return TruncatedWriteCommit(result: blocked, tail: "")
+        }
+
         let targetURL = URL(fileURLWithPath: resolvedPath)
         let parentDir = targetURL.deletingLastPathComponent()
         do {
@@ -346,6 +363,23 @@ extension AgentLoop {
         } catch {
             try? FileManager.default.removeItem(at: call.contentFile)
             return .error(error.localizedDescription)
+        }
+
+        // Hard write-guard: same decision FileMutationSupport applies for
+        // WriteFileTool, applied here before the diff/approval flow so it
+        // can't be bypassed by yolo/auto-edit approval modes. Large payloads
+        // for write_file are streamed straight to disk via
+        // replaceItemAt/moveItem below, completely bypassing WriteFileTool —
+        // without this check that path would silently overwrite an existing
+        // file with no guard at all.
+        if call.toolName == "write_file",
+           let blocked = FileMutationSupport.writeGuardBlock(path: call.path, resolvedPath: resolvedPath) {
+            // See the identical comment in `commitTruncatedStreamedWrite` above:
+            // `blocked`'s content is the model-facing recipe and stays untouched;
+            // this is the separate user-facing notice that the guard fired.
+            frontend.harnessIntervention("blocked a write_file overwrite of \(call.path) — the model must use edit_file or append_file on an existing file instead.", severity: .warning)
+            try? FileManager.default.removeItem(at: call.contentFile)
+            return blocked
         }
 
         // Read the tmp content
@@ -471,7 +505,7 @@ extension AgentLoop {
                 )
                 if correctionResult.wasCorrected {
                     for correction in correctionResult.corrections {
-                        frontend.emitStatus("[auto-correct] edit_file (streamed): \(correction)")
+                        frontend.harnessIntervention("auto-corrected the streamed edit_file's arguments — \(correction)")
                     }
                 }
 
@@ -487,7 +521,7 @@ extension AgentLoop {
                         let fakeArgs: [String: Any] = ["path": call.path, "old_text": oldText, "new_text": tmpContent]
                         let fakeError = ToolResult.error("old_text not found in \(call.path). Make sure the text matches exactly.")
                         if let correction = await attemptSemanticCorrection(toolName: "edit_file", arguments: fakeArgs, errorResult: fakeError) {
-                            frontend.emitStatus("[auto-correct] Retrying streamed edit_file with corrected old_text...")
+                            frontend.harnessIntervention("retrying the streamed edit_file call with auto-corrected old_text instead of failing it.")
                             let corrected = fileContent.replacingOccurrences(of: correction.oldText, with: tmpContent)
                             do {
                                 try corrected.write(toFile: resolvedPath, atomically: true, encoding: .utf8)

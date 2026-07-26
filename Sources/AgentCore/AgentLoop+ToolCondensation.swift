@@ -14,7 +14,33 @@ extension AgentLoop {
             return applyFactOnlyPreambleIfNeeded(toolName: toolName, toolResponse: rawToolResponse)
         }
 
-        guard ToolResultCondensationPolicy.shouldCondense(toolName: toolName, result: result, config: condensationConfig) else {
+        let staticShouldCondense = ToolResultCondensationPolicy.shouldCondense(toolName: toolName, result: result, config: condensationConfig)
+
+        // Budget-aware forced trim: a result the static char-count threshold
+        // would let through unchanged, but that the LIVE remaining context
+        // budget can't actually afford right now (see
+        // `ToolResultCondensationPolicy.shouldTrimForBudget`, a port of
+        // little-coder's `read-guard`). Only computed when the tool is even a
+        // candidate (`isBudgetAwareEligible` — same exemptions as
+        // `shouldCondense`, restricted to `nonLLMCondensationTools` so this can
+        // never route a result into LLM summarization) and only when the
+        // static path didn't already decide to condense, so the common case
+        // (ample budget, small result) never pays for an extra tokenizer pass.
+        var liveBudget: ToolResultCondensationPolicy.BudgetContext?
+        var budgetForcedTrim = false
+        if !staticShouldCondense,
+           ToolResultCondensationPolicy.isBudgetAwareEligible(toolName: toolName, config: condensationConfig) {
+            let budget = await currentBudgetContext()
+            liveBudget = budget
+            budgetForcedTrim = ToolResultCondensationPolicy.shouldForceBudgetTrim(
+                toolName: toolName,
+                result: result,
+                config: condensationConfig,
+                budget: budget
+            )
+        }
+
+        guard staticShouldCondense || budgetForcedTrim else {
             return applyFactOnlyPreambleIfNeeded(toolName: toolName, toolResponse: rawToolResponse)
         }
 
@@ -50,20 +76,47 @@ extension AgentLoop {
         // and cause empty-tensor crashes on the next generation turn.
         // bash/task are included for the same reason: large shell output (e.g. dotnet
         // package restore) triggers LLM summarization mid-turn, corrupting KV state.
-        let nonLLMCondensationTools: Set<String> = ["read_file", "read_many", "web_search", "bash", "task"]
-        if nonLLMCondensationTools.contains(toolName) {
-            let fallback = ToolResultCondensationPolicy.boundedFallbackRawMessage(
-                toolName: toolName,
-                raw: rawToolResponse,
-                maxChars: condensationConfig.fallbackRawChars
+        if ToolResultCondensationPolicy.nonLLMCondensationTools.contains(toolName) {
+            // Reuse the budget snapshot computed above when the forced-trim
+            // check already ran; otherwise (static-threshold path) compute it
+            // once here — at most one extra tokenizer pass per actual
+            // condensation event, never per tool call.
+            let budget = liveBudget ?? (await currentBudgetContext())
+            let effectiveMaxChars = ToolResultCondensationPolicy.effectiveFallbackRawChars(
+                staticMaxChars: condensationConfig.fallbackRawChars,
+                charsPerToken: condensationConfig.charsPerTokenEstimate,
+                budget: budget
             )
+
+            let fallback: String
+            if budgetForcedTrim, ToolResultCondensationPolicy.readGuardTools.contains(toolName) {
+                // Budget-forced trim on a read-style tool: use the head-N
+                // "read guard" message (structure slice + explicit "don't
+                // re-read in full" steering) rather than the generic bounded
+                // fallback below — only for the NEW trigger path, so results
+                // that already crossed the static threshold keep today's
+                // existing message shape unchanged.
+                fallback = ToolResultCondensationPolicy.budgetTrimmedReadMessage(
+                    toolName: toolName,
+                    raw: rawToolResponse,
+                    headLines: ToolResultCondensationPolicy.readGuardHeadLines,
+                    estimatedTokens: beforeTokens
+                )
+            } else {
+                fallback = ToolResultCondensationPolicy.boundedFallbackRawMessage(
+                    toolName: toolName,
+                    raw: rawToolResponse,
+                    maxChars: effectiveMaxChars
+                )
+            }
             let afterTokens = ToolResultCondensationPolicy.estimatedTokenCount(
                 for: fallback,
                 charsPerToken: condensationConfig.charsPerTokenEstimate
             )
             await hooks.emit(.compression(toolName: toolName, beforeTokens: beforeTokens, afterTokens: afterTokens, usedFallback: true))
             if verbose {
-                frontend.emitStatus("[debug] Tool result condensation used non-LLM fallback for \(toolName): before≈\(beforeTokens) tokens, after≈\(afterTokens), saved≈\(max(0, beforeTokens - afterTokens))")
+                let budgetNote = budgetForcedTrim ? " [budget-forced]" : ""
+                frontend.emitStatus("[debug] Tool result condensation used non-LLM fallback for \(toolName)\(budgetNote): before≈\(beforeTokens) tokens, after≈\(afterTokens), saved≈\(max(0, beforeTokens - afterTokens))")
             }
             return fallback
         }
@@ -258,5 +311,26 @@ extension AgentLoop {
 
             """
         return factOnlyPreamble + toolResponse
+    }
+
+    /// Live remaining-budget snapshot for the current turn, built the same way
+    /// `AgentLoop+ContextManagement.swift` builds usage for `ContextWatchdog`:
+    /// `currentGenerationConfig.longContextThreshold` as the effective window
+    /// (the only number in this codebase already playing the "context window"
+    /// role — see that file's doc comment), and the same tokenizer-backed
+    /// counter (`makeTokenCounter`) the compaction watchdog uses. When no
+    /// model/tokenizer is loaded (e.g. a remote-only OpenRouter session),
+    /// `currentTokens` is left `nil` — NOT backfilled with the `chars/4`
+    /// history estimate — so
+    /// `ToolResultCondensationPolicy.shouldTrimForBudget`/`effectiveFallbackRawChars`
+    /// fall back to little-coder's `FALLBACK_FRACTION` heuristic instead of
+    /// silently treating an unmeasured estimate as ground truth.
+    func currentBudgetContext() async -> ToolResultCondensationPolicy.BudgetContext {
+        let windowTokens = currentGenerationConfig.longContextThreshold
+        guard let tokenCounter = await makeTokenCounter() else {
+            return ToolResultCondensationPolicy.BudgetContext(currentTokens: nil, windowTokens: windowTokens)
+        }
+        let tokens = currentTokenCount(using: tokenCounter)
+        return ToolResultCondensationPolicy.BudgetContext(currentTokens: tokens, windowTokens: windowTokens)
     }
 }

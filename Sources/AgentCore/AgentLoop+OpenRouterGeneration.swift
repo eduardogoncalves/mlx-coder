@@ -16,7 +16,7 @@ import Foundation
 
 extension AgentLoop {
 
-    func generateResponseViaRemote() async throws -> (text: String, writer: StreamingToolCallWriter, startedThinking: Bool, turnStats: (promptTokens: Int, completionTokens: Int, elapsed: TimeInterval, tokensPerSecond: Double?)?, finishReason: String?) {
+    func generateResponseViaRemote() async throws -> (text: String, writer: StreamingToolCallWriter, startedThinking: Bool, turnStats: (promptTokens: Int, completionTokens: Int, elapsed: TimeInterval, tokensPerSecond: Double?)?, finishReason: String?, thinkingBudgetBreached: Bool) {
         guard case .remote(let providerID, let modelID) = backend else {
             throw NSError(
                 domain: "AgentLoop",
@@ -180,7 +180,10 @@ extension AgentLoop {
             onStatusChange: nil
         )
 
-        return (text: responseText, writer: writer, startedThinking: false, turnStats: capturedTurnStats, finishReason: finishReason)
+        // Thinking-budget enforcement is local-only (see ThinkingBudget.swift) —
+        // the remote path never tracks `isThinking`, so there is nothing to
+        // enforce against here.
+        return (text: responseText, writer: writer, startedThinking: false, turnStats: capturedTurnStats, finishReason: finishReason, thinkingBudgetBreached: false)
     }
 
     static func formatGenerationStats(

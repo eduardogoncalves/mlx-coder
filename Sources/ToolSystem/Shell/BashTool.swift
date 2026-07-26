@@ -62,6 +62,20 @@ public struct BashTool: Tool {
             return .error("Command denied by permission rules: \(command)")
         }
 
+        // Hard write-guard companion for shell commands: `cat > existing_file`
+        // (or any other command using a truncating `>` redirect) bypasses the
+        // tool layer entirely, so it would otherwise sidestep write_file's
+        // hard write-guard (FileMutationSupport.writeGuardBlock) completely.
+        // This sits ahead of approval mode so it applies even under
+        // yolo/autopilot, same as that guard. `>>` (append) is deliberately
+        // never blocked.
+        if let redirectError = RedirectOverwriteGuard.checkTruncatingRedirect(
+            command,
+            workspaceRoot: permissions.effectiveWorkspaceRoot
+        ) {
+            return .error(redirectError)
+        }
+
         // Defense-in-depth: block `ln -s` commands whose target resolves outside
         // the workspace. This prevents using a symlink-then-read pattern to leak
         // data from outside the sandbox via shell tools (cat, head, less, ...).
