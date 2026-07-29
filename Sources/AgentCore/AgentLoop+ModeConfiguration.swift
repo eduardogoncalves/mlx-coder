@@ -22,6 +22,7 @@ extension AgentLoop {
             thinkingLevel: thinkingLevel,
             taskType: self.taskType,
             workspaceRoot: permissions.effectiveWorkspaceRoot,
+            baseInstructions: subAgentBaseInstructions,
             memorySection: memoryPromptSection,
             customizationSection: customizationPromptSection,
             skillsMetadata: skillsMetadata,
@@ -119,6 +120,7 @@ extension AgentLoop {
             thinkingLevel: thinkingLevel,
             taskType: self.taskType,
             workspaceRoot: permissions.effectiveWorkspaceRoot,
+            baseInstructions: subAgentBaseInstructions,
             memorySection: memoryPromptSection,
             customizationSection: customizationPromptSection,
             skillsMetadata: skillsMetadata,
@@ -157,6 +159,7 @@ extension AgentLoop {
             thinkingLevel: level,
             taskType: taskType,
             workspaceRoot: permissions.effectiveWorkspaceRoot,
+            baseInstructions: subAgentBaseInstructions,
             memorySection: memoryPromptSection,
             customizationSection: customizationPromptSection,
             skillsMetadata: skillsMetadata,
@@ -228,6 +231,7 @@ extension AgentLoop {
             thinkingLevel: self.thinkingLevel,
             taskType: self.taskType,
             workspaceRoot: permissions.effectiveWorkspaceRoot,
+            baseInstructions: subAgentBaseInstructions,
             memorySection: memoryPromptSection,
             customizationSection: customizationPromptSection,
             skillsMetadata: skillsMetadata,
@@ -263,6 +267,17 @@ extension AgentLoop {
     }
 
     func updatePendingReloadIfNeeded() {
+        // Online backends have no local weights or KV cache — memory/cache/KV-quant
+        // parameters don't apply to them, so only an actual model *switch* (a
+        // different remote model) warrants a reload. Flagging one for KV-param
+        // changes would just schedule a no-op reload (see reloadModel).
+        if backend.isOnline {
+            if self.modelPath != self.loadedModelPath {
+                self.pendingReload = true
+            }
+            return
+        }
+
         // Reload only when model loading/runtime-cache parameters changed.
         // NOTE: turboQuantBits is intentionally excluded — TurboQuant creates per-generation
         // caches (not at model-load time), so changing it never requires a model reload.

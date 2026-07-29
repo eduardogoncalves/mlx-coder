@@ -27,31 +27,50 @@ final class TaskToolProfileTests: XCTestCase {
         XCTAssertNil(TaskTool.baseInstructions(for: "unknown_profile"))
     }
 
-    func testValidateIsolationOptionsRejectsIsolationDirectoryWithoutIsolation() {
-        let error = TaskTool.validateIsolationOptions(
-            isolate: false,
-            requestedSubdirectory: "tmp/custom"
-        )
-        XCTAssertEqual(error, "isolation_directory requires isolate=true.")
+    // Supplying `isolation_directory` without `isolate: true` no longer errors —
+    // the directory is the intent to isolate, so `isolate` is inferred true
+    // instead of wasting a round-trip on the missing companion flag.
+    func testIsolationDirectoryInfersIsolate() {
+        switch TaskTool.validateAndNormalizeArguments([
+            "description": "do work",
+            "isolation_directory": "tmp/custom",
+        ]) {
+        case .success(let args):
+            XCTAssertTrue(args.isolate)
+            XCTAssertEqual(args.isolationDirectory, "tmp/custom")
+        case .failure(.message(let message)):
+            XCTFail("Expected isolation_directory to infer isolate=true, got error: \(message)")
+        }
     }
 
-    func testValidateIsolationOptionsAllowsIsolateWithDirectory() {
-        let error = TaskTool.validateIsolationOptions(
-            isolate: true,
-            requestedSubdirectory: "tmp/custom"
-        )
-        XCTAssertNil(error)
+    func testIsolateWithDirectoryIsAccepted() {
+        switch TaskTool.validateAndNormalizeArguments([
+            "description": "do work",
+            "isolate": true,
+            "isolation_directory": "tmp/custom",
+        ]) {
+        case .success(let args):
+            XCTAssertTrue(args.isolate)
+            XCTAssertEqual(args.isolationDirectory, "tmp/custom")
+        case .failure(.message(let message)):
+            XCTFail("Expected isolate+directory to succeed, got error: \(message)")
+        }
     }
 
     // `isolate: true` with no directory is a no-op (sub-agents already share
     // the orchestrator's workspace), not an error — this keeps existing
     // callers that always pass `isolate: true` from breaking.
-    func testValidateIsolationOptionsAllowsIsolateAloneAsNoOp() {
-        let error = TaskTool.validateIsolationOptions(
-            isolate: true,
-            requestedSubdirectory: nil
-        )
-        XCTAssertNil(error)
+    func testIsolateAloneIsAcceptedAsNoOp() {
+        switch TaskTool.validateAndNormalizeArguments([
+            "description": "do work",
+            "isolate": true,
+        ]) {
+        case .success(let args):
+            XCTAssertTrue(args.isolate)
+            XCTAssertNil(args.isolationDirectory)
+        case .failure(.message(let message)):
+            XCTFail("Expected isolate-alone to succeed, got error: \(message)")
+        }
     }
 
     func testSanitizeRequestedToolsAllowsEmptyList() {
@@ -223,7 +242,9 @@ final class TaskToolProfileTests: XCTestCase {
         }
     }
 
-    func testValidateAndNormalizeArgumentsRejectsInvalidIsolationCombo() {
+    func testValidateAndNormalizeArgumentsInfersIsolateFromDirectory() {
+        // isolation_directory without an explicit isolate flag no longer fails —
+        // the directory is the intent, so isolate is inferred true.
         let arguments: [String: Any] = [
             "description": "investigate failures",
             "tools": ["read_file"],
@@ -231,10 +252,11 @@ final class TaskToolProfileTests: XCTestCase {
         ]
 
         switch TaskTool.validateAndNormalizeArguments(arguments) {
-        case .success:
-            XCTFail("Expected invalid isolation option combination to fail")
+        case .success(let args):
+            XCTAssertTrue(args.isolate)
+            XCTAssertEqual(args.isolationDirectory, "tmp/custom")
         case .failure(.message(let message)):
-            XCTAssertEqual(message, "isolation_directory requires isolate=true.")
+            XCTFail("Expected isolation_directory to infer isolate=true, got error: \(message)")
         }
     }
 
@@ -257,6 +279,134 @@ final class TaskToolProfileTests: XCTestCase {
             XCTAssertTrue(values.isolate)
             XCTAssertEqual(values.isolationDirectory, "tmp/custom")
         }
+    }
+
+    // MARK: - Resume argument
+
+    func testExtractResumeDefaultsToNilWhenMissing() {
+        switch TaskTool.extractResume(from: [:]) {
+        case .success(let value):
+            XCTAssertNil(value)
+        case .failure(let error):
+            XCTFail("Expected nil resume, got error: \(error)")
+        }
+    }
+
+    func testExtractResumeTreatsBlankAsNil() {
+        switch TaskTool.extractResume(from: ["resume": "   "]) {
+        case .success(let value):
+            XCTAssertNil(value)
+        case .failure(let error):
+            XCTFail("Expected nil resume for blank, got error: \(error)")
+        }
+    }
+
+    func testExtractResumeRejectsInvalidType() {
+        switch TaskTool.extractResume(from: ["resume": 42]) {
+        case .success:
+            XCTFail("Expected failure for non-string resume")
+        case .failure(.message(let message)):
+            XCTAssertTrue(message.contains("resume must be a string"))
+        }
+    }
+
+    func testExtractResumeResolvesBareRunID() {
+        switch TaskTool.extractResume(from: ["resume": "20260726-planner-abc12345"]) {
+        case .success(let value):
+            XCTAssertEqual(value, ".native-agent/subagent-logs/20260726-planner-abc12345/history.json")
+        case .failure(let error):
+            XCTFail("Expected resolved path, got error: \(error)")
+        }
+    }
+
+    func testExtractResumeResolvesArchiveDirectoryPath() {
+        switch TaskTool.extractResume(from: ["resume": ".native-agent/subagent-logs/run-1"]) {
+        case .success(let value):
+            XCTAssertEqual(value, ".native-agent/subagent-logs/run-1/history.json")
+        case .failure(let error):
+            XCTFail("Expected resolved path, got error: \(error)")
+        }
+    }
+
+    func testValidateAndNormalizeArgumentsPopulatesResume() {
+        let arguments: [String: Any] = [
+            "description": "continue",
+            "resume": "run-42",
+        ]
+        switch TaskTool.validateAndNormalizeArguments(arguments) {
+        case .failure(.message(let message)):
+            XCTFail("Expected success, got error: \(message)")
+        case .success(let values):
+            XCTAssertEqual(values.resumeHistoryPath, ".native-agent/subagent-logs/run-42/history.json")
+        }
+    }
+
+    func testValidateAndNormalizeArgumentsResumeNilWhenAbsent() {
+        switch TaskTool.validateAndNormalizeArguments(["description": "fresh"]) {
+        case .failure(.message(let message)):
+            XCTFail("Expected success, got error: \(message)")
+        case .success(let values):
+            XCTAssertNil(values.resumeHistoryPath)
+        }
+    }
+
+    func testMetadataPathIsSiblingOfHistory() {
+        XCTAssertEqual(
+            TaskTool.metadataPath(forHistoryPath: ".native-agent/subagent-logs/run-1/history.json"),
+            ".native-agent/subagent-logs/run-1/metadata.json"
+        )
+    }
+
+    // MARK: - Archive metadata backward-compat
+
+    func testSubagentArchiveMetadataDecodesLegacyBlobWithoutResumeFields() throws {
+        // A metadata.json written before resume support: no tools/responseMode/
+        // isolationDirectory/resumedFrom keys. It must still decode, defaulting
+        // the new fields so old archives remain loadable.
+        let legacy = """
+        {
+          "id": "run-legacy",
+          "createdAt": "2026-01-01T00:00:00Z",
+          "status": "success",
+          "profile": "codebase_research",
+          "taskDescription": "read a file",
+          "messageCount": 4,
+          "toolResponseCount": 1,
+          "finalResponseLength": 120
+        }
+        """
+        let decoded = try JSONDecoder().decode(
+            TaskTool.SubagentArchiveMetadata.self,
+            from: Data(legacy.utf8)
+        )
+        XCTAssertEqual(decoded.id, "run-legacy")
+        XCTAssertEqual(decoded.profile, "codebase_research")
+        XCTAssertEqual(decoded.tools, [])
+        XCTAssertEqual(decoded.responseMode, "summary")
+        XCTAssertNil(decoded.isolationDirectory)
+        XCTAssertNil(decoded.resumedFrom)
+    }
+
+    func testSubagentArchiveMetadataRoundTripsResumeFields() throws {
+        let metadata = TaskTool.SubagentArchiveMetadata(
+            id: "run-new",
+            createdAt: "2026-07-26T10:00:00Z",
+            status: "success",
+            profile: "executor",
+            taskDescription: "edit a file",
+            messageCount: 6,
+            toolResponseCount: 2,
+            finalResponseLength: 200,
+            tools: ["read_file", "edit_file"],
+            responseMode: "raw",
+            isolationDirectory: nil,
+            resumedFrom: "run-old"
+        )
+        let data = try JSONEncoder().encode(metadata)
+        let decoded = try JSONDecoder().decode(TaskTool.SubagentArchiveMetadata.self, from: data)
+        XCTAssertEqual(decoded.tools, ["read_file", "edit_file"])
+        XCTAssertEqual(decoded.responseMode, "raw")
+        XCTAssertEqual(decoded.resumedFrom, "run-old")
     }
 
     func testCompactDigestSummaryLimitsLinesAndCharacters() {

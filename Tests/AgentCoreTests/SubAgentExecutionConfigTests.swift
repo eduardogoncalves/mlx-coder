@@ -18,17 +18,18 @@ final class SubAgentExecutionConfigTests: XCTestCase {
         return dir.path
     }
 
-    private func makeSubAgent(workspace: String) -> AgentLoop {
+    private func makeSubAgent(workspace: String, baseInstructions: String? = nil) -> AgentLoop {
         AgentLoop(
             modelContainer: nil,
             registry: ToolRegistry(),
             permissions: PermissionEngine(workspaceRoot: workspace),
             generationConfig: GenerationEngine.Config(),
             frontend: NullAgentFrontend(),
-            systemPrompt: "test",
+            systemPrompt: baseInstructions ?? "test",
             modelPath: "mlx-community/test-model",
             workspace: workspace,
-            role: "executor"
+            role: "executor",
+            subAgentBaseInstructions: baseInstructions
         )
     }
 
@@ -107,6 +108,34 @@ final class SubAgentExecutionConfigTests: XCTestCase {
         await subAgent.configureForSubAgentExecution(taskType: .coding)
         let skipsGitInit = await subAgent.skipGitOrchestrationInitialization
         XCTAssertTrue(skipsGitInit, "sub-agents must never trigger their own git worktree/branch setup wizard")
+    }
+
+    /// Regression test: `configureForSubAgentExecution` calls `setMode`, which
+    /// rebuilds the system prompt. That rebuild must re-supply the profile's
+    /// `baseInstructions` (the "You are the EXECUTOR…" identity + output
+    /// contract) — otherwise a non-orchestration filter falls through to the
+    /// generic `defaultInstructions`, silently discarding the carefully-authored
+    /// profile prompt on every fresh sub-agent run. `subAgentBaseInstructions`
+    /// is the stored field that makes it survive.
+    func testConfigureForSubAgentExecutionPreservesProfileBaseInstructions() async throws {
+        let workspace = makeTemporaryWorkspace()
+        defer { try? FileManager.default.removeItem(atPath: workspace) }
+
+        let identity = "You are the EXECUTOR. Implement the requested change end-to-end."
+        let subAgent = makeSubAgent(workspace: workspace, baseInstructions: identity)
+        await subAgent.configureForSubAgentExecution(taskType: .coding)
+
+        let systemPrompt = await subAgent.history.messages.first(where: { $0.role == .system })?.content
+        XCTAssertNotNil(systemPrompt)
+        XCTAssertTrue(
+            systemPrompt?.contains(identity) == true,
+            "profile identity must survive the setMode rebuild inside configureForSubAgentExecution"
+        )
+        // And it must NOT have fallen back to the generic three-mindset prompt.
+        XCTAssertFalse(
+            systemPrompt?.contains("code-explorer") == true,
+            "sub-agent must not fall back to the generic defaultInstructions"
+        )
     }
 
     /// Regression test: `setMode` (called internally) computes `pendingReload`

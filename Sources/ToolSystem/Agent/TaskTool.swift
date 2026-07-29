@@ -55,6 +55,9 @@ public struct TaskTool: Tool {
         let responseMode: String
         let expectedPatterns: [String]
         let mustNotTruncate: Bool
+        /// Workspace-relative path to a prior run's `history.json` to continue,
+        /// resolved from the `resume` argument (nil for a fresh delegation).
+        let resumeHistoryPath: String?
     }
 
     struct SubagentArchiveMetadata: Sendable, Codable {
@@ -66,6 +69,60 @@ public struct TaskTool: Tool {
         let messageCount: Int
         let toolResponseCount: Int
         let finalResponseLength: Int
+        // Resume support. Recorded so a later `task(resume: <id>)` can rebuild
+        // the same tool scope / output shaping the restored system prompt was
+        // written for. Optional-with-default on decode so archives written
+        // before these fields still load.
+        let tools: [String]
+        let responseMode: String
+        let isolationDirectory: String?
+        /// The run id this run was itself resumed from, if any (lineage).
+        let resumedFrom: String?
+
+        init(
+            id: String,
+            createdAt: String,
+            status: String,
+            profile: String,
+            taskDescription: String,
+            messageCount: Int,
+            toolResponseCount: Int,
+            finalResponseLength: Int,
+            tools: [String] = [],
+            responseMode: String = "summary",
+            isolationDirectory: String? = nil,
+            resumedFrom: String? = nil
+        ) {
+            self.id = id
+            self.createdAt = createdAt
+            self.status = status
+            self.profile = profile
+            self.taskDescription = taskDescription
+            self.messageCount = messageCount
+            self.toolResponseCount = toolResponseCount
+            self.finalResponseLength = finalResponseLength
+            self.tools = tools
+            self.responseMode = responseMode
+            self.isolationDirectory = isolationDirectory
+            self.resumedFrom = resumedFrom
+        }
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            id = try c.decode(String.self, forKey: .id)
+            createdAt = try c.decode(String.self, forKey: .createdAt)
+            status = try c.decode(String.self, forKey: .status)
+            profile = try c.decode(String.self, forKey: .profile)
+            taskDescription = try c.decode(String.self, forKey: .taskDescription)
+            messageCount = try c.decode(Int.self, forKey: .messageCount)
+            toolResponseCount = try c.decode(Int.self, forKey: .toolResponseCount)
+            finalResponseLength = try c.decode(Int.self, forKey: .finalResponseLength)
+            // Backward-compat: older archives predate these fields.
+            tools = try c.decodeIfPresent([String].self, forKey: .tools) ?? []
+            responseMode = try c.decodeIfPresent(String.self, forKey: .responseMode) ?? "summary"
+            isolationDirectory = try c.decodeIfPresent(String.self, forKey: .isolationDirectory)
+            resumedFrom = try c.decodeIfPresent(String.self, forKey: .resumedFrom)
+        }
     }
 
     enum SpecialistProfile: String, CaseIterable {
@@ -109,25 +166,25 @@ public struct TaskTool: Tool {
         }
         switch profile {
         case .general:
-            return "You are a general-purpose sub-agent. \(outputRules)"
+            return "You are a general-purpose sub-agent — a focused single-task worker, not a conversation partner. Read only what you need, do exactly what the task asks (find the answer, or make the change), then stop. Do NOT expand scope beyond the task or refactor unrelated code. \(outputRules)"
         case .codebaseResearch:
-            return "You are the CODEBASE_RESEARCH agent. Focus on finding relevant files, symbols, and code-path evidence — prefer precise file/symbol references over broad summaries. \(outputRules)"
+            return "You are the CODEBASE_RESEARCH agent. Your job is to LOCATE and prove, not to summarize vaguely. Use glob/grep/code_search and read_file to find the exact files, symbols, and call sites the task is about. ALWAYS back claims with concrete `file:line` references and short quoted snippets — never a hand-wavy overview. Do NOT edit files or run build/test commands. If something is not found, say so plainly instead of guessing. \(outputRules)"
         case .testEngineering:
-            return "You are the TEST_ENGINEERING agent. Focus on deterministic validation: run and interpret targeted tests, identify regressions, and propose minimal-risk fixes. \(outputRules)"
+            return "You are the TEST_ENGINEERING agent. Run the NARROWEST tests that cover the change, then interpret the results. You MUST report the exact command you ran and the pass/fail outcome. If a test fails, quote the failing assertion or stack line and propose the smallest fix — do not rewrite unrelated code. Prefer running existing tests over writing new ones unless the task explicitly asks for new tests. \(outputRules)"
         case .securityReview:
-            return "You are the SECURITY_REVIEW agent. Focus on security risks first: input validation, command/path injection, data leakage, authz boundaries, unsafe defaults. \(outputRules)"
+            return "You are the SECURITY_REVIEW agent. Inspect the code for REAL, pointable security risks: input validation, command/path/SQL injection, secret and data leakage, authorization-boundary gaps, unsafe deserialization, unsafe defaults. Do NOT edit files. Report each issue as `file:line — risk — concrete fix`, ordered by severity. Only flag a risk you can point to in the code; skip speculative or purely stylistic concerns. If you find nothing exploitable, say so explicitly. \(outputRules)"
         case .docs:
-            return "You are the DOCS agent. Focus on clear user-facing documentation and migration notes aligned with actual behavior. \(outputRules)"
+            return "You are the DOCS agent. Write or update clear, user-facing documentation that matches ACTUAL current behavior — read the relevant code first so you never document something untrue. Keep it concise and concrete, and include migration notes when behavior changed. Edit only documentation/markdown files unless the task says otherwise. \(outputRules)"
         case .planner:
-            return "You are the PLANNER. Decompose the request, research the codebase (never edit or run destructive commands), and produce a concrete, actionable implementation plan via plan_file, citing specific file/symbol references. Do not implement the change yourself. \(outputRules)"
+            return "You are the PLANNER. Research the codebase, then produce a concrete, actionable implementation plan and persist it with `plan_file`. Your plan MUST name the exact files/symbols to change (with `file:line`), the chosen approach, and a step-by-step build order. You have `web_search`/`web_fetch` for external docs or URLs the user gave you. You MUST NOT edit files, write full implementations into your answer, or run destructive/build commands — planning only; implementation is the EXECUTOR's job. \(outputRules)"
         case .executor:
-            return "You are the EXECUTOR. Implement the requested change: read what you need, then write/edit/patch files and run shell commands as required, verifying your own work (build/tests) when tools allow it. \(outputRules)"
+            return "You are the EXECUTOR. Implement the requested change end-to-end: read enough surrounding code to understand it, then write/edit/patch the files and run any shell commands required. MATCH the existing code's conventions and structure — do not invent new patterns. After editing, verify your own work (build or targeted tests) when the tools allow, and fix what you broke. Change ONLY what the task requires; do not refactor unrelated code. \(outputRules)"
         case .reviewer:
-            return "You are the REVIEWER. Inspect the current state of the code (never edit files); check correctness and project-convention compliance, and run build_check if available. Only report a finding if you're \u{2265}80% confident it's real after double-checking — skip stylistic nitpicks. Format each finding as `file:line — issue — suggested fix`, or state explicitly that the change looks correct if you find nothing. \(outputRules)"
+            return "You are the REVIEWER. Inspect the CURRENT state of the code — read files, run `build_check` if available — but NEVER edit anything. Check correctness (logic errors, null/edge cases, race conditions, resource leaks) and project-convention compliance. Only report a finding you are \u{2265}80% confident is a real problem after double-checking; skip stylistic nitpicks. Format each finding as `file:line — issue — suggested fix`. If the change looks correct, say so explicitly instead of inventing concerns. \(outputRules)"
         case .filesystem:
-            return "You are the FILESYSTEM AGENT. Perform only the requested file reads/writes/edits precisely as described — do not run shell commands. \(outputRules)"
+            return "You are the FILESYSTEM AGENT. Perform ONLY the requested file reads/writes/edits, exactly as described. Do NOT run shell commands and do NOT make changes the task did not ask for. \(outputRules)"
         case .terminal:
-            return "You are the TERMINAL AGENT. Run only the requested shell command(s) and report their output — do not edit files. \(outputRules)"
+            return "You are the TERMINAL AGENT. Run ONLY the requested shell command(s) and report their output. Do NOT edit files and do NOT run extra commands beyond what the task asks. \(outputRules)"
         }
     }
 
@@ -215,27 +272,6 @@ public struct TaskTool: Tool {
             .filter { !$0.isEmpty }
         let effectiveTools = (explicitTools?.isEmpty == false) ? explicitTools! : defaultTools(for: profileName)
         return effectiveTools.contains { mutatingToolNames.contains($0) }
-    }
-
-    /// Sub-agents share the orchestrator's own workspace by default (which is
-    /// already the active git worktree, if the orchestrator switched into
-    /// one — see `AgentLoop.switchSessionWorkspace`). `isolate: true` only
-    /// changes anything when paired with `isolation_directory`, which scopes
-    /// the sub-agent to a specific subdirectory of that same workspace; it
-    /// never fabricates a disconnected sandbox directory, since a sub-agent
-    /// working there would be unable to see or affect the real project it
-    /// was asked to work on.
-    static func validateIsolationOptions(
-        isolate: Bool,
-        requestedSubdirectory: String?
-    ) -> String? {
-        let trimmedSubdirectory = requestedSubdirectory?.trimmingCharacters(in: .whitespacesAndNewlines)
-
-        if let trimmedSubdirectory, !trimmedSubdirectory.isEmpty, !isolate {
-            return "isolation_directory requires isolate=true."
-        }
-
-        return nil
     }
 
     static func sanitizeRequestedTools(_ tools: [String]) -> Result<[String], ToolListValidationError> {
@@ -355,6 +391,24 @@ public struct TaskTool: Tool {
         return .success(patterns.filter { !$0.isEmpty })
     }
 
+    /// Resolves the optional `resume` argument to a workspace-relative
+    /// `history.json` path (reusing `TaskOutputTool.resolveHistoryPath`, which
+    /// accepts a bare run id, a run directory, or a direct `.json` path).
+    /// Returns nil when `resume` is absent or blank — a fresh delegation.
+    static func extractResume(from arguments: [String: Any]) -> Result<String?, ArgumentValidationError> {
+        guard let rawResume = arguments["resume"] else {
+            return .success(nil)
+        }
+        guard let resume = rawResume as? String else {
+            return .failure(.message("Invalid argument type: resume must be a string"))
+        }
+        let trimmed = resume.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return .success(nil)
+        }
+        return .success(TaskOutputTool.resolveHistoryPath(trimmed))
+    }
+
     static func extractMustNotTruncate(from arguments: [String: Any]) -> Result<Bool, ArgumentValidationError> {
         guard let rawValue = arguments["must_not_truncate"] else {
             return .success(false)
@@ -415,7 +469,7 @@ public struct TaskTool: Tool {
             return .failure(.message("Task tool requires at least one tool in 'tools' (profile '\(profileName)' has no default preset)."))
         }
 
-        let isolate: Bool
+        var isolate: Bool
         switch extractIsolate(from: arguments) {
         case .success(let value):
             isolate = value
@@ -431,11 +485,13 @@ public struct TaskTool: Tool {
             return .failure(error)
         }
 
-        if let optionError = validateIsolationOptions(
-            isolate: isolate,
-            requestedSubdirectory: requestedIsolationDirectory
-        ) {
-            return .failure(.message(optionError))
+        // Supplying `isolation_directory` is itself the intent to isolate —
+        // infer `isolate: true` rather than rejecting the call over the missing
+        // companion flag (a round-trip the model reliably wasted a turn on).
+        // The directory is what actually scopes the sub-agent; the boolean is
+        // just a redundant switch.
+        if let dir = requestedIsolationDirectory, !dir.isEmpty {
+            isolate = true
         }
 
         let responseMode: String
@@ -462,6 +518,14 @@ public struct TaskTool: Tool {
             return .failure(error)
         }
 
+        let resumeHistoryPath: String?
+        switch extractResume(from: arguments) {
+        case .success(let value):
+            resumeHistoryPath = value
+        case .failure(let error):
+            return .failure(error)
+        }
+
         return .success(
             ValidatedArguments(
                 description: sanitizedDescription,
@@ -471,7 +535,8 @@ public struct TaskTool: Tool {
                 isolationDirectory: requestedIsolationDirectory,
                 responseMode: responseMode,
                 expectedPatterns: expectedPatterns,
-                mustNotTruncate: mustNotTruncate
+                mustNotTruncate: mustNotTruncate,
+                resumeHistoryPath: resumeHistoryPath
             )
         )
     }
@@ -488,6 +553,20 @@ public struct TaskTool: Tool {
             .replacingOccurrences(of: "[^a-z0-9_]+", with: "-", options: .regularExpression)
         let suffix = String(UUID().uuidString.prefix(8)).lowercased()
         return "\(timestamp)-\(normalizedProfile)-\(suffix)"
+    }
+
+    /// Sibling `metadata.json` path for a resolved `history.json` archive path.
+    /// Both files live in the same run directory (see `archiveSubagentRun`).
+    static func metadataPath(forHistoryPath historyPath: String) -> String {
+        guard historyPath.hasSuffix("/history.json") else {
+            // Unusual form (e.g. a direct path that isn't the standard log
+            // file) — best-effort: swap a trailing history.json, else append.
+            if historyPath.hasSuffix("history.json") {
+                return String(historyPath.dropLast("history.json".count)) + "metadata.json"
+            }
+            return historyPath + "/metadata.json"
+        }
+        return String(historyPath.dropLast("history.json".count)) + "metadata.json"
     }
 
     /// Collapses a (possibly long, multi-line) description down to a single
@@ -521,24 +600,37 @@ public struct TaskTool: Tool {
     /// information can reach it through.
     static func fallbackToolActivitySummary(
         from messages: [Message],
+        modifiedFiles: [String] = [],
         maxTools: Int = 3,
         maxCharactersPerTool: Int = 220
     ) -> String? {
         let toolMessages = messages.filter { $0.role == .tool }
-        guard !toolMessages.isEmpty else { return nil }
+        // With no tool activity at all there is nothing to synthesize — but if
+        // the sub-agent still mutated files (rare, e.g. via a path that doesn't
+        // surface as a tool message), report that rather than nothing.
+        guard !toolMessages.isEmpty || !modifiedFiles.isEmpty else { return nil }
 
-        let recent = toolMessages.suffix(maxTools)
-        let lines = recent.map { message -> String in
-            let name = message.toolCallId ?? "tool"
-            let trimmed = message.content.trimmingCharacters(in: .whitespacesAndNewlines)
-            let truncated = trimmed.count > maxCharactersPerTool
-                ? String(trimmed.prefix(maxCharactersPerTool)) + "..."
-                : trimmed
-            return "- \(name): \(truncated)"
+        var sections: [String] = ["Sub-agent did not write a final summary."]
+
+        // Lead with the concrete, deterministic outcome: what changed on disk.
+        if !modifiedFiles.isEmpty {
+            sections.append("Files modified this run: \(modifiedFiles.sorted().joined(separator: ", ")).")
         }
 
-        return "Sub-agent did not write a final summary. Raw output from its last \(recent.count) tool call(s):\n"
-            + lines.joined(separator: "\n")
+        if !toolMessages.isEmpty {
+            let recent = toolMessages.suffix(maxTools)
+            let lines = recent.map { message -> String in
+                let name = message.toolCallId ?? "tool"
+                let trimmed = message.content.trimmingCharacters(in: .whitespacesAndNewlines)
+                let truncated = trimmed.count > maxCharactersPerTool
+                    ? String(trimmed.prefix(maxCharactersPerTool)) + "..."
+                    : trimmed
+                return "- \(name): \(truncated)"
+            }
+            sections.append("Raw output from its last \(recent.count) tool call(s):\n" + lines.joined(separator: "\n"))
+        }
+
+        return sections.joined(separator: "\n")
     }
 
     /// Result of `compactDigestSummary`: the (possibly truncated) text, plus
@@ -594,6 +686,9 @@ public struct TaskTool: Tool {
     /// sub-agent's edits into its own build-check/git flow.
     static let modifiedFilesLinePrefix = "modified_files: "
 
+    /// Prefix identifying the spooled-output pointer line in a digest.
+    static let toolOutputLinePrefix = "tool_output: "
+
     static func makeSubagentDigest(
         status: String,
         profileName: String,
@@ -604,7 +699,9 @@ public struct TaskTool: Tool {
         summaryTruncated: Bool = false,
         summaryBytes: Int = 0,
         toolCalls: Int = 0,
-        contractLine: String? = nil
+        contractLine: String? = nil,
+        spoolPath: String? = nil,
+        spoolTotalLines: Int = 0
     ) -> String {
         var lines: [String] = [
             "[Sub-agent digest]",
@@ -620,6 +717,16 @@ public struct TaskTool: Tool {
             "summary_bytes: \(summaryBytes)",
             "tool_calls: \(toolCalls)",
         ]
+
+        // Spool pointer: the sub-agent's full output is on disk as a plain-text,
+        // line-addressable file. Hand the orchestrator the path + line range so
+        // it can read the relevant region with read_tool_output — or delegate
+        // that read to another sub-agent — instead of the summary carrying the
+        // whole thing verbatim.
+        if let spoolPath, !spoolPath.isEmpty, spoolTotalLines > 0 {
+            lines.append("\(toolOutputLinePrefix)\(spoolPath)")
+            lines.append("relevant_lines: 1-\(spoolTotalLines) of \(spoolTotalLines)")
+        }
 
         if let archivePath, !archivePath.isEmpty {
             lines.append("archive: \(archivePath)")
@@ -637,9 +744,20 @@ public struct TaskTool: Tool {
         // no way forward except spawning yet another sub-agent to read the
         // archived log — tell it directly how to get the full output instead.
         if summaryTruncated {
-            var recovery = "recovery: output was truncated — re-run this same task with response_mode:\"raw\" (and must_not_truncate:true) to receive the full output verbatim"
-            if let archivePath, !archivePath.isEmpty {
-                recovery += ", or call task_output with archive \"\(archivePath)\" to recover it without re-running the work"
+            var recovery: String
+            if let spoolPath, !spoolPath.isEmpty, spoolTotalLines > 0 {
+                // Prefer the line-addressable spool: the orchestrator can page
+                // it directly (read_tool_output) or hand the path + range to a
+                // sub-agent, with no re-run.
+                recovery = "recovery: output was truncated — the full output is on disk at \(spoolPath) (\(spoolTotalLines) lines); read any range with read_tool_output(path, start_line, end_line), or delegate that read to a sub-agent"
+                if let archivePath, !archivePath.isEmpty {
+                    recovery += "; task_output with archive \"\(archivePath)\" also recovers it"
+                }
+            } else {
+                recovery = "recovery: output was truncated — re-run this same task with response_mode:\"raw\" (and must_not_truncate:true) to receive the full output verbatim"
+                if let archivePath, !archivePath.isEmpty {
+                    recovery += ", or call task_output with archive \"\(archivePath)\" to recover it without re-running the work"
+                }
             }
             recovery += "."
             lines.append(recovery)
@@ -732,6 +850,10 @@ public struct TaskTool: Tool {
                 type: "boolean",
                 description: "Optional (default false). If true, the sub-agent's full summary is preserved instead of being compacted to the short digest cap (use this when you need the complete result); status still becomes 'partial' if the output was so large it had to be cut even at the much larger raw ceiling."
             ),
+            "resume": PropertySchema(
+                type: "string",
+                description: "Optional. A prior `task` run id (or the `archive:` path from a previous digest) to continue. The sub-agent starts seeded with that run's full transcript instead of empty context, then processes `description` as a follow-up. Profile and tools are inherited from the resumed run (any `profile`/`tools` passed alongside `resume` are ignored). Not supported for runs that used isolation."
+            ),
         ],
         required: ["description"]
     )
@@ -751,6 +873,10 @@ public struct TaskTool: Tool {
     /// role's model is a *different* local model (only one local model may be
     /// resident at a time).
     private let parentAgentLoop: AgentLoop?
+    /// Large-output spool config, inherited from the parent. Controls whether a
+    /// sub-agent hands back an oversized digest body as a spool pointer + line
+    /// range (so the orchestrator can page it / delegate it) rather than inline.
+    private let toolOutputSpool: ToolOutputSpoolConfig
 
     public init(
         modelContainer: ModelContainer?,
@@ -761,7 +887,8 @@ public struct TaskTool: Tool {
         parentRegistry: ToolRegistry,
         frontend: any AgentFrontend,
         roleModels: [String: String] = [:],
-        parentAgentLoop: AgentLoop? = nil
+        parentAgentLoop: AgentLoop? = nil,
+        toolOutputSpool: ToolOutputSpoolConfig = .enabledDefault
     ) {
         self.modelContainer = modelContainer
         self.permissions = permissions
@@ -772,6 +899,7 @@ public struct TaskTool: Tool {
         self.frontend = frontend
         self.roleModels = roleModels
         self.parentAgentLoop = parentAgentLoop
+        self.toolOutputSpool = toolOutputSpool
     }
 
     public func execute(arguments: [String: Any]) async throws -> ToolResult {
@@ -784,14 +912,63 @@ public struct TaskTool: Tool {
         }
 
         let sanitizedDescription = validatedArguments.description
-        let sanitizedTools = validatedArguments.tools
-        let profileName = validatedArguments.profileName
-        let isolate = validatedArguments.isolate
-        let requestedIsolationDirectory = validatedArguments.isolationDirectory
-
-        let responseMode = validatedArguments.responseMode
+        // Per-call contracts stay with the follow-up call; profile/tools/mode/
+        // isolation may be overridden below when resuming a prior run.
         let expectedPatterns = validatedArguments.expectedPatterns
         let mustNotTruncate = validatedArguments.mustNotTruncate
+
+        var sanitizedTools = validatedArguments.tools
+        var profileName = validatedArguments.profileName
+        var isolate = validatedArguments.isolate
+        var requestedIsolationDirectory = validatedArguments.isolationDirectory
+        var responseMode = validatedArguments.responseMode
+
+        // Resume: recover the original run's config from its archive so the
+        // reconstructed sub-agent rebuilds the same tool scope / output shaping
+        // that the restored (archived) system prompt was written for. The
+        // restored transcript's leading system prompt is what actually drives
+        // the sub-agent — inheriting these keeps the registered tools consistent
+        // with it. Any `profile`/`tools` passed alongside `resume` are ignored.
+        var resumedFromRunID: String?
+        if let resumeHistoryPath = validatedArguments.resumeHistoryPath {
+            let metadataRelative = TaskTool.metadataPath(forHistoryPath: resumeHistoryPath)
+            let resolvedMetadataPath: String
+            let resolvedHistoryPath: String
+            do {
+                resolvedMetadataPath = try permissions.validateReadPath(metadataRelative)
+                resolvedHistoryPath = try permissions.validateReadPath(resumeHistoryPath)
+            } catch {
+                return .error("Cannot resume: \(error.localizedDescription)")
+            }
+            guard FileManager.default.fileExists(atPath: resolvedHistoryPath) else {
+                return .error("Cannot resume: no archived run at \(resumeHistoryPath). Pass a run id or the `archive:` path from a prior task digest.")
+            }
+            guard FileManager.default.fileExists(atPath: resolvedMetadataPath) else {
+                return .error("Cannot resume: archived run is missing metadata.json (\(metadataRelative)); it cannot be continued.")
+            }
+            let metadata: SubagentArchiveMetadata
+            do {
+                let data = try Data(contentsOf: URL(filePath: resolvedMetadataPath))
+                metadata = try JSONDecoder().decode(SubagentArchiveMetadata.self, from: data)
+            } catch {
+                return .error("Cannot resume: failed to read archived run metadata (\(metadataRelative)): \(error.localizedDescription)")
+            }
+            // Isolated runs archive under the parent workspace but scope the
+            // sub-agent's permissions to the isolation subdir, so the sub-agent
+            // couldn't read its own archive back. Resuming them is unsupported.
+            if let isolatedDir = metadata.isolationDirectory, !isolatedDir.isEmpty {
+                return .error("Cannot resume: run '\(metadata.id)' used isolation (\(isolatedDir)); resuming isolated runs is not supported.")
+            }
+            profileName = metadata.profile
+            sanitizedTools = metadata.tools.isEmpty ? TaskTool.defaultTools(for: metadata.profile) : metadata.tools
+            responseMode = metadata.responseMode
+            isolate = false
+            requestedIsolationDirectory = nil
+            resumedFromRunID = metadata.id
+            guard !sanitizedTools.isEmpty else {
+                return .error("Cannot resume: archived run '\(metadata.id)' has profile '\(metadata.profile)' with no recoverable tool scope.")
+            }
+        }
 
         guard let baseInstructions = TaskTool.baseInstructions(for: profileName, responseMode: responseMode) else {
             return .error("Invalid profile '\(profileName)'. Supported profiles: \(TaskTool.supportedProfileNames.joined(separator: ", ")).")
@@ -863,6 +1040,9 @@ public struct TaskTool: Tool {
 
         // Create a new registry for the sub-agent
         let subRegistry = ToolRegistry()
+        // Tracks any background (`nohup … &`) jobs this sub-agent starts, so they
+        // are killed when its run finishes rather than leaking past the turn.
+        let backgroundJobs = BackgroundProcessRegistry()
         for toolName in sanitizedTools {
             let registered = await registerRequestedTool(
                 named: toolName,
@@ -870,7 +1050,8 @@ public struct TaskTool: Tool {
                 permissions: subPermissions,
                 isolationEnabled: isolatedRoot != nil,
                 modelContainer: resolvedModelContainer,
-                modelPath: resolvedModelPath
+                modelPath: resolvedModelPath,
+                backgroundJobs: backgroundJobs
             )
             if registered {
                 continue
@@ -883,6 +1064,20 @@ public struct TaskTool: Tool {
                 return .error("Requested tool not found or cannot be used by sub-agent: \(toolName)")
             }
         }
+
+        // Every sub-agent gets read_tool_output unconditionally (not part of its
+        // declared tool scope): its own bash/search output may be spooled to
+        // disk mid-run, and this is how it pages the rest back in. Read-only and
+        // spool-scoped, so it never widens the profile's real capabilities.
+        _ = await registerRequestedTool(
+            named: "read_tool_output",
+            into: subRegistry,
+            permissions: subPermissions,
+            isolationEnabled: isolatedRoot != nil,
+            modelContainer: resolvedModelContainer,
+            modelPath: resolvedModelPath,
+            backgroundJobs: backgroundJobs
+        )
 
         // Build a specialized system prompt for the sub-agent. Uses
         // subagentToolPromptFilter so the prompt shows exactly the tools this
@@ -910,7 +1105,11 @@ public struct TaskTool: Tool {
             modelPath: resolvedModelPath,
             workspace: subPermissions.effectiveWorkspaceRoot,
             useSandbox: useSandbox,
-            role: profileName
+            role: profileName,
+            // Persist the profile identity + output contract so prompt rebuilds
+            // (configureForSubAgentExecution → setMode) re-supply it instead of
+            // silently falling back to the generic defaultInstructions.
+            subAgentBaseInstructions: baseInstructions
         )
 
         // Puts the sub-agent in AGENT mode (not the PLAN-mode default, whose
@@ -926,6 +1125,28 @@ public struct TaskTool: Tool {
             parentAutoApproveAllTools: parentAutoApprove,
             parentSessionApprovedToolCommands: parentApprovedCommands
         )
+
+        // Resume: replace the freshly-built history — including the system
+        // prompt `setMode` just wrote inside configureForSubAgentExecution —
+        // with the archived run's full transcript, so the sub-agent continues
+        // with the original session's context and its own system prompt. Must
+        // run AFTER configureForSubAgentExecution for exactly that reason. The
+        // registered tool scope was rebuilt from the archive's metadata above,
+        // so it stays consistent with the restored prompt. Over-full restored
+        // context is trimmed by the normal ContextWatchdog/compaction path once
+        // processUserMessage runs, rather than hard-overflowing.
+        if let resumeHistoryPath = validatedArguments.resumeHistoryPath {
+            do {
+                _ = try await subAgent.loadHistoryJSON(from: resumeHistoryPath)
+            } catch {
+                if releasedParentLocalModel {
+                    resolvedModelContainer = nil
+                    MLX.Memory.clearCache()
+                    try? await parentAgentLoop?.reacquireLocalModelAfterSubagent()
+                }
+                return .error("Cannot resume: failed to load archived transcript (\(resumeHistoryPath)): \(error.localizedDescription)")
+            }
+        }
 
         // Notify user via renderer about sub-agent start. Status/spinner text
         // must stay a single short line — see statusLineSummary.
@@ -945,7 +1166,35 @@ public struct TaskTool: Tool {
         defer { frontend.emit(.subAgentActivity(.ended)) }
 
         do {
-            try await subAgent.processUserMessage("Sub-agent Task: \(sanitizedDescription)")
+            // On a fresh run, frame the first turn as the task assignment. When
+            // resuming, the archived transcript is already in place — send the
+            // new instruction as a plain continuation, not a first-turn label.
+            let firstTurnPrompt: String
+            if resumedFromRunID != nil {
+                // Resuming: the archived transcript already frames the work — send
+                // the new instruction as a plain continuation, not a first turn.
+                firstTurnPrompt = sanitizedDescription
+            } else {
+                // Fresh run: restate the operative output contract right next to
+                // the task description. Small local models weight the instructions
+                // NEAREST the generation point far more heavily than the identical
+                // rules sitting far away at the top of the system prompt, so this
+                // adjacency — not the wording — is what makes a delegation stick.
+                // The `<task>` fence also stops the model from mistaking the
+                // description for skippable context. (Mirrors the IDE pattern of
+                // injecting the operative instructions alongside the user turn.)
+                let turnContract = responseMode == "raw"
+                    ? "Return the exact, complete output requested, verbatim — do NOT summarize, truncate, or paraphrase. Do not ask for permission to proceed."
+                    : "Work the task to completion, then give a short final summary of what you did and what you found. Do not ask for permission to proceed."
+                firstTurnPrompt = """
+                <task>
+                \(sanitizedDescription)
+                </task>
+
+                \(turnContract)
+                """
+            }
+            try await subAgent.processUserMessage(firstTurnPrompt)
 
             var subMessages = await subAgent.history.messages
             var finalAssistantResponse = subMessages.last(where: { $0.role == .assistant })?.content
@@ -971,19 +1220,47 @@ public struct TaskTool: Tool {
                 trimmedFinalResponse = finalAssistantResponse?.trimmingCharacters(in: .whitespacesAndNewlines)
             }
 
+            // Files the sub-agent actually mutated this run. Only meaningful when
+            // it shared the parent's workspace (not an isolated sandbox root),
+            // where the paths are relative to the parent's workspace. Computed
+            // here (not just at digest time) so the no-summary fallback can lead
+            // with the concrete "what changed" list instead of only raw output.
+            let subAgentModifiedFiles = isolatedRoot != nil ? [] : Array(await subAgent.turnModifiedFiles)
+
             // If even the forced follow-up didn't produce text (model ignored the
-            // instruction, or the follow-up call itself errored), fall back to the
-            // raw tool output rather than reporting an empty digest.
+            // instruction, or the follow-up call itself errored), synthesize a
+            // deterministic report from what the sub-agent concretely did —
+            // leading with the files it modified — rather than reporting an empty
+            // digest or only a raw tool-output tail the orchestrator must decode.
             let summarySource: String
             if let trimmedFinalResponse, !trimmedFinalResponse.isEmpty {
                 summarySource = trimmedFinalResponse
-            } else if let fallback = TaskTool.fallbackToolActivitySummary(from: subMessages) {
+            } else if let fallback = TaskTool.fallbackToolActivitySummary(
+                from: subMessages,
+                modifiedFiles: subAgentModifiedFiles
+            ) {
                 summarySource = fallback
             } else {
                 summarySource = "Sub-agent finished but returned no response."
             }
             let summaryBytes = summarySource.utf8.count
             let toolCallCount = subMessages.filter { $0.role == .tool }.count
+
+            // Hand the orchestrator a line-addressable pointer to the sub-agent's
+            // full output when it's large, instead of dumping (or truncating) a
+            // long verbatim tail into the orchestrator's context. The orchestrator
+            // can then page the relevant region via read_tool_output, or delegate
+            // that read to another sub-agent. Best-effort: nil when disabled, the
+            // body is small, or the spool write fails.
+            let digestSpoolHandle: ToolOutputSpool.Handle?
+            if toolOutputSpool.enabled, summarySource.count >= toolOutputSpool.subAgentMinChars {
+                digestSpoolHandle = ToolOutputSpool.shared.spool(
+                    content: summarySource,
+                    toolName: "task-\(profileName)"
+                )
+            } else {
+                digestSpoolHandle = nil
+            }
 
             // response_mode: raw returns the sub-agent's output verbatim
             // (capped at maxRawSummaryCharacters) instead of running it
@@ -1049,14 +1326,16 @@ public struct TaskTool: Tool {
                 taskDescription: sanitizedDescription,
                 status: status,
                 finalAssistantResponse: finalAssistantResponse,
-                messages: subMessages
+                messages: subMessages,
+                tools: sanitizedTools,
+                responseMode: responseMode,
+                isolationDirectory: requestedIsolationDirectory,
+                resumedFrom: resumedFromRunID
             )
 
-            // Only bridge modified-file paths up when the sub-agent shared the
-            // parent's own workspace (not an isolated sandbox root) — otherwise
-            // the paths aren't meaningful relative to the parent's workspace.
-            let subAgentModifiedFiles = isolatedRoot != nil ? [] : Array(await subAgent.turnModifiedFiles)
-
+            // `subAgentModifiedFiles` was resolved above (before the no-summary
+            // fallback, which leads with it) — only meaningful when the sub-agent
+            // shared the parent's own workspace, not an isolated sandbox root.
             let digest = TaskTool.makeSubagentDigest(
                 status: status,
                 profileName: profileName,
@@ -1067,8 +1346,17 @@ public struct TaskTool: Tool {
                 summaryTruncated: bodyTruncated,
                 summaryBytes: summaryBytes,
                 toolCalls: toolCallCount,
-                contractLine: contractLine
+                contractLine: contractLine,
+                spoolPath: digestSpoolHandle?.path,
+                spoolTotalLines: digestSpoolHandle?.totalLines ?? 0
             )
+
+            // The sub-agent's turn is over — tear down any background jobs it
+            // started so a `nohup … &` server can't outlive the run.
+            let killed = await backgroundJobs.terminateAll()
+            if !killed.isEmpty {
+                frontend.emitStatus("Stopped \(killed.count) background process(es) started by the sub-agent.", severity: .info)
+            }
 
             if releasedParentLocalModel {
                 resolvedModelContainer = nil
@@ -1078,6 +1366,13 @@ public struct TaskTool: Tool {
 
             return .success(digest)
         } catch {
+            // Same teardown on the failure path — a crash mid-run must not leak
+            // whatever background jobs the sub-agent had already launched.
+            let killed = await backgroundJobs.terminateAll()
+            if !killed.isEmpty {
+                frontend.emitStatus("Stopped \(killed.count) background process(es) started by the sub-agent.", severity: .info)
+            }
+
             if releasedParentLocalModel {
                 resolvedModelContainer = nil
                 MLX.Memory.clearCache()
@@ -1094,7 +1389,11 @@ public struct TaskTool: Tool {
         taskDescription: String,
         status: String,
         finalAssistantResponse: String?,
-        messages: [Message]
+        messages: [Message],
+        tools: [String],
+        responseMode: String,
+        isolationDirectory: String?,
+        resumedFrom: String?
     ) throws -> String {
         let rootRelative = ".native-agent/subagent-logs"
         let runRelative = "\(rootRelative)/\(runID)"
@@ -1122,7 +1421,11 @@ public struct TaskTool: Tool {
             taskDescription: taskDescription,
             messageCount: messages.count,
             toolResponseCount: messages.filter { $0.role == .tool }.count,
-            finalResponseLength: finalAssistantResponse?.count ?? 0
+            finalResponseLength: finalAssistantResponse?.count ?? 0,
+            tools: tools,
+            responseMode: responseMode,
+            isolationDirectory: isolationDirectory,
+            resumedFrom: resumedFrom
         )
 
         let metadataData = try encoder.encode(metadata)
@@ -1140,7 +1443,8 @@ public struct TaskTool: Tool {
         permissions: PermissionEngine,
         isolationEnabled: Bool,
         modelContainer: ModelContainer?,
-        modelPath: String
+        modelPath: String,
+        backgroundJobs: BackgroundProcessRegistry
     ) async -> Bool {
         let normalizedToolName = toolName.lowercased()
 
@@ -1168,7 +1472,7 @@ public struct TaskTool: Tool {
         case "code_search":
             await registry.register(CodeSearchTool(permissions: permissions))
         case "bash":
-            await registry.register(BashTool(permissions: permissions, useSandbox: useSandbox))
+            await registry.register(BashTool(permissions: permissions, useSandbox: useSandbox, backgroundJobs: backgroundJobs))
         case "build_check":
             await registry.register(BuildCheckTool(permissions: permissions))
         case "todo":
@@ -1182,6 +1486,8 @@ public struct TaskTool: Tool {
             await registry.register(ReadSkillTool(skills: SkillsRegistry(workspaceRoot: permissions.workspaceRoot)))
         case "task_output":
             await registry.register(TaskOutputTool(permissions: permissions))
+        case "read_tool_output":
+            await registry.register(ReadToolOutputTool())
         case "project_expert_lora":
             if let modelContainer {
                 await registry.register(ProjectExpertLoRATool(modelContainer: modelContainer, workspaceRoot: permissions.workspaceRoot, modelPath: modelPath, frontend: frontend))

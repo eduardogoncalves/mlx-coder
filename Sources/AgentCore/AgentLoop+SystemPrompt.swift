@@ -108,6 +108,13 @@ extension AgentLoop {
         STABILITY: Modify only one file per turn. Immediately after each edit \
         (`write_file`, `edit_file`, `append_file`, or `patch`), run the project's build \
         or test command and resolve any new errors before continuing to the next file.
+
+        STAY ON TASK: Do exactly what was asked — no more, no less. Change only what the task \
+        requires; do NOT refactor, rename, or "improve" unrelated code you happen to touch. \
+        Ground every claim in evidence you actually gathered (a `file:line`, a command's real \
+        output) — never guess a path, symbol, or result you did not verify. When you finish, \
+        report concisely what changed and how you verified it; do not dump raw tool output or \
+        narrate your internal steps.
         """
 
         let orchestratorInstructions = """
@@ -133,12 +140,10 @@ extension AgentLoop {
         `reviewer` (inspects code and can run `build_check`; cannot edit anything), \
         `filesystem` (file read/write/edit only, no shell), `terminal` (shell commands \
         only, no file edits), plus a few other specialist presets (`codebase_research`, \
-        `test_engineering`, `security_review`, `docs`, `general`). You yourself never have \
-        web access — but that does NOT mean no sub-agent does: `planner` includes web tools \
-        by default, so "fetch/summarize this URL" or "what does this page say" should be \
-        delegated straight to `planner`, not refused. If a task needs `web_fetch`/`web_search` \
-        under a different profile, pass an explicit `tools` list on the `task` call to add it \
-        to that profile's defaults.
+        `test_engineering`, `security_review`, `docs`, `general`). You never have web access \
+        yourself, but `planner` does (web_search/web_fetch by default) — delegate "fetch/summarize \
+        this URL" straight to `planner` rather than refusing. To give another profile web access, \
+        pass an explicit `tools` list on the `task` call.
 
         Do NOT do the work yourself in your response text, even when you already know the \
         answer: never write code, diffs, file contents, shell commands, or a step-by-step \
@@ -150,10 +155,12 @@ extension AgentLoop {
         plan a sub-agent already produced, never to draft one yourself.
 
         Typical flow for a non-trivial request: decompose it, delegate research/planning to \
-        `planner`, delegate implementation to `executor` (one focused, self-contained task \
-        per call — sub-agents don't see this conversation, so give each call all the context \
-        and exact requirements it needs), then optionally delegate a check to `reviewer` \
-        before reporting back to the user. Use `todo` to track multi-step work across turns. \
+        `planner`, delegate implementation to `executor` (ONE focused task per call), then \
+        optionally delegate a check to `reviewer` before reporting back to the user. \
+        SELF-CONTAINED TASKS: sub-agents are blind to this conversation and to each other, so \
+        every `task` description MUST stand on its own — name the exact file/symbol, state the \
+        precise change or question, and include any facts the sub-agent needs. A vague \
+        description produces vague work. Use `todo` to track multi-step work across turns. \
         Prefer fewer, larger `task` calls over many tiny ones. Summarize what the sub-agents \
         did for the user — don't just relay raw sub-agent output.
 
@@ -340,7 +347,7 @@ extension AgentLoop {
     /// both here (what the prompt advertises) and as a hard execution-time
     /// guard in `executeToolCall` — prompt-only restriction is not reliably
     /// respected by every model, especially small/quantized local ones.
-    static let orchestratorAllowedToolNamesOrdered: [String] = ["task", "todo", "plan_file", "log_knowledge", "search_knowledge", "task_output"]
+    static let orchestratorAllowedToolNamesOrdered: [String] = ["task", "todo", "plan_file", "log_knowledge", "search_knowledge", "task_output", "read_tool_output"]
     static let orchestratorAllowedToolNames = Set(orchestratorAllowedToolNamesOrdered)
 
     /// The manager/orchestrator only ever advertises orchestration tools in its

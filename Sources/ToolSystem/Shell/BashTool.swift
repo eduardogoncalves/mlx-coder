@@ -31,21 +31,31 @@ public struct BashTool: Tool {
     private let maxOutputLines: Int
     private let useSandbox: Bool
     private let sandboxEngine: SandboxEngine
+    /// When set, background (`nohup … &`) jobs launched here record their root
+    /// PID so the owning agent can tear them down on completion. Nil leaves the
+    /// legacy detach-forever behaviour (top-level, user-driven sessions).
+    private let backgroundJobs: BackgroundProcessRegistry?
 
     /// - Parameter networkPolicy: Controls whether sandboxed commands may open
     ///   outbound network connections. Defaults to `.allow` to preserve legacy
     ///   behaviour (package managers/builds often need network during a
     ///   sandboxed run); pass `.deny` to block network egress inside the sandbox.
+    /// - Parameter backgroundJobs: Registry that background jobs register into so
+    ///   they can be killed when the agent that started them finishes. Pass a
+    ///   per-run registry for sub-agents; omit for sessions whose background jobs
+    ///   should outlive the turn.
     public init(
         permissions: PermissionEngine,
         maxOutputLines: Int = 500,
         useSandbox: Bool = false,
-        networkPolicy: SandboxEngine.NetworkPolicy = .allow
+        networkPolicy: SandboxEngine.NetworkPolicy = .allow,
+        backgroundJobs: BackgroundProcessRegistry? = nil
     ) {
         self.permissions = permissions
         self.maxOutputLines = maxOutputLines
         self.useSandbox = useSandbox
         self.sandboxEngine = SandboxEngine(networkPolicy: networkPolicy)
+        self.backgroundJobs = backgroundJobs
     }
 
     public func execute(arguments: [String: Any]) async throws -> ToolResult {
@@ -263,6 +273,13 @@ public struct BashTool: Tool {
         let launchData = launchPipe.fileHandleForReading.readDataToEndOfFile()
         let launchOutput = String(data: launchData, encoding: .utf8) ?? ""
 
+        // Track the detached job's root PID (the `nohup` subshell echoed as
+        // `$!`) so the owning agent can kill its whole tree when it finishes,
+        // instead of leaking a server past the turn that started it.
+        if let bgPID = BashTool.parseBackgroundPID(from: launchOutput) {
+            backgroundJobs?.register(bgPID)
+        }
+
         // Wait for initial output from the background process
         try await Task.sleep(for: .seconds(initialWait))
 
@@ -290,6 +307,17 @@ public struct BashTool: Tool {
     }
 
     // MARK: - Helpers
+
+    /// Extracts the background job's PID from the launcher's
+    /// `[background] Started process with PID <n>` line. Returns nil when no
+    /// such line is present (e.g. the launch shell itself failed).
+    static func parseBackgroundPID(from launchOutput: String) -> pid_t? {
+        guard let range = launchOutput.range(of: #"PID\s+(\d+)"#, options: .regularExpression) else {
+            return nil
+        }
+        let digits = launchOutput[range].drop(while: { !$0.isNumber })
+        return pid_t(digits)
+    }
 
     /// Timestamped diagnostics for the timeout/kill path, gated by
     /// `MLXCODER_DEBUG_TOOL_TIMING` so a "stuck" bash call can be pinpointed
