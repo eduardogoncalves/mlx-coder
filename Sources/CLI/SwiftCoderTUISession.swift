@@ -54,14 +54,22 @@ private enum ModelFilterMode {
     case freeOnly
 }
 
+/// Identifies a session the user can resume after quitting. Returned by
+/// `runSwiftCoderTUISession` so the caller can print the resume hint.
+public struct SessionResumeInfo: Sendable {
+    public let id: String
+    public let title: String
+}
+
 @MainActor
 public func runSwiftCoderTUISession(
     agentLoop: AgentLoop,
     frontend: SwiftCoderTUIFrontend,
     skillMetadata: [SkillMetadata],
     hooks: HookPipeline,
-    initialSandboxEnabled: Bool
-) async {
+    initialSandboxEnabled: Bool,
+    resumeSessionId: String? = nil
+) async -> SessionResumeInfo? {
     let processTerminal = ProcessTerminal()
     processTerminal.setupRawMode(title: frontend.appConfig.appName)
     defer { processTerminal.restoreMode() }
@@ -143,6 +151,58 @@ public func runSwiftCoderTUISession(
     var pendingTypedChunk = ""
     var pendingTypedFlushTask: Task<Void, Never>? = nil
 
+    // Persistence key for this session's on-disk transcript. Starts from the
+    // AgentLoop's own id; `/resume` re-points it at the restored session so
+    // continued turns append to the same file, and `/clear` mints a fresh id so
+    // the cleared conversation becomes a new (still-resumable) session without
+    // overwriting the old one.
+    var currentSessionId = await agentLoop.sessionId
+    // Auto-save the current transcript to ~/.mlx-coder/sessions/<id>.json. Cheap
+    // (a few KB) and called after every completed turn plus on quit, so a crash
+    // never loses more than the in-flight turn.
+    func saveCurrentSession() async {
+        let messages = await agentLoop.persistableConversation
+        let model = await agentLoop.activeModelPath
+        SessionStore.save(
+            id: currentSessionId,
+            cwd: workspaceRoot,
+            model: model,
+            messages: messages
+        )
+    }
+
+    // Load a saved session into the live AgentLoop and replay its transcript to
+    // the scroll area. Returns false (with an error line) when the id is unknown.
+    func restoreSession(id: String) async -> Bool {
+        let session: PersistedSession
+        do {
+            session = try SessionStore.load(id: id)
+        } catch {
+            await renderer.printScrollLine("\(DesignSystem.brightRed)✗ No saved session found for id \(id)\(DesignSystem.reset)")
+            return false
+        }
+        await agentLoop.restoreConversation(session.messages)
+        currentSessionId = session.id
+        // Replay the human/assistant/tool turns so the user sees the context they
+        // are resuming. Automated steering messages stay out of the transcript.
+        for message in session.messages {
+            switch message.role {
+            case .user where message.origin == .human:
+                await renderer.printScrollLine(SessionEntry(role: .user, content: message.content).render())
+            case .assistant where !message.content.isEmpty:
+                await renderer.printScrollLine(SessionEntry(role: .assistant, content: message.content).render())
+            case .tool:
+                await renderer.printScrollLine(SessionEntry(role: .toolOutput, content: message.content).render())
+            default:
+                break
+            }
+        }
+        lastUserPrompt = await agentLoop.history.latestUserMessage
+        await renderer.printScrollLine("\(DesignSystem.dim)↩ Resumed session \(session.id)\(DesignSystem.reset)")
+        await renderer.renderFooter()
+        return true
+    }
+
     // Deny-with-suggestion entry state. When the user picks "No, suggest
     // changes" (or presses Esc) on an approval menu, the session switches the
     // input box into a one-shot suggestion prompt instead of resolving the
@@ -185,6 +245,12 @@ public func runSwiftCoderTUISession(
     }
     resizeSource.resume()
     sigwinchSource = resizeSource
+
+    // Restore a session requested on the command line (--resume / --continue)
+    // before accepting any input.
+    if let resumeSessionId {
+        _ = await restoreSession(id: resumeSessionId)
+    }
 
     mainLoop: for await key in InputHandler.keystrokes() {
         // If the approval was resolved externally (e.g. the generation task
@@ -688,6 +754,9 @@ public func runSwiftCoderTUISession(
                 await renderer.clearConversation()
                 await agentLoop.clearHistoryWithCheckpoint()
                 lastUserPrompt = nil
+                // Start a fresh persisted session so the cleared conversation
+                // does not overwrite the one just saved under this id.
+                currentSessionId = UUID().uuidString
                 continue
             }
             if commandInput == "/context" {
@@ -695,6 +764,11 @@ public func runSwiftCoderTUISession(
                 for line in report.split(separator: "\n", omittingEmptySubsequences: false) {
                     await renderer.printScrollLine(String(line))
                 }
+                continue
+            }
+            if commandInput == "/compact" {
+                let result = await agentLoop.compactContextManually()
+                await renderer.printScrollLine(result)
                 continue
             }
             if commandInput == "/skills" {
@@ -768,6 +842,31 @@ public func runSwiftCoderTUISession(
                 }
                 continue
             }
+            if commandInputLower == "/resume" || commandInputLower.hasPrefix("/resume ") {
+                if activeStreamTask != nil {
+                    await renderer.printScrollLine("\(DesignSystem.brightRed)✗ /resume unavailable while a turn is in progress. Press Esc first.\(DesignSystem.reset)")
+                    continue
+                }
+                let arg = String(commandInput.dropFirst("/resume".count)).trimmingCharacters(in: .whitespacesAndNewlines)
+                if arg.isEmpty {
+                    // No id given: open a picker of recent sessions for this
+                    // workspace. Each entry submits `/resume <id>` on selection.
+                    let sessions = SessionStore.list(cwd: workspaceRoot)
+                        .filter { $0.id != currentSessionId }
+                    if sessions.isEmpty {
+                        await renderer.printScrollLine("\(DesignSystem.dim)No saved sessions to resume in this directory.\(DesignSystem.reset)")
+                        continue
+                    }
+                    let items = sessions.prefix(20).map { session -> (name: String, desc: String) in
+                        (name: "/resume \(session.id)", desc: "\(relativeTimeDescription(session.updatedAt)) · \(session.title)")
+                    }
+                    await renderer.openCommandPalette(commands: Array(items))
+                    await renderer.renderFooter()
+                    continue
+                }
+                _ = await restoreSession(id: arg)
+                continue
+            }
             if commandInput == "/help" || commandInput == "?" {
                 for line in helpLines() {
                     await renderer.printScrollLine(line)
@@ -804,6 +903,7 @@ public func runSwiftCoderTUISession(
                     await renderer.flushStreamLine()
                     await renderer.setPendingCount(0)
                     await renderer.renderFooter()
+                    await saveCurrentSession()
                 }
                 continue
             }
@@ -1127,6 +1227,7 @@ public func runSwiftCoderTUISession(
                 await renderer.flushStreamLine()
                 await renderer.setPendingCount(0)
                 await renderer.renderFooter()
+                await saveCurrentSession()
             }
 
         default:
@@ -1164,6 +1265,15 @@ public func runSwiftCoderTUISession(
     await flushPendingTypedChunk(&pendingTypedChunk, renderer: renderer)
     await renderer.flushStreamLine()
     await renderer.teardownScreen()
+
+    // Final persist and report the resume handle to the caller. Only surfaced
+    // when the transcript actually has a human turn worth resuming (otherwise no
+    // file was written and there is nothing to resume).
+    await saveCurrentSession()
+    guard let session = try? SessionStore.load(id: currentSessionId) else {
+        return nil
+    }
+    return SessionResumeInfo(id: session.id, title: session.title)
 }
 
 private func normalizedCommandInput(from input: String) -> String {
@@ -1301,6 +1411,17 @@ private func modeIndex(
     return appConfig.modes.firstIndex(where: { $0.id == "\(modePrefix)-low" })
 }
 
+/// Compact "3m ago" / "2h ago" / "5d ago" label for the /resume picker.
+private func relativeTimeDescription(_ date: Date) -> String {
+    let seconds = max(0, Int(Date().timeIntervalSince(date)))
+    switch seconds {
+    case 0..<60:      return "just now"
+    case 60..<3600:   return "\(seconds / 60)m ago"
+    case 3600..<86400: return "\(seconds / 3600)h ago"
+    default:          return "\(seconds / 86400)d ago"
+    }
+}
+
 private func statusModeLabel(workingMode: AgentLoop.WorkingMode, taskType: AgentLoop.TaskType) -> String {
     if workingMode == .plan { return "plan" }
     if taskType == .general { return "autopilot" }
@@ -1390,6 +1511,7 @@ private func helpLines() -> [String] {
         "  /save-history [path] save session transcript as markdown",
         "  /save-history-json [path] save session transcript as json",
         "  /load-history-json [path] load prior session transcript",
+        "  /resume [id] resume a saved session (no id opens a picker)",
         "  /retry   re-run the last user prompt",
         "  /undo    undo the last conversation turn",
         "  /plan    toggle plan mode on/off",

@@ -198,7 +198,8 @@ struct ChatCommand: AsyncParsableCommand {
                 runtimeConfigs: runtimeMCPConfigs,
                 cliConfig: makeMCPServerConfig(from: args)
             ),
-            skillsRegistry: skillsRegistry
+            skillsRegistry: skillsRegistry,
+            toolOutputSpool: runtimeConfig.toolOutputSpool ?? .enabledDefault
         )
 
         let toolCount = await registry.count
@@ -247,7 +248,9 @@ struct ChatCommand: AsyncParsableCommand {
             promptSectionTokenEstimates: promptComposition.sectionTokenEstimates,
             memoryLimit: budget.totalBytes,
             cacheLimit: budget.cacheBytes,
-            draftModel: draftModel
+            draftModel: draftModel,
+            contextRetrieval: runtimeConfig.contextRetrieval ?? .disabled,
+            toolOutputSpool: runtimeConfig.toolOutputSpool ?? .enabledDefault
         )
 
         // Re-register model-container-dependent tools now that a live AgentLoop
@@ -392,14 +395,30 @@ struct ChatCommand: AsyncParsableCommand {
             // persistent footer/input box instead of scrolling above it.
             await agentLoop.registerToolsInternal()
             await CancelController.shared.setPrintHandler { _ in } // TUI owns the terminal
-            await runSwiftCoderTUISession(
+            // Resolve a session to resume: explicit --resume id wins, else
+            // --continue picks the most recent session for this directory.
+            let workspaceForResume = URL(fileURLWithPath: FileManager.default.currentDirectoryPath).standardized.path
+            var resumeSessionId = args.resume
+            if resumeSessionId == nil, args.continueSession {
+                resumeSessionId = SessionStore.mostRecent(cwd: workspaceForResume)?.id
+                if resumeSessionId == nil {
+                    print("No saved session to continue in this directory. Starting fresh.")
+                }
+            }
+            let resumeInfo = await runSwiftCoderTUISession(
                 agentLoop: agentLoop,
                 frontend: tuiFrontend,
                 skillMetadata: skillMetadata,
                 hooks: hooks,
-                initialSandboxEnabled: effectiveSandbox
+                initialSandboxEnabled: effectiveSandbox,
+                resumeSessionId: resumeSessionId
             )
             await DotnetLSPService.shared.shutdown()
+            if let resumeInfo {
+                print("\nSession saved. Resume it later with:")
+                print("  \u{001B}[1mmlx-coder chat --resume \(resumeInfo.id)\u{001B}[0m")
+                print("  or \u{001B}[1mmlx-coder chat --continue\u{001B}[0m to pick up the most recent session here.")
+            }
             print("\nGoodbye!")
             return
         }

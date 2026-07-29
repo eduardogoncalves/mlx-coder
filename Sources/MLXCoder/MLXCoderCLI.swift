@@ -114,6 +114,12 @@ struct ModelArguments: ParsableArguments, Sendable {
     @Option(name: .long, help: "Optional path to auto-save JSON history when chat exits")
     var autoSaveHistoryJSON: String?
 
+    @Option(name: .long, help: "Resume a saved session by id (printed when a prior session exits, or listed via /resume)")
+    var resume: String?
+
+    @Flag(name: .customLong("continue"), help: "Resume the most recent session started in this directory")
+    var continueSession: Bool = false
+
     @Option(name: .long, help: "Optional MCP server HTTP endpoint (JSON-RPC)")
     var mcpEndpoint: String?
 

@@ -166,6 +166,22 @@ public struct ConversationHistory: Sendable {
         messages = [systemPrompt]
     }
 
+    /// The conversation body without the system prompt — what gets persisted for
+    /// session resume. The system prompt is deliberately excluded because it is
+    /// re-derived from the live environment (date, skills, workspace) on the next
+    /// launch, so a stale snapshot must never override it.
+    public var persistableMessages: [Message] {
+        messages.filter { $0.role != .system }
+    }
+
+    /// Replaces the conversation body with a restored transcript, keeping the
+    /// current system prompt in place. Any system message in `restored` is
+    /// dropped so the freshly-derived prompt (from this launch) always wins.
+    public mutating func restoreConversation(_ restored: [Message]) {
+        let system = messages.first(where: { $0.role == .system })
+        messages = (system.map { [$0] } ?? []) + restored.filter { $0.role != .system }
+    }
+
     /// Update the initial system prompt.
     public mutating func updateSystemPrompt(_ newPrompt: String) {
         if let index = messages.firstIndex(where: { $0.role == .system }) {
