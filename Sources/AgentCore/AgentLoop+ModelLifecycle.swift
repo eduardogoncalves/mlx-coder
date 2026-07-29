@@ -10,6 +10,28 @@ extension AgentLoop {
 
     /// Full model unload and reload to ensure fresh weights/cache.
     public func reloadModel() async throws {
+        // Online backends have no local weights or KV cache to refresh: inference
+        // is done over HTTP by the per-backend client. A reload is only meaningful
+        // when the model *itself* changed — a switch to a different remote model
+        // needs the dialect + registry rebound. Re-running it for the SAME remote
+        // model (e.g. a pending-reload flag from KV-param churn, a post-merge
+        // reset, or a side-question "fresh state") is pure waste — it clears the
+        // registry, drops the reusable prompt cache, and re-registers every tool
+        // for no benefit. Skip it entirely in that case.
+        if backend.isOnline {
+            guard modelPath != loadedModelPath else { return }
+
+            // Genuine remote model switch: rebind without touching the MLX path.
+            promptCache.invalidate(reason: "remote model switch")
+            await registry.clear()
+            modelContainer = nil
+            self.loadedModelPath = modelPath
+            await registerToolsInternal()
+            let note = await remoteLoadStatusNote()
+            frontend.emit(.modelLifecycle(.reloaded("Online provider ready: \(modelPath)\(note)")))
+            return
+        }
+
         frontend.emit(.modelLifecycle(.loading("Reloading model to ensure fresh state...")))
 
         // Drop tool references first so old model-bound tools can be deallocated.
@@ -22,17 +44,6 @@ extension AgentLoop {
 
         // Clear any unreferenced MLX buffers before loading replacement weights.
         MLX.Memory.clearCache()
-
-        // Online backends have no local container to load — inference is done over
-        // HTTP by the per-backend client. Skip the MLX load path and just refresh
-        // the dialect + registry so tools the backend still needs are bound.
-        if backend.isOnline {
-            self.loadedModelPath = modelPath
-            await registerToolsInternal()
-            let note = await remoteLoadStatusNote()
-            frontend.emit(.modelLifecycle(.reloaded("Online provider ready: \(modelPath)\(note)")))
-            return
-        }
 
         // Load fresh container
         let newContainer = try await ModelLoader.load(

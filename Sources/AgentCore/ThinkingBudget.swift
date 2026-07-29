@@ -73,7 +73,7 @@ extension AgentLoop {
         isThinking: Bool
     ) -> Bool {
         guard isThinking else { return false }
-        let limit = budgetTokens + thinkingBudgetTolerance(budgetTokens)
+        let limit = budgetTokens + thinkingBudgetTolerance(budgetTokens: budgetTokens)
         return thinkingTokensSoFar > limit
     }
 }
