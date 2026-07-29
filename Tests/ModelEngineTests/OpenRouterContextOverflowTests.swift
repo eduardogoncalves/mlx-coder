@@ -12,6 +12,22 @@ final class OpenRouterContextOverflowTests: XCTestCase {
         let error = OpenRouterError.http(provider: "rtx5060ti", status: 400, body: body)
         XCTAssertTrue(error.isContextOverflow)
         XCTAssertEqual(error.reportedContextWindow, 18432)
+        XCTAssertEqual(error.reportedPromptTokens, 18521)
+    }
+
+    func testReportedPromptTokensExtractedForOverflowRecovery() {
+        // The exact shape from the field report: n_prompt_tokens is the server's
+        // ground-truth token count used to calibrate the chars/4 estimate.
+        let body = #"{"error":{"code":400,"message":"request (36428 tokens) exceeds the available context size (32768 tokens), try increasing it","type":"exceed_context_size_error","n_prompt_tokens":36428,"n_ctx":32768}}"#
+        let error = OpenRouterError.http(provider: "rtx5060ti", status: 400, body: body)
+        XCTAssertEqual(error.reportedContextWindow, 32768)
+        XCTAssertEqual(error.reportedPromptTokens, 36428)
+    }
+
+    func testReportedPromptTokensNilWhenAbsent() {
+        let body = #"{"error":{"message":"This model's maximum context length is 8192 tokens","type":"invalid_request_error","code":"context_length_exceeded"}}"#
+        let error = OpenRouterError.http(provider: "OpenRouter", status: 400, body: body)
+        XCTAssertNil(error.reportedPromptTokens)
     }
 
     func testDetectsOpenAIStyleContextLengthExceeded() {

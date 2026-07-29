@@ -102,16 +102,59 @@ extension AgentLoop {
         contextTransforms.count
     }
 
+    // MARK: - Effective Context Window
+
+    /// The context window mlx-coder treats as authoritative for the active
+    /// backend. For remote models this is the server's *real* window — learned
+    /// from an overflow if one has occurred, otherwise probed from `/props` —
+    /// falling back to the chip-derived `longContextThreshold` when neither is
+    /// known (and for all local backends, which have no such concept).
+    var effectiveContextWindow: Int {
+        learnedRemoteContextWindow
+            ?? probedRemoteContextWindow
+            ?? currentGenerationConfig.longContextThreshold
+    }
+
+    /// The window the compaction triggers actually measure against. Remote
+    /// sessions count tokens with a `chars/4` estimate (no local tokenizer) that
+    /// *undercounts* real tokens; discounting the real window by
+    /// `remoteEstimateHeadroomFactor` keeps the percent-of-window triggers firing
+    /// with enough slack that estimated usage crossing the line still leaves real
+    /// usage below the server's hard limit. Local sessions tokenize exactly, so
+    /// they use the window undiscounted.
+    var compactionContextWindow: Int {
+        let window = effectiveContextWindow
+        guard case .remote = backend else { return window }
+        return max(256, Int(Double(window) * Self.remoteEstimateHeadroomFactor))
+    }
+
     // MARK: - Deterministic Context Compaction
 
-    /// - Parameter overrideThreshold: When set, compacts against this token budget instead
-    ///   of `currentGenerationConfig.longContextThreshold`. Used for emergency recovery when
-    ///   a remote provider reports its actual context window size (e.g. after an
-    ///   `exceed_context_size_error`) — that number is authoritative where the chip-based
-    ///   default threshold isn't. Since remote-only sessions have no local tokenizer, the
-    ///   `chars/4` fallback estimate can undercount real tokens, so the reserve is widened
-    ///   proportionally to leave headroom for that error margin.
-    func applyDeterministicContextCompactionIfNeeded(reason: String, overrideThreshold: Int? = nil) async {
+    /// Fraction of the server's *real* context window an emergency overflow
+    /// recovery compacts down to, in real-token terms. The ~15% margin leaves room
+    /// for the retry's own reply plus any tool results it emits before the next
+    /// compaction check — compacting to exactly the window would overflow again the
+    /// moment the model writes a single token.
+    static let overflowRecoverySafeWindowFactor = 0.85
+
+    /// - Parameters:
+    ///   - overrideThreshold: When set, this is the remote server's *real* context
+    ///     window (e.g. the `n_ctx` from an `exceed_context_size_error`) and this
+    ///     call is an emergency overflow recovery. That number is authoritative
+    ///     where the chip-based default threshold isn't.
+    ///   - serverReportedPromptTokens: The server's ground-truth token count for the
+    ///     request it just rejected (`n_prompt_tokens`). Remote sessions have no local
+    ///     tokenizer, so `currentTokenCount` falls back to a `chars/4` estimate that
+    ///     undercounts real tokens for code-heavy context — a target derived from the
+    ///     raw window can therefore leave *real* usage above the limit and overflow
+    ///     again. When present, this calibrates the estimate against the server's real
+    ///     count so the compaction target lands safely under the real window even
+    ///     though it is expressed in estimated tokens.
+    func applyDeterministicContextCompactionIfNeeded(
+        reason: String,
+        overrideThreshold: Int? = nil,
+        serverReportedPromptTokens: Int? = nil
+    ) async {
         // Never compact mid-recovery. While a turn is in flight, transient artifacts
         // (malformed tool-call attempts, automated steering) are still in history so
         // the model can recover; they are purged when the turn completes. Skipping
@@ -121,12 +164,34 @@ extension AgentLoop {
         // runs when genuinely needed.
         guard !history.messages.contains(where: { $0.transient }) else { return }
 
-        let baseThreshold = overrideThreshold ?? currentGenerationConfig.longContextThreshold
-        let reserve = overrideThreshold != nil ? max(contextReserveTokens, baseThreshold / 5) : contextReserveTokens
-        let threshold = max(baseThreshold, reserve + 1)
-        let target = max(256, threshold - reserve)
-
         let tokenCounter = await makeTokenCounter()
+
+        // Emergency remote-overflow recovery: size the target against the server's
+        // real window, calibrated by its real token count when we have it.
+        if let realWindow = overrideThreshold, realWindow > 0 {
+            let safeRealWindow = max(256, Int(Double(realWindow) * Self.overflowRecoverySafeWindowFactor))
+            let estimatedNow = currentTokenCount(using: tokenCounter)
+            let target: Int
+            if let realPromptTokens = serverReportedPromptTokens, realPromptTokens > 0, estimatedNow > 0 {
+                // The server counted `realPromptTokens` for a request our estimator
+                // scored at ≈`estimatedNow` (a purge may have shrunk history since,
+                // which only makes the derived ratio safer — it over-shrinks). Scale
+                // our current estimate down by the same estimate:real ratio so the
+                // compacted history's *real* size lands at ≈`safeRealWindow`.
+                let calibrated = Double(safeRealWindow) * Double(estimatedNow) / Double(realPromptTokens)
+                target = max(256, Int(calibrated))
+            } else {
+                // No ground-truth count — fall back to discounting the real window by
+                // the standard remote-estimate headroom factor to absorb the undercount.
+                target = max(256, Int(Double(safeRealWindow) * Self.remoteEstimateHeadroomFactor))
+            }
+            _ = await performCompaction(reason: reason, target: target, tokenCounter: tokenCounter)
+            return
+        }
+
+        let baseThreshold = compactionContextWindow
+        let threshold = max(baseThreshold, contextReserveTokens + 1)
+        let target = max(256, threshold - contextReserveTokens)
         _ = await performCompaction(reason: reason, target: target, tokenCounter: tokenCounter)
     }
 
@@ -141,15 +206,15 @@ extension AgentLoop {
     /// percent-of-window instead, so it stays proportionally consistent regardless of
     /// window size, and it carries its own no-progress pause/hysteresis state.
     ///
-    /// **Deriving a percentage without a real context window.** mlx-coder has no path
-    /// that reads a model's actual context window — the remote (OpenRouter) path only
-    /// learns the true window *after* an overflow, parsed out of the error
-    /// (`OpenRouterError.reportedContextWindow`); the local path has no such concept at
-    /// all. `currentGenerationConfig.longContextThreshold` (default 8192) is the only
-    /// number in this codebase that already plays the "window" role for every other
-    /// long-context decision (KV quantization, the existing compaction target), so this
-    /// watchdog reuses it as the effective window rather than inventing a second,
-    /// competing constant.
+    /// **Deriving the window.** The denominator is `compactionContextWindow` —
+    /// for remote models the server's *real* context window (probed from
+    /// `/props` up front, or learned from an `exceed_context_size_error`
+    /// overflow), discounted to leave headroom for the `chars/4` token estimate's
+    /// undercount; for local models it falls back to
+    /// `currentGenerationConfig.longContextThreshold` (default 8192), the number
+    /// this codebase already uses as the "window" for every other long-context
+    /// decision (KV quantization, the existing compaction target). See
+    /// `effectiveContextWindow` for the full priority chain.
     ///
     /// **Transient-guard interaction.** Like the per-iteration call, this skips
     /// entirely while transient recovery artifacts are in history — and, deliberately,
@@ -172,7 +237,7 @@ extension AgentLoop {
     func applyContextWatchdogIfNeeded() async {
         guard !history.messages.contains(where: { $0.transient }) else { return }
 
-        let windowTokens = currentGenerationConfig.longContextThreshold
+        let windowTokens = compactionContextWindow
         let tokenCounter = await makeTokenCounter()
         let currentTokens = currentTokenCount(using: tokenCounter)
         let usage = ContextWatchdog.Usage(tokens: currentTokens, windowTokens: windowTokens)
@@ -184,7 +249,8 @@ extension AgentLoop {
         if contextWatchdogPaused,
            ContextWatchdog.shouldReArm(currentPercent: prePercent, thresholdPercent: contextWatchdogThresholdPercent) {
             contextWatchdogPaused = false
-            frontend.emitStatus("[Context] Watchdog re-armed — usage dropped back below \(Int(contextWatchdogThresholdPercent))% of window.")
+            let reArmPercent = Int(contextWatchdogThresholdPercent - ContextWatchdog.defaultMinProgressPercent)
+            frontend.emitStatus("[Context] Watchdog re-armed — usage dropped back below \(reArmPercent)% of window.")
         }
 
         guard ContextWatchdog.shouldCompactNow(
@@ -300,11 +366,44 @@ extension AgentLoop {
     func makeTokenCounter() async -> ((String) -> Int)? {
         guard let modelContainer else { return nil }
         let contentSnapshot = history.messages.map(\.content)
-        let counts = await modelContainer.perform { context in
-            contentSnapshot.map { context.tokenizer.encode(text: $0).count }
+
+        // Tokenize only content we haven't already counted. Cached counts stay
+        // valid across turns (see `tokenCountCache`), so a long conversation
+        // re-encodes just the new messages instead of the whole history on every
+        // context-management pass — the fastest encode is the one we skip.
+        let uncached = Self.uncachedContents(snapshot: contentSnapshot, cache: tokenCountCache)
+        if !uncached.isEmpty {
+            let counts = await modelContainer.perform { context in
+                uncached.map { context.tokenizer.encode(text: $0).count }
+            }
+            for (content, count) in zip(uncached, counts) {
+                tokenCountCache[content] = count
+            }
         }
-        let lookup = LoopDetectionService.makeTokenCountLookup(contents: contentSnapshot, counts: counts)
-        return { text in lookup[text] ?? (text.count / 4) }
+
+        // Evict counts for content no longer live so the cache stays bounded by
+        // the current history (purged transient turns, compacted messages).
+        tokenCountCache = Self.prunedTokenCountCache(tokenCountCache, live: contentSnapshot)
+
+        let cache = tokenCountCache
+        return { text in cache[text] ?? (text.count / 4) }
+    }
+
+    /// Deduplicated content from `snapshot` whose token count isn't already in
+    /// `cache` — exactly the set `makeTokenCounter` must tokenize. A warm cache
+    /// (every content already counted) returns `[]`, which is the property that
+    /// keeps context-management passes from re-encoding the whole history.
+    static func uncachedContents(snapshot: [String], cache: [String: Int]) -> [String] {
+        Array(Set(snapshot.filter { cache[$0] == nil }))
+    }
+
+    /// `cache` restricted to keys still present in `live`. Drops counts for
+    /// content that has left the history — purged transient turns (discarded bad
+    /// tool calls, steering) and compacted messages — so the cache stays bounded
+    /// by the live conversation rather than growing across a long session.
+    static func prunedTokenCountCache(_ cache: [String: Int], live: [String]) -> [String: Int] {
+        let liveSet = Set(live)
+        return cache.filter { liveSet.contains($0.key) }
     }
 
     /// Total token count for the current history using `counter`, or the `chars/4`
@@ -312,5 +411,32 @@ extension AgentLoop {
     /// available.
     func currentTokenCount(using counter: ((String) -> Int)?) -> Int {
         counter.map { c in history.messages.reduce(0) { $0 + c($1.content) } } ?? history.estimatedTokenCount
+    }
+
+    // MARK: - Manual compaction (/compact)
+
+    /// Force a compaction pass now, regardless of how close usage is to the
+    /// window — the entry point for the `/compact` slash command. Also clears any
+    /// watchdog no-progress pause so automatic compaction re-arms afterwards.
+    /// Returns a short status line for the caller to surface.
+    public func compactContextManually() async -> String {
+        let counter = await makeTokenCounter()
+        let before = currentTokenCount(using: counter)
+        // Target comfortably below the effective window so a manual pass frees
+        // real headroom even when usage is only moderately high.
+        let target = max(256, Int(Double(compactionContextWindow) * 0.6))
+        let compacted = history.compactByTurns(
+            maxTokens: target,
+            keepRecentTurns: contextKeepRecentTurns,
+            tokenCounter: counter
+        )
+        contextWatchdogPaused = false
+        guard compacted else {
+            return "Nothing to compact — the conversation is already at its minimum retained size (≈\(before) tokens). Use /clear to start fresh."
+        }
+        promptCache.invalidate(reason: "manual /compact")
+        let after = currentTokenCount(using: await makeTokenCounter())
+        await hooks.emit(.compression(toolName: "context_history", beforeTokens: before, afterTokens: after, usedFallback: false))
+        return "Compacted conversation history: ≈\(before) → ≈\(after) tokens (window ≈\(effectiveContextWindow))."
     }
 }

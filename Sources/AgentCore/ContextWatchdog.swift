@@ -77,14 +77,19 @@ enum ContextWatchdog {
     }
 
     /// Whether a previous no-progress pause should clear now. Usage must have
-    /// dropped strictly below the trigger threshold — this hysteresis band keeps a
-    /// re-armed watchdog from immediately re-triggering the moment it clears (it
-    /// would just fail the same way again at exactly the threshold).
+    /// dropped strictly below `thresholdPercent - minProgressPercent` — the same
+    /// band `compactionHelped` uses to judge a compaction — not merely below the
+    /// raw trigger threshold. Re-arming at the raw threshold would clear the pause
+    /// the instant usage ticks a fraction under it (exactly the "didn't really
+    /// help" state that caused the pause in the first place), immediately exposing
+    /// the watchdog to firing another likely-doomed compaction on the same thin
+    /// tail. The margin keeps a re-armed watchdog from immediately re-triggering.
     static func shouldReArm(
         currentPercent: Double?,
-        thresholdPercent: Double
+        thresholdPercent: Double,
+        minProgressPercent: Double = ContextWatchdog.defaultMinProgressPercent
     ) -> Bool {
         guard let currentPercent else { return false }
-        return currentPercent < thresholdPercent
+        return currentPercent < thresholdPercent - minProgressPercent
     }
 }

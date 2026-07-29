@@ -35,6 +35,11 @@ extension AgentLoop {
 
         let apiKey = RemoteProviderRegistry.apiKey(for: providerID)
 
+        // Discover the model's real context window up front (once per backend) so
+        // both compaction paths can size themselves to the server's limit before
+        // the first overflow rather than only reacting to it.
+        await probeRemoteContextWindowIfNeeded(provider: provider, modelID: modelID)
+
         // Apply context transforms — same flow as the local path so behavior
         // (compaction, summarization injection, etc.) stays consistent across backends.
         var transformedMessages = history.messages
@@ -184,6 +189,32 @@ extension AgentLoop {
         // the remote path never tracks `isThinking`, so there is nothing to
         // enforce against here.
         return (text: responseText, writer: writer, startedThinking: false, turnStats: capturedTurnStats, finishReason: finishReason, thinkingBudgetBreached: false)
+    }
+
+    /// Discover the active remote model's real context window by probing the
+    /// server's llama.cpp `/props` endpoint, once per backend. Stored into
+    /// `probedRemoteContextWindow` so both compaction paths can size themselves
+    /// to the server's real limit *before* the first overflow (see
+    /// `effectiveContextWindow`). Best-effort: servers that don't expose `/props`
+    /// leave the value nil, and the learned-from-overflow path still corrects
+    /// later. Re-runs — and clears any window learned for the previous model —
+    /// whenever the active backend changes.
+    func probeRemoteContextWindowIfNeeded(provider: RemoteProvider, modelID: String) async {
+        let key = "\(provider.id):\(modelID)"
+        guard remoteContextWindowBackendKey != key else { return }
+        remoteContextWindowBackendKey = key
+        probedRemoteContextWindow = nil
+        learnedRemoteContextWindow = nil
+
+        let base = provider.baseURLValue ?? URL(string: "https://openrouter.ai/api/v1")!
+        let client = OpenRouterClient(
+            apiKey: RemoteProviderRegistry.apiKey(for: provider.id) ?? "",
+            baseURL: base,
+            providerName: provider.name
+        )
+        guard let window = await client.fetchContextWindow(), window > 0 else { return }
+        probedRemoteContextWindow = window
+        frontend.emitStatus("[Context] \(provider.name) reports a \(window)-token context window — compaction will keep usage under it.")
     }
 
     static func formatGenerationStats(

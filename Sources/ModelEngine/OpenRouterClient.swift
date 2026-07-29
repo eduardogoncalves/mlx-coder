@@ -58,12 +58,30 @@ public enum OpenRouterError: Error, LocalizedError, Sendable {
     /// context-overflow error body. llama.cpp servers report this as `n_ctx` inside a
     /// nested `error` object. Returns `nil` when the body isn't JSON or doesn't carry it.
     public var reportedContextWindow: Int? {
+        reportedErrorField("n_ctx")
+    }
+
+    /// Best-effort extraction of the server-reported *real* prompt-token count of the
+    /// request the server just rejected. llama.cpp reports this as `n_prompt_tokens`
+    /// inside the nested `error` object (e.g. `"request (36428 tokens) exceeds the
+    /// available context size (32768 tokens)"`). This is ground truth for how many
+    /// tokens the server counted, letting callers calibrate a chars/4 estimate that
+    /// undercounts real tokens on the tokenizer-less remote path — see
+    /// `AgentLoop.applyDeterministicContextCompactionIfNeeded`. `nil` when absent.
+    public var reportedPromptTokens: Int? {
+        reportedErrorField("n_prompt_tokens")
+    }
+
+    /// Reads an integer `key` from the nested `error` object of an HTTP error body,
+    /// tolerating both `Int` and `NSNumber` JSON shapes. `nil` when the body isn't
+    /// JSON, has no `error` object, or lacks the key.
+    private func reportedErrorField(_ key: String) -> Int? {
         guard case .http(_, _, let body) = self,
               let data = body.data(using: .utf8),
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let errorObj = obj["error"] as? [String: Any]
         else { return nil }
-        return (errorObj["n_ctx"] as? Int) ?? (errorObj["n_ctx"] as? NSNumber)?.intValue
+        return (errorObj[key] as? Int) ?? (errorObj[key] as? NSNumber)?.intValue
     }
 }
 
@@ -129,6 +147,63 @@ public struct OpenRouterClient: Sendable {
         self.appTitle = appTitle
         self.session = session
         self.providerName = providerName
+    }
+
+    /// Best-effort probe of the server's real context window (`n_ctx`).
+    ///
+    /// llama.cpp's server exposes a `GET /props` endpoint whose payload carries
+    /// `n_ctx` — both at the top level and nested under
+    /// `default_generation_settings`. That endpoint lives at the server root, not
+    /// under the OpenAI `/v1` path prefix, so we try `<baseURL>/props` first and
+    /// then the root-relative `/props` (when the base ends in a version segment).
+    /// Returns nil for any server that doesn't answer, times out, or doesn't
+    /// report the field — the caller then keeps its default window and relies on
+    /// the learned-from-overflow correction path instead. Never throws.
+    public func fetchContextWindow() async -> Int? {
+        for url in Self.propsProbeURLs(baseURL: baseURL) {
+            var request = URLRequest(url: url)
+            request.httpMethod = "GET"
+            request.timeoutInterval = 5
+            if !apiKey.isEmpty {
+                request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+            }
+            guard let (data, response) = try? await session.data(for: request),
+                  let http = response as? HTTPURLResponse, http.statusCode == 200,
+                  let window = Self.parseContextWindow(from: data), window > 0
+            else { continue }
+            return window
+        }
+        return nil
+    }
+
+    /// Candidate `/props` URLs: under the configured base, and — when the base
+    /// ends in a version segment like `/v1` — at the server root, since llama.cpp
+    /// serves `/props` from the root rather than the OpenAI path prefix.
+    static func propsProbeURLs(baseURL: URL) -> [URL] {
+        var urls = [baseURL.appendingPathComponent("props")]
+        let last = baseURL.lastPathComponent.lowercased()
+        let isVersionSegment = last == "v1"
+            || (last.hasPrefix("v") && last.count > 1 && last.dropFirst().allSatisfy(\.isNumber))
+        if isVersionSegment {
+            urls.append(baseURL.deletingLastPathComponent().appendingPathComponent("props"))
+        }
+        return urls
+    }
+
+    /// Extract `n_ctx` from a llama.cpp `/props` payload — the top level first,
+    /// then `default_generation_settings.n_ctx`.
+    static func parseContextWindow(from data: Data) -> Int? {
+        guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+        if let n = intValue(obj["n_ctx"]) { return n }
+        if let settings = obj["default_generation_settings"] as? [String: Any],
+           let n = intValue(settings["n_ctx"]) {
+            return n
+        }
+        return nil
+    }
+
+    private static func intValue(_ any: Any?) -> Int? {
+        (any as? Int) ?? (any as? NSNumber)?.intValue
     }
 
     public func stream(
