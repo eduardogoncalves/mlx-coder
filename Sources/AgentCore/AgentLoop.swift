@@ -8,6 +8,18 @@ import MLXLMCommon
 import MLXVLM
 import Darwin
 
+/// Retained partial for a scoped name slot-fill: a nameless tool call whose
+/// arguments were recovered but whose tool couldn't be uniquely inferred. The
+/// loop asks the model for ONLY the tool name, then patches it into `arguments`
+/// and executes — see `AgentLoop.buildNameSlotFill`. Carries `[String: Any]`, so
+/// it is not `Sendable`; it only ever lives as a local within the actor's turn
+/// loop and never crosses an isolation boundary.
+struct PendingNameSlotFill {
+    let arguments: [String: Any]
+    let candidates: [String]
+    let prompt: String
+}
+
 /// The main agent loop that orchestrates generation and tool execution.
 ///
 /// This actor is decomposed across multiple files for maintainability:
@@ -77,8 +89,24 @@ public actor AgentLoop {
     let customizationPromptSection: String?
     let skillsMetadata: [SkillMetadata]
     var promptSectionTokenEstimates: [PromptSection: Int]
+    /// Memoized `message content → exact tokenizer count`, populated by
+    /// `makeTokenCounter()`. A message's content is immutable once appended and
+    /// identical text always encodes to the same count, so cached counts stay
+    /// valid across turns — each context-management pass re-tokenizes only what's
+    /// new instead of the whole history. Pruned to the live snapshot on every
+    /// pass, so purged transient turns (discarded bad tool calls, steering) and
+    /// compacted messages fall out and it stays bounded by the live history.
+    var tokenCountCache: [String: Int] = [:]
     let workspace: String
     let projectWorkspaceRoot: String
+    /// Config for the automatic pre-turn context retrieval stage (see
+    /// `ContextRetriever` / `retrieveContextBlockIfEnabled`). Defaults to
+    /// disabled; enabled via `contextRetrieval` in `~/.mlx-coder/config.json`.
+    let contextRetrievalConfig: ContextRetrievalConfig
+    /// Config for spooling large tool output to disk (see
+    /// `AgentLoop+ToolCondensation.swift`). Enabled by default; tuned via
+    /// `toolOutputSpool` in `~/.mlx-coder/config.json`.
+    let toolOutputSpoolConfig: ToolOutputSpoolConfig
     let buildCheckManager: BuildCheckManager
     var gitOrchestrationManager: GitOrchestrationManager?
     var skipGitOrchestrationInitialization: Bool = false
@@ -123,6 +151,15 @@ public actor AgentLoop {
     /// see `currentToolPromptFilter()` in AgentLoop+SystemPrompt.swift.
     public let role: String?
 
+    /// The profile-specific core instructions a `TaskTool`-constructed sub-agent
+    /// was built with (e.g. the "You are the EXECUTOR…" identity + output
+    /// contract). `nil` for the top-level orchestrator. Stored so that every
+    /// prompt rebuild (`setMode`, `setThinkingLevel`, `setSandbox`, `cycleMode`)
+    /// can re-supply it — otherwise `configureForSubAgentExecution`'s `setMode`
+    /// call rebuilds the prompt WITHOUT it, silently dropping the sub-agent back
+    /// to the generic `defaultInstructions`. See `buildSystemPromptComposition`.
+    public let subAgentBaseInstructions: String?
+
     /// Absolute/workspace-relative paths modified by tool calls during the
     /// current turn (both streamed and parsed paths). Reset at the start of each
     /// turn. Read by `TaskTool` after a sub-agent run so the parent orchestrator
@@ -149,6 +186,30 @@ public actor AgentLoop {
     /// (little-coder issue #68). Cleared automatically once usage drops back below
     /// `contextWatchdogThresholdPercent` (hysteresis; see `ContextWatchdog.shouldReArm`).
     var contextWatchdogPaused: Bool = false
+
+    /// Real context window of the active *remote* model. Two sources feed it, in
+    /// priority order via `effectiveContextWindow`:
+    ///  • `learnedRemoteContextWindow` — the exact `n_ctx` the server reported
+    ///    when it rejected an oversized request (`exceed_context_size_error`).
+    ///    Most authoritative: it's the limit the server just enforced.
+    ///  • `probedRemoteContextWindow` — discovered up front by probing the
+    ///    server's llama.cpp `/props` endpoint on first use, so compaction can
+    ///    fire *before* the first overflow rather than only reacting to it.
+    /// Both are nil for local backends, and are reset by
+    /// `probeRemoteContextWindowIfNeeded` whenever the active backend changes so
+    /// a switch to a differently-sized model can't reuse a stale window.
+    var probedRemoteContextWindow: Int?
+    var learnedRemoteContextWindow: Int?
+    /// The backend id the two windows above were captured for — see the reset in
+    /// `probeRemoteContextWindowIfNeeded`.
+    var remoteContextWindowBackendKey: String?
+
+    /// Fraction of a remote model's real context window that mlx-coder aims to
+    /// stay within when it can only count tokens with the `chars/4` estimate (no
+    /// local tokenizer on the remote path). The ~25% margin absorbs the
+    /// estimate's undercount vs. the server's real tokenizer — see
+    /// `compactionContextWindow`.
+    static let remoteEstimateHeadroomFactor = 0.75
 
     /// A steering message queued for injection between turns, tagged with its origin so the
     /// drain knows whether to inject it as a human user turn or an agent-authored control notice.
@@ -203,9 +264,15 @@ public actor AgentLoop {
         memoryLimit: Int? = nil,
         cacheLimit: Int? = nil,
         draftModel: DraftModelHandle? = nil,
-        role: String? = nil
+        role: String? = nil,
+        subAgentBaseInstructions: String? = nil,
+        contextRetrieval: ContextRetrievalConfig = .disabled,
+        toolOutputSpool: ToolOutputSpoolConfig = .enabledDefault
     ) {
         self.role = role
+        self.contextRetrievalConfig = contextRetrieval
+        self.toolOutputSpoolConfig = toolOutputSpool
+        self.subAgentBaseInstructions = subAgentBaseInstructions
         self.modelContainer = modelContainer
         self.draftModel = draftModel
         self.registry = registry
@@ -326,7 +393,16 @@ public actor AgentLoop {
         preservedEditTmpFiles.removeAll()
         
         pendingImages = images
-        history.addUser(message)
+
+        // Automatic pre-turn context retrieval (Rider-faithful lightweight RAG).
+        // Best-effort: on any failure/timeout it returns nil and we proceed with
+        // the raw message. Injected into the USER turn (never the system prompt)
+        // so the persisted system-prompt KV prefix stays valid for cross-turn reuse.
+        var messageForHistory = message
+        if let contextBlock = await retrieveContextBlockIfEnabled(userRequest: message) {
+            messageForHistory += "\n\n" + contextBlock
+        }
+        history.addUser(messageForHistory)
         await applyDeterministicContextCompactionIfNeeded(reason: "after_user_message")
         
         // Initialize git orchestration for coding tasks
@@ -372,6 +448,20 @@ public actor AgentLoop {
         var lastFailedCallSignature: String?
         var sameFailedCallStreak = 0
         var repeatedFailureAbortName: String?
+        // Consecutive generations rejected as malformed (the generic re-emit path,
+        // not the bounded slot-fill). A model that never fixes its tool-call shape
+        // would otherwise grind the whole `maxToolIterations` budget re-emitting
+        // garbage — opencode's "doom loop". Abort the turn well before the cap once
+        // it's clear the model can't recover. Reset by any non-malformed step.
+        var consecutiveMalformedStreak = 0
+        let maxConsecutiveMalformed = 6
+        // Scoped slot-fill state. When a malformed call turns out to be a
+        // *nameless* call whose arguments we recovered but whose tool inference
+        // couldn't uniquely resolve, we retain the arguments here and ask the
+        // model for ONLY the tool name. The next generation is interpreted as
+        // that answer, patched into these arguments, and executed — instead of
+        // forcing a full re-emit that small models keep failing the same way.
+        var pendingNameSlotFill: PendingNameSlotFill?
 
         while iterations < maxToolIterations {
             await applyDeterministicContextCompactionIfNeeded(reason: "before_generation")
@@ -409,13 +499,20 @@ public actor AgentLoop {
                             "the context is too large for a retry — forcing compaction before attempting it again.",
                             severity: .warning
                         )
+                        // Persist the server's real limit so every *subsequent*
+                        // turn's watchdog compacts against it proactively, instead
+                        // of overflowing on the same wall turn after turn.
+                        if let window = remoteOverflowError?.reportedContextWindow, window > 0 {
+                            learnedRemoteContextWindow = window
+                        }
                         // Abandon in-flight recovery artifacts so the emergency
                         // compaction is unblocked (it skips while transient messages
                         // exist) and so malformed attempts never enter a summary.
                         history.purgeTransient()
                         await applyDeterministicContextCompactionIfNeeded(
                             reason: "context_overflow_recovery",
-                            overrideThreshold: remoteOverflowError?.reportedContextWindow
+                            overrideThreshold: remoteOverflowError?.reportedContextWindow,
+                            serverReportedPromptTokens: remoteOverflowError?.reportedPromptTokens
                         )
                     }
                     pendingImages = images
@@ -429,7 +526,7 @@ public actor AgentLoop {
                 return
             }
 
-            let response = generationResult.text
+            var response = generationResult.text
             let writer = generationResult.writer
             let startedThinking = generationResult.startedThinking
             let finishReason = generationResult.finishReason
@@ -460,6 +557,48 @@ public actor AgentLoop {
             // hit max_tokens mid-write), recover the partial bytes from the tmp
             // file so we don't force a full regeneration.
             let truncatedStream = writer.drainTruncatedStream()
+
+            // Slot-fill consume: if last iteration we asked for just a tool name
+            // (the retained arguments were valid but nameless), interpret THIS
+            // generation as the answer. Patch the name into the retained args and
+            // let the normal parse/execute path run on the synthesized call.
+            if let slot = pendingNameSlotFill {
+                pendingNameSlotFill = nil
+                let emittedRealCall = ToolCallParser.containsToolCall(
+                    response, dialect: toolCallDialect, startsThinking: startedThinking
+                ) || !streamedCalls.isEmpty
+                if !emittedRealCall {
+                    if let name = Self.extractSlotToolName(
+                        from: response, candidates: slot.candidates, startedThinking: startedThinking
+                    ) {
+                        response = Self.synthesizeQwenToolCall(name: name, arguments: slot.arguments)
+                        frontend.harnessIntervention(
+                            "patched the recovered arguments with tool name '\(name)' — executing instead of forcing a full re-emit.",
+                            severity: .info
+                        )
+                    } else {
+                        // The reply carried no usable tool name — fall back to a
+                        // normal full re-emit request for this one round.
+                        history.addAssistant(response, transient: true)
+                        frontend.harnessIntervention(
+                            "could not read a tool name from the reply — falling back to a full re-emit request.",
+                            severity: .warning
+                        )
+                        steeringQueue.append(.init(
+                            message: makeMalformedSteerMessage(
+                                response: response,
+                                startedThinking: startedThinking,
+                                responseLooksLikeBareJSONToolCall: false
+                            ),
+                            origin: .automated
+                        ))
+                        iterations += 1
+                        continue
+                    }
+                }
+                // emittedRealCall == true → the model recovered on its own; fall
+                // through and let the normal path handle its call.
+            }
 
             // Parse tool calls from text and remove ones already captured via streaming.
             let parsedToolCalls = await parseToolCallsUsingProcessor(
@@ -520,6 +659,7 @@ public actor AgentLoop {
                 steeringQueue.append(.init(
                     message: "You have spent too long thinking without reaching a conclusion. Stop deliberating now and respond with your best answer or make the tool call you were working toward.",
                     origin: .automated))
+                consecutiveMalformedStreak = 0
                 iterations += 1
                 continue
             }
@@ -537,6 +677,7 @@ public actor AgentLoop {
                 steeringQueue.append(.init(
                     message: "Your previous response was cut off because it hit the length limit. Continue from where you left off and complete your response, then make any tool call you intended.",
                     origin: .automated))
+                consecutiveMalformedStreak = 0
                 iterations += 1
                 continue
             }
@@ -547,31 +688,47 @@ public actor AgentLoop {
                     // recover on the retry, but marked transient so it is purged from
                     // persistent history once the turn produces a valid path.
                     history.addAssistant(response, transient: true)
+
+                    // Scoped slot-fill: if this is a *nameless* call whose args we
+                    // recovered but whose tool inference couldn't uniquely resolve,
+                    // ask only for the tool name (a one-word answer small models
+                    // emit reliably) and patch it in next iteration — instead of a
+                    // full re-emit that keeps failing the same way. Attempted at
+                    // most once per stall (`pendingNameSlotFill == nil` guard).
+                    if pendingNameSlotFill == nil,
+                       let slot = await buildNameSlotFill(response: response, startedThinking: startedThinking) {
+                        pendingNameSlotFill = slot
+                        frontend.harnessIntervention(
+                            "the tool call was missing its name — keeping the arguments and asking only for the tool name, instead of a full re-emit.",
+                            severity: .warning
+                        )
+                        steeringQueue.append(.init(message: slot.prompt, origin: .automated))
+                        iterations += 1
+                        continue
+                    }
+
+                    consecutiveMalformedStreak += 1
+                    if consecutiveMalformedStreak >= maxConsecutiveMalformed {
+                        let hadTransient = history.purgeTransient()
+                        if hadTransient {
+                            promptCache.invalidate(reason: "transient turn artifacts purged — repeated malformed tool-call abort")
+                        }
+                        frontend.harnessInterventionError("stopping the turn — the model emitted \(consecutiveMalformedStreak) malformed tool calls in a row and couldn't recover the format. Try rephrasing your request.")
+                        return
+                    }
+
                     frontend.harnessIntervention(
                         "the model's tool call was malformed — rejecting it and asking for a strict retry instead of executing anything.",
                         severity: .warning
                     )
-                    let example: String
-                    switch toolCallDialect {
-                    case .qwen:
-                        example = "<tool_call>{\"name\":\"tool_name\",\"arguments\":{...}}</tool_call>"
-                    case .lfm2:
-                        example = "<|tool_call_start|>[tool_name(param='value')]<|tool_call_end|>"
-                    case .glm4:
-                        example = "<tool_call>tool_name<arg_key>param</arg_key><arg_value>value</arg_value></tool_call>"
-                    }
-                    let bareJSONNote = responseLooksLikeBareJSONToolCall
-                        ? " Your last response was a bare JSON object — that is NOT a tool call and will never execute. Discard that shape entirely."
-                        : ""
-                    // The orchestrator only has task/todo/plan_file. A malformed
-                    // attempt at one of those is easy to "fix" the wrong way —
-                    // by falling back to a direct tool it doesn't have — so
-                    // reiterate the constraint here rather than let a generic
-                    // format reminder send it in circles.
-                    let orchestratorNote = role == nil
-                        ? " Remember: you are the orchestrator and only have task/todo/plan_file — do not fall back to calling read_file or any other tool directly; fix and re-emit the task(...) call."
-                        : ""
-                    steeringQueue.append(.init(message: "Your previous tool call was malformed and could not be parsed.\(bareJSONNote)\(orchestratorNote) Re-emit only the tool call using the exact \(example) format. Use one of the tool names listed in the system prompt. Do not add explanation text, code fences, or any JSON outside the tool-call markers.", origin: .automated))
+                    steeringQueue.append(.init(
+                        message: makeMalformedSteerMessage(
+                            response: response,
+                            startedThinking: startedThinking,
+                            responseLooksLikeBareJSONToolCall: responseLooksLikeBareJSONToolCall
+                        ),
+                        origin: .automated
+                    ))
                     iterations += 1
                     continue
                 }
@@ -782,6 +939,7 @@ public actor AgentLoop {
                 // A clean iteration breaks any identical-failure streak.
                 lastFailedCallSignature = nil
                 sameFailedCallStreak = 0
+                consecutiveMalformedStreak = 0
             }
 
             // The model has re-emitted the same failing call too many times in a
@@ -811,6 +969,46 @@ public actor AgentLoop {
     }
 
     // MARK: - Private Helpers (used only by processUserMessage)
+
+    /// Run the automatic pre-turn context-retrieval pipeline when the gate
+    /// passes, returning a `<context>` block to inject alongside the user turn
+    /// (or nil to inject nothing). Best-effort: never throws into the turn.
+    ///
+    /// Gate (Stage 0): feature flag on, top-level agent (`role == nil`), coding
+    /// task, and a non-trivial message. Sub-agents and non-coding turns skip it.
+    private func retrieveContextBlockIfEnabled(userRequest: String) async -> String? {
+        guard ContextRetriever.gatePasses(
+            enabled: contextRetrievalConfig.enabled,
+            isTopLevel: role == nil,
+            isCoding: taskType == .coding,
+            message: userRequest,
+            minChars: contextRetrievalConfig.minMessageChars
+        ) else { return nil }
+
+        // A local backend can only run auxiliary calls with a loaded container;
+        // remote always can. If neither, ContextRetriever still degrades to a
+        // lexical-only fallback, so we run it regardless.
+        let client = LLMClient(
+            backend: backend,
+            container: modelContainer,
+            baseConfig: currentGenerationConfig,
+            sessionId: sessionId
+        )
+        let emit = self.frontend
+        let log: (@Sendable (String) -> Void)?
+        if verbose {
+            log = { message in emit.emitStatus(message, severity: .info) }
+        } else {
+            log = nil
+        }
+        let retriever = ContextRetriever(
+            llm: client,
+            permissions: permissions,
+            config: contextRetrievalConfig,
+            log: log
+        )
+        return await retriever.retrieve(userRequest: userRequest)
+    }
 
     /// Drains queued steering messages into history, emitting a harness
     /// intervention notice (user-visible only — never the text added to
@@ -1135,7 +1333,205 @@ public actor AgentLoop {
 
         // Fallback: processor found nothing — retry with the hand-rolled parser whose
         // sanitiser can recover JSON with literal newlines and trailing-brace truncation.
-        return ToolCallParser.parse(response, dialect: toolCallDialect, startsThinking: startedThinking)
+        let fallback = ToolCallParser.parse(response, dialect: toolCallDialect, startsThinking: startedThinking)
+        if !fallback.isEmpty {
+            return fallback
+        }
+
+        // Last resort: recover a *nameless* call — `{"arguments":{…}}` with the
+        // `name` dropped — by inferring the tool from its argument keys. Small
+        // quantized checkpoints (notably as the orchestrator, which only has
+        // task/todo/plan_file) will emit this shape over and over without ever
+        // adding the name, burning the whole iteration budget on re-steers. When
+        // the arguments uniquely identify one available tool, execute it instead.
+        return recoverNamelessToolCalls(
+            response: response,
+            startedThinking: startedThinking,
+            signatures: await registry.toolSignaturesForInference(filter: promptFilter)
+        )
+    }
+
+    /// Registry-aware recovery for a nameless tool call. A tool is a candidate
+    /// only when every provided argument key is one of its parameters AND all of
+    /// its required parameters are present; the call is recovered only when
+    /// exactly one tool qualifies. This makes routing evidence-gated: an
+    /// ambiguous arg set shared by several tools (e.g. a bare `{"path":…}` that
+    /// fits read_file, list_dir, grep, …) matches more than one and is left for
+    /// the malformed-call steer rather than routed to a guess.
+    private func recoverNamelessToolCalls(
+        response: String,
+        startedThinking: Bool,
+        signatures: [(name: String, parameters: Set<String>, required: Set<String>)]
+    ) -> [ToolCallParser.ParsedToolCall] {
+        guard !signatures.isEmpty else { return [] }
+        let candidates = ToolCallParser.namelessToolCallArguments(
+            response, dialect: toolCallDialect, startsThinking: startedThinking
+        )
+        guard !candidates.isEmpty else { return [] }
+
+        let knownToolNames = Set(signatures.map(\.name))
+        var recovered: [ToolCallParser.ParsedToolCall] = []
+        for args in candidates {
+            // Shape C — the tool name was emitted as the single wrapping key
+            // inside `arguments`, with the real arguments as its value:
+            //   {"arguments":{"read_file":{"path":…}}}
+            // Registry-validated, so it resolves unambiguously without a
+            // (misleading) slot-fill that would otherwise keep the wrong args.
+            if let wrapped = AgentLoop.wrappedNameToolCall(from: args, knownToolNames: knownToolNames) {
+                frontend.harnessIntervention(
+                    "recovered a tool call whose name was emitted as a key inside \"arguments\" — running \(wrapped.name)(...) with the nested arguments.",
+                    severity: .info
+                )
+                recovered.append(wrapped)
+                continue
+            }
+
+            let providedKeys = Set(args.keys)
+            let matches = signatures.filter { sig in
+                providedKeys.isSubset(of: sig.parameters) && sig.required.isSubset(of: providedKeys)
+            }
+            guard matches.count == 1 else { continue }
+            let name = matches[0].name
+            frontend.harnessIntervention(
+                "recovered a tool call that was missing its \"name\" field — the arguments uniquely match \(name)(...), so running that instead of rejecting it.",
+                severity: .info
+            )
+            recovered.append(ToolCallParser.ParsedToolCall(name: name, arguments: args))
+        }
+        return recovered
+    }
+
+    /// Shape C recovery (pure, registry-validated): a nameless call whose
+    /// `arguments` is a single entry whose key names a real tool and whose value
+    /// is the argument object — `{"arguments":{"read_file":{"path":…}}}`. The
+    /// model put the tool name where an argument key should be. Requiring the key
+    /// to be a *known* tool name (and the value an object) keeps a legitimate
+    /// single-object parameter from tripping it.
+    static func wrappedNameToolCall(
+        from args: [String: Any],
+        knownToolNames: Set<String>
+    ) -> ToolCallParser.ParsedToolCall? {
+        guard args.count == 1,
+              let (key, value) = args.first,
+              knownToolNames.contains(key),
+              let nestedArgs = value as? [String: Any] else {
+            return nil
+        }
+        return ToolCallParser.ParsedToolCall(name: key, arguments: nestedArgs)
+    }
+
+    /// Builds a scoped name slot-fill for a *nameless* malformed call: recovers
+    /// the argument dict and, when tool inference is NOT unique (the unique case
+    /// is already executed by `recoverNamelessToolCalls` and never reaches the
+    /// malformed path), returns the retained args plus a narrow prompt asking the
+    /// model for only the tool name. Candidates are the ambiguous matches when
+    /// there are ≥2, otherwise every available tool. Returns nil when the shape
+    /// isn't a recoverable nameless call, so the caller does a full re-emit.
+    private func buildNameSlotFill(
+        response: String,
+        startedThinking: Bool
+    ) async -> PendingNameSlotFill? {
+        guard toolCallDialect == .qwen else { return nil }
+        let namelessArgs = ToolCallParser.namelessToolCallArguments(
+            response, dialect: toolCallDialect, startsThinking: startedThinking
+        )
+        guard let args = namelessArgs.first, !args.isEmpty else { return nil }
+
+        let signatures = await registry.toolSignaturesForInference(filter: currentToolPromptFilter())
+        guard !signatures.isEmpty else { return nil }
+
+        let providedKeys = Set(args.keys)
+        let matches = signatures.filter { sig in
+            providedKeys.isSubset(of: sig.parameters) && sig.required.isSubset(of: providedKeys)
+        }
+        // count == 1 is handled upstream and never lands here; guard anyway.
+        guard matches.count != 1 else { return nil }
+        let candidates = (matches.count >= 2 ? matches.map(\.name) : signatures.map(\.name)).sorted()
+        guard !candidates.isEmpty else { return nil }
+
+        let keyList = args.keys.sorted().joined(separator: ", ")
+        let choices = candidates.joined(separator: ", ")
+        let prompt = "Your previous tool call had these arguments but no tool name: [\(keyList)]. "
+            + "I have KEPT those arguments — do not repeat them. Reply with ONLY the tool name and "
+            + "nothing else: no JSON, no quotes, no punctuation, no explanation. "
+            + "Choose exactly one of: \(choices)."
+        return PendingNameSlotFill(arguments: args, candidates: candidates, prompt: prompt)
+    }
+
+    /// Reads a bare tool name out of a slot-fill answer. Tolerant by design: the
+    /// model was asked for one word but may wrap it in prose, quotes, fences, or
+    /// a `<think>` block. Matches a candidate name only as a **whole word**
+    /// (longest candidate first, so a short name isn't matched inside a longer
+    /// one). Word boundaries already tolerate surrounding quotes/backticks/
+    /// punctuation; a bare-substring fallback is deliberately NOT used because it
+    /// mis-fires on incidental mentions (e.g. "task" inside "multitasking").
+    /// Returns nil when no candidate appears as its own word.
+    private static func extractSlotToolName(
+        from response: String,
+        candidates: [String],
+        startedThinking: Bool
+    ) -> String? {
+        let text = ToolCallParser.stripThinking(response).lowercased()
+        guard !text.isEmpty else { return nil }
+        let ordered = candidates.sorted { $0.count > $1.count }
+        for name in ordered {
+            let pattern = "\\b\(NSRegularExpression.escapedPattern(for: name.lowercased()))\\b"
+            if let re = try? NSRegularExpression(pattern: pattern),
+               re.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)) != nil {
+                return name
+            }
+        }
+        return nil
+    }
+
+    /// Renders the canonical qwen `<tool_call>` wire form the normal parser
+    /// accepts, so a slot-filled call re-enters the standard parse/execute path
+    /// instead of needing a bespoke execution branch. Only qwen is synthesized —
+    /// slot-fill is gated to that dialect (`buildNameSlotFill`).
+    private static func synthesizeQwenToolCall(name: String, arguments: [String: Any]) -> String {
+        let argsJSON: String
+        if let data = try? JSONSerialization.data(withJSONObject: arguments, options: [.sortedKeys]),
+           let str = String(data: data, encoding: .utf8) {
+            argsJSON = str
+        } else {
+            argsJSON = "{}"
+        }
+        return "<tool_call>{\"name\":\"\(name)\",\"arguments\":\(argsJSON)}</tool_call>"
+    }
+
+    /// The generic "your call was malformed, re-emit it in full" steer. Extracted
+    /// so both the normal malformed path and the slot-fill fallback share one
+    /// message (with the same nameless/bare-JSON/orchestrator hints).
+    private func makeMalformedSteerMessage(
+        response: String,
+        startedThinking: Bool,
+        responseLooksLikeBareJSONToolCall: Bool
+    ) -> String {
+        let example: String
+        switch toolCallDialect {
+        case .qwen:
+            example = "<tool_call>{\"name\":\"tool_name\",\"arguments\":{...}}</tool_call>"
+        case .lfm2:
+            example = "<|tool_call_start|>[tool_name(param='value')]<|tool_call_end|>"
+        case .glm4:
+            example = "<tool_call>tool_name<arg_key>param</arg_key><arg_value>value</arg_value></tool_call>"
+        }
+        let bareJSONNote = responseLooksLikeBareJSONToolCall
+            ? " Your last response was a bare JSON object — that is NOT a tool call and will never execute. Discard that shape entirely."
+            : ""
+        // Pinpoint the specific, recoverable "arguments but no name" shape instead
+        // of the generic reminder — small models otherwise thrash between wrong
+        // shapes rather than just adding the field they dropped.
+        let missingNameNote = ToolCallParser.containsNamelessToolCall(response, dialect: toolCallDialect, startsThinking: startedThinking)
+            ? " Your tool call had an \"arguments\" object but no \"name\" field, so it could not be routed to any tool. Keep the same arguments and add the \"name\" field naming the tool you intended (e.g. {\"name\":\"read_file\",\"arguments\":{...}})."
+            : ""
+        // The orchestrator only has task/todo/plan_file. A malformed attempt at
+        // one of those is easy to "fix" the wrong way — by falling back to a
+        // direct tool it doesn't have — so reiterate the constraint here.
+        let orchestratorNote = role == nil
+            ? " Remember: you are the orchestrator and only have task/todo/plan_file — do not fall back to calling read_file or any other tool directly; fix and re-emit the task(...) call."
+            : ""
+        return "Your previous tool call was malformed and could not be parsed.\(missingNameNote)\(bareJSONNote)\(orchestratorNote) Re-emit only the tool call using the exact \(example) format. Use one of the tool names listed in the system prompt. Do not add explanation text, code fences, or any JSON outside the tool-call markers."
     }
 
     private func deduplicateToolCalls(
@@ -1350,6 +1746,17 @@ public actor AgentLoop {
                     readOnlyLoopSteeredSignatures.insert(blockedSignature)
                     steeringQueue.append(.init(message: "You are repeatedly calling \(call.name) with identical arguments. Reuse the existing tool output and move to the final answer.", origin: .automated))
                 }
+            } else if resolvedTool == nil {
+                // Hallucinated / mistyped tool name. Instead of a bare "Unknown
+                // tool", tell the model the nearest real name and the tools it
+                // can actually call — that message is its retry prompt. Uses the
+                // filtered inference set so orchestrators see only their tools.
+                let available = await registry.toolSignaturesForInference(filter: currentToolPromptFilter()).map(\.name)
+                result = .error(ToolCallErrorFormatter.unknownToolMessage(attempted: call.name, available: available))
+                steeringQueue.append(.init(
+                    message: "'\(call.name)' is not a tool. Call one of the available tools listed in the error, using its exact name.",
+                    origin: .automated
+                ))
             } else {
                 // Apply automatic parameter correction before execution
                 let correctionResult = await ParameterCorrectionService.correct(
@@ -1377,7 +1784,17 @@ public actor AgentLoop {
                 )
                 if !missingRequiredArgs.isEmpty {
                     let joined = missingRequiredArgs.joined(separator: ", ")
-                    result = .error("Missing required argument(s) for \(call.name): \(joined)")
+                    // Echo the tool's full expected shape and what the model
+                    // actually sent, so the retry knows exactly what to add —
+                    // opencode/pi's "tell the model what it should do" error style.
+                    let expected = Array(resolvedTool?.parameters.properties?.keys ?? [String: PropertySchema]().keys)
+                    let provided = Array(correctionResult.correctedArguments.keys)
+                    result = .error(ToolCallErrorFormatter.missingRequiredMessage(
+                        toolName: call.name,
+                        missing: missingRequiredArgs,
+                        expected: expected,
+                        provided: provided
+                    ))
                     steeringQueue.append(.init(message: "Your last \(call.name) call was invalid. Include required argument(s): \(joined).", origin: .automated))
                 } else if isDestructive && dryRun {
                     result = .success("Dry-run mode: skipped execution of destructive tool '\(call.name)'. Arguments: \(correctionResult.correctedArguments)")

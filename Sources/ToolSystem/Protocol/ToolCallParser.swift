@@ -147,6 +147,154 @@ public struct ToolCallParser: Sendable {
         return false
     }
 
+    /// True when the text contains a `<tool_call>` whose body is valid JSON with
+    /// an `arguments` object but no usable `name`/`tool_name`. This is a
+    /// *recoverable* mistake — the model emitted the arguments but forgot the
+    /// tool name (observed repeatedly on small quantized checkpoints as
+    /// `{"arguments":{"path":"..."}}`) — and it cannot be routed, so the parser
+    /// correctly drops it. The value of detecting it is a targeted steer ("add
+    /// the missing name field") instead of the generic "malformed, re-emit"
+    /// reminder, which tends to make the model thrash between wrong shapes.
+    public static func containsNamelessToolCall(
+        _ text: String,
+        dialect: ToolCallDialect = .qwen,
+        startsThinking: Bool = false
+    ) -> Bool {
+        guard dialect == .qwen else { return false }
+        for body in qwenToolCallBodies(in: text, dialect: dialect, startsThinking: startsThinking) {
+            guard let json = lenientToolCallObject(from: body) else { continue }
+            let hasName = ((json["name"] as? String)?.isEmpty == false)
+                || ((json["tool_name"] as? String)?.isEmpty == false)
+            let hasArguments = json["arguments"] is [String: Any]
+            if hasArguments && !hasName {
+                return true
+            }
+        }
+        return false
+    }
+
+    /// Best-effort parse of a `<tool_call>` body into a JSON object, tolerating
+    /// the two malformations small quantized checkpoints emit around otherwise
+    /// recoverable calls: a trailing junk tag after the object (e.g. a stray
+    /// `</arguments>` in place of `</tool_call>`) and one or two missing trailing
+    /// braces (the model stops generating before closing `arguments`/the
+    /// envelope, observed as `{"arguments":{"description":…,"profile":…}`). Strict
+    /// `JSONSerialization` is tried first; only if that fails do we strip junk
+    /// (`extractLikelyJSONObject`) and balance braces (`appendMissingTrailing‑
+    /// BracesIfSafe`) — the same repairs the main parse path already applies via
+    /// `tryParseWithFallbacks`/`tryParseWithTrailingBraceRecovery`, so the
+    /// nameless-detection gate is no stricter than dispatch itself. Returns nil
+    /// when the body can't be salvaged into an object.
+    private static func lenientToolCallObject(from body: String) -> [String: Any]? {
+        func object(_ string: String) -> [String: Any]? {
+            guard let data = string.data(using: .utf8),
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                return nil
+            }
+            return json
+        }
+        if let json = object(body) { return json }
+        let candidate = extractLikelyJSONObject(body) ?? body
+        if let json = object(candidate) { return json }
+        if let repaired = appendMissingTrailingBracesIfSafe(candidate) {
+            return object(repaired)
+        }
+        return nil
+    }
+
+    /// Returns the `arguments` object of each `<tool_call>` whose body carries an
+    /// `arguments` dict but no usable `name`/`tool_name` — the same recoverable
+    /// shape `containsNamelessToolCall` flags, but exposing the arguments so a
+    /// caller holding the tool registry can *infer* the intended tool from the
+    /// argument keys and execute the call instead of merely re-steering (which,
+    /// on small quantized checkpoints, tends to loop until the turn budget is
+    /// exhausted — the model emits `{"arguments":{"description":…,"profile":…}}`
+    /// over and over without ever adding the name).
+    ///
+    /// The body is parsed via `lenientToolCallObject`, which tolerates a trailing
+    /// junk tag and one or two missing trailing braces — the same shapes the main
+    /// parse path recovers — so this stays in lock-step with
+    /// `containsNamelessToolCall`. Shapes that `tryParse` already recovers on its
+    /// own — a name nested *inside* `arguments` — are skipped here. Only the
+    /// qwen/JSON dialect is inspected.
+    public static func namelessToolCallArguments(
+        _ text: String,
+        dialect: ToolCallDialect = .qwen,
+        startsThinking: Bool = false
+    ) -> [[String: Any]] {
+        guard dialect == .qwen else { return [] }
+        var results: [[String: Any]] = []
+        for body in qwenToolCallBodies(in: text, dialect: dialect, startsThinking: startsThinking) {
+            guard let json = lenientToolCallObject(from: body) else { continue }
+            let hasName = ((json["name"] as? String)?.isEmpty == false)
+                || ((json["tool_name"] as? String)?.isEmpty == false)
+            guard !hasName, let args = json["arguments"] as? [String: Any], !args.isEmpty else {
+                continue
+            }
+            // A name nested inside `arguments` is already recovered by tryParse
+            // (Shape A/B). Don't double-handle it here.
+            let hasNestedName = ((args["name"] as? String)?.isEmpty == false)
+                || ((args["tool_name"] as? String)?.isEmpty == false)
+            guard !hasNestedName else { continue }
+            results.append(args)
+        }
+        return results
+    }
+
+    /// Extracts the raw body string of each `<tool_call>` region outside any
+    /// think block, using the same open/close (and implicit next-open) boundary
+    /// logic as `parse`. Used by `containsNamelessToolCall` to inspect bodies
+    /// without committing to a full parse.
+    private static func qwenToolCallBodies(
+        in text: String,
+        dialect: ToolCallDialect,
+        startsThinking: Bool
+    ) -> [String] {
+        var bodies: [String] = []
+        var searchRange = text.startIndex..<text.endIndex
+        let openToken = dialect.toolCallOpen
+        let closeToken = dialect.toolCallClose
+
+        if startsThinking {
+            guard let thinkClose = text.range(of: ToolCallPattern.thinkClose) else { return [] }
+            searchRange = thinkClose.upperBound..<text.endIndex
+        }
+
+        while !searchRange.isEmpty {
+            if let thinkOpen = text.range(of: ToolCallPattern.thinkOpen, range: searchRange),
+               let toolOpen = text.range(of: openToken, range: searchRange),
+               thinkOpen.lowerBound <= toolOpen.lowerBound {
+                // Tool tag is inside/after a think block — skip the closed think
+                // region (or stop if it never closes).
+                if let thinkClose = text.range(of: ToolCallPattern.thinkClose, range: thinkOpen.upperBound..<text.endIndex) {
+                    searchRange = thinkClose.upperBound..<text.endIndex
+                    continue
+                }
+                break
+            }
+
+            guard let toolOpen = text.range(of: openToken, range: searchRange) else { break }
+
+            let closeRange = text.range(of: closeToken, range: toolOpen.upperBound..<text.endIndex)
+            let nextOpen = text.range(of: openToken, range: toolOpen.upperBound..<text.endIndex)
+
+            // Same implicit-boundary rule as parseToolCall: an unclosed call whose
+            // next sibling opens before any close must not swallow that sibling.
+            if let nextOpen, closeRange == nil || nextOpen.lowerBound < closeRange!.lowerBound {
+                bodies.append(String(text[toolOpen.upperBound..<nextOpen.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines))
+                searchRange = nextOpen.lowerBound..<text.endIndex
+            } else if let closeRange {
+                bodies.append(String(text[toolOpen.upperBound..<closeRange.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines))
+                searchRange = closeRange.upperBound..<text.endIndex
+            } else {
+                bodies.append(String(text[toolOpen.upperBound..<text.endIndex]).trimmingCharacters(in: .whitespacesAndNewlines))
+                break
+            }
+        }
+
+        return bodies
+    }
+
     private static func parseToolCall(
         in text: String,
         openRange: Range<String.Index>,
@@ -155,27 +303,29 @@ public struct ToolCallParser: Sendable {
         appendTo results: inout [ParsedToolCall]
     ) -> Range<String.Index> {
         let closeRange = text.range(of: closeToken, range: openRange.upperBound..<text.endIndex)
+        let nextOpenRange = text.range(of: dialect.toolCallOpen, range: openRange.upperBound..<text.endIndex)
 
-        let bodyString: String
+        let bodyEnd: String.Index
         let nextSearchIndex: String.Index
 
-        if let closeRange {
-            bodyString = String(text[openRange.upperBound..<closeRange.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
+        if let nextOpenRange, closeRange == nil || nextOpenRange.lowerBound < closeRange!.lowerBound {
+            // Another `<tool_call>` opens before this one is closed — i.e. this
+            // call was emitted without its own closing tag. Use the next opening
+            // tag as an implicit boundary so a following, well-formed call isn't
+            // swallowed into this (unclosed) call's body and lost. This is common
+            // when a small model emits a draft call, then re-emits the corrected
+            // one right after: the corrected call must still be parsed.
+            bodyEnd = nextOpenRange.lowerBound
+            nextSearchIndex = nextOpenRange.lowerBound
+        } else if let closeRange {
+            bodyEnd = closeRange.lowerBound
             nextSearchIndex = closeRange.upperBound
         } else {
-            // No closing tag — check if another opening tag follows immediately (model emitted
-            // multiple calls without closing tags). Use the next open tag as an implicit
-            // boundary so all calls in the response are parsed rather than lumped together.
-            let openToken = dialect.toolCallOpen
-            let nextOpenRange = text.range(of: openToken, range: openRange.upperBound..<text.endIndex)
-            if let nextOpenRange {
-                bodyString = String(text[openRange.upperBound..<nextOpenRange.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
-                nextSearchIndex = nextOpenRange.lowerBound
-            } else {
-                bodyString = String(text[openRange.upperBound..<text.endIndex]).trimmingCharacters(in: .whitespacesAndNewlines)
-                nextSearchIndex = text.endIndex
-            }
+            bodyEnd = text.endIndex
+            nextSearchIndex = text.endIndex
         }
+
+        let bodyString = String(text[openRange.upperBound..<bodyEnd]).trimmingCharacters(in: .whitespacesAndNewlines)
 
         switch dialect {
         case .qwen:
@@ -348,29 +498,54 @@ public struct ToolCallParser: Sendable {
         // generic "re-emit in the exact format" steering message doesn't
         // pinpoint the actual mistake, so the model tends to thrash between
         // wrong shapes instead of converging.
-        guard let name = (json["name"] as? String) ?? (json["tool_name"] as? String), !name.isEmpty else {
-            return nil
-        }
+        if let name = (json["name"] as? String) ?? (json["tool_name"] as? String), !name.isEmpty {
+            let arguments = json["arguments"] as? [String: Any] ?? [:]
 
-        let arguments = json["arguments"] as? [String: Any] ?? [:]
-
-        // Recover a "double-wrapped" call: some smaller/quantized checkpoints emit
-        // the entire intended tool call as a JSON *string* in the name field, e.g.
-        //   {"name": "{\"name\":\"todo\",\"arguments\":{...}}", "arguments": {}}
-        // Left as-is this dispatches with the raw JSON as the tool name and fails
-        // with "Unknown tool: {…json…}"; the model then sees the error and keeps
-        // re-wrapping instead of converging. Unwrap the inner call so it reaches a
-        // real tool. Recursion terminates once the inner name is a plain identifier.
-        if looksLikeJSONObject(name), let nested = tryParse(name) {
-            // Prefer the inner arguments; fall back to the outer ones only when the
-            // inner call carried none.
-            if nested.arguments.isEmpty && !arguments.isEmpty {
-                return ParsedToolCall(name: nested.name, arguments: arguments)
+            // Recover a "double-wrapped" call: some smaller/quantized checkpoints emit
+            // the entire intended tool call as a JSON *string* in the name field, e.g.
+            //   {"name": "{\"name\":\"todo\",\"arguments\":{...}}", "arguments": {}}
+            // Left as-is this dispatches with the raw JSON as the tool name and fails
+            // with "Unknown tool: {…json…}"; the model then sees the error and keeps
+            // re-wrapping instead of converging. Unwrap the inner call so it reaches a
+            // real tool. Recursion terminates once the inner name is a plain identifier.
+            if looksLikeJSONObject(name), let nested = tryParse(name) {
+                // Prefer the inner arguments; fall back to the outer ones only when the
+                // inner call carried none.
+                if nested.arguments.isEmpty && !arguments.isEmpty {
+                    return ParsedToolCall(name: nested.name, arguments: arguments)
+                }
+                return nested
             }
-            return nested
+
+            return ParsedToolCall(name: name, arguments: arguments)
         }
 
-        return ParsedToolCall(name: name, arguments: arguments)
+        // Recover a call whose name (and possibly its whole body) got nested
+        // INSIDE `arguments` — a common small-model error. Only applied when
+        // there is NO usable top-level name, so a well-formed call is never
+        // rewritten. Two shapes are handled:
+        if var innerArgs = json["arguments"] as? [String: Any],
+           let innerName = (innerArgs["name"] as? String) ?? (innerArgs["tool_name"] as? String),
+           !innerName.isEmpty, !looksLikeJSONObject(innerName) {
+
+            // Shape A — the entire call was wrapped one level too deep, i.e. the
+            // inner object is itself a complete `{"name":…,"arguments":{…}}` call:
+            //   {"arguments":{"name":"task_output","arguments":{"archive":"…"}}}
+            // Use the inner call's own arguments, else dispatch loses the real
+            // args one level down and reports them "missing".
+            if let deeperArgs = innerArgs["arguments"] as? [String: Any] {
+                return ParsedToolCall(name: innerName, arguments: deeperArgs)
+            }
+
+            // Shape B — the tool name was dumped alongside the real arguments,
+            // flat, inside `arguments` (e.g.
+            //   {"arguments":{"description":"…","profile":"executor","name":"task"}}).
+            innerArgs.removeValue(forKey: "name")
+            innerArgs.removeValue(forKey: "tool_name")
+            return ParsedToolCall(name: innerName, arguments: innerArgs)
+        }
+
+        return nil
     }
 
     /// True when `text` looks like a JSON object literal (a wrapped tool call
@@ -448,14 +623,25 @@ public struct ToolCallParser: Sendable {
             }
         }
 
-        // If parsing ended inside a quoted string or escape sequence,
-        // the payload is too malformed for structural recovery.
-        guard !inString && !escaping else { return nil }
+        // A dangling escape (`…\`) can't be completed safely — the next char is
+        // unknown, so we'd be guessing at the payload. Bail.
+        guard !escaping else { return nil }
+
+        // If generation stopped *inside* a quoted string, the model was mid-value
+        // when it hit the token limit — the single most common local-model
+        // truncation (a long `description`/`content` cut off). Close the string
+        // before balancing braces, mirroring pi's smart JSON parser. The recovered
+        // value is truncated but usable, which beats discarding the whole call;
+        // the caller re-parses and falls back if this still isn't valid JSON.
+        // Braces *inside* the string were never counted (the scan skips while
+        // `inString`), so the structural brace tally below stays correct after we
+        // close it.
+        let stringClose = inString ? "\"" : ""
 
         let missing = openBraces - closeBraces
         guard missing > 0 && missing <= 2 else { return nil }
 
-        return text + String(repeating: "}", count: missing)
+        return text + stringClose + String(repeating: "}", count: missing)
     }
 
     private static func extractLikelyJSONObject(_ text: String) -> String? {

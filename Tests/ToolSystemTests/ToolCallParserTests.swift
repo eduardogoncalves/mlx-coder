@@ -80,6 +80,149 @@ final class ToolCallParserTests: XCTestCase {
         XCTAssertEqual(calls[1].name, "write_file")
     }
 
+    func testParsesValidCallAfterUnclosedDraftCall() {
+        // Regression: the model emits a draft call WITHOUT a closing tag (and
+        // without a name), then re-emits the corrected, well-formed call right
+        // after. The single trailing </tool_call> used to make the first call's
+        // body greedily swallow the second (valid) call, so nothing parsed and
+        // the turn thrashed on "malformed" forever.
+        let text = """
+        <tool_call>{"arguments":{"description":"fix the bug","profile":"executor"}
+
+        <tool_call>{"arguments":{"description":"fix the bug","profile":"executor"},"name":"task"}</tool_call>
+        """
+        let calls = ToolCallParser.parse(text)
+        XCTAssertEqual(calls.count, 1)
+        XCTAssertEqual(calls.first?.name, "task")
+        XCTAssertEqual((calls.first?.arguments["profile"]) as? String, "executor")
+    }
+
+    func testTwoUnclosedCallsBothParse() {
+        let text = """
+        <tool_call>{"name":"read_file","arguments":{"path":"a.txt"}}
+        <tool_call>{"name":"read_file","arguments":{"path":"b.txt"}}
+        """
+        let calls = ToolCallParser.parse(text)
+        XCTAssertEqual(calls.count, 2)
+        XCTAssertEqual(calls[0].arguments["path"] as? String, "a.txt")
+        XCTAssertEqual(calls[1].arguments["path"] as? String, "b.txt")
+    }
+
+    func testParsesNameNestedInsideArguments() {
+        // Small-model error: it dumps `name` (and other top-level task fields)
+        // INTO the arguments object instead of alongside it. Must still route.
+        let text = #"<tool_call>{"arguments":{"description":"do X","profile":"executor","name":"task"}}</tool_call>"#
+        let calls = ToolCallParser.parse(text)
+        XCTAssertEqual(calls.count, 1)
+        XCTAssertEqual(calls.first?.name, "task")
+        XCTAssertEqual(calls.first?.arguments["description"] as? String, "do X")
+        XCTAssertEqual(calls.first?.arguments["profile"] as? String, "executor")
+        // The lifted name key must not leak back into the arguments.
+        XCTAssertNil(calls.first?.arguments["name"])
+    }
+
+    func testParsesNameNestedInArgumentsWithMissingOuterBrace() {
+        // Exactly the transcript failure: name nested in arguments AND the outer
+        // closing brace is missing. Trailing-brace recovery + name-lift together
+        // must still parse it instead of looping on "malformed".
+        let text = #"<tool_call>{"arguments":{"description":"fix bug","response_mode":"raw","name":"task"}"# + "\n</tool_call>"
+        let calls = ToolCallParser.parse(text)
+        XCTAssertEqual(calls.count, 1)
+        XCTAssertEqual(calls.first?.name, "task")
+        XCTAssertEqual(calls.first?.arguments["response_mode"] as? String, "raw")
+        XCTAssertNil(calls.first?.arguments["name"])
+    }
+
+    func testParsesCallWrappedOneLevelTooDeepInArguments() {
+        // The whole call got nested inside an outer `arguments`, i.e. the inner
+        // object is itself a complete {"name":…,"arguments":{…}} call. Dispatch
+        // must receive the INNER arguments, not `{"arguments":{…}}`.
+        let text = #"<tool_call>{"arguments":{"name":"task_output","arguments":{"include":"final","archive":".native-agent/subagent-logs/run1"}}}</tool_call>"#
+        let calls = ToolCallParser.parse(text)
+        XCTAssertEqual(calls.count, 1)
+        XCTAssertEqual(calls.first?.name, "task_output")
+        XCTAssertEqual(calls.first?.arguments["archive"] as? String, ".native-agent/subagent-logs/run1")
+        XCTAssertEqual(calls.first?.arguments["include"] as? String, "final")
+        // The inner call's args must be unwrapped, not left double-nested.
+        XCTAssertNil(calls.first?.arguments["arguments"])
+    }
+
+    func testNamelessToolCallArgumentsExposesDroppedNameArgs() {
+        // The orchestrator livelock: name field dropped entirely (not nested),
+        // arguments still present. parse() drops it; the recovery accessor must
+        // surface the arguments so the tool can be inferred from its keys.
+        let text = #"<tool_call>{"arguments":{"description":"fix bug","profile":"executor"}}</tool_call>"#
+        XCTAssertTrue(ToolCallParser.parse(text).isEmpty)
+        let args = ToolCallParser.namelessToolCallArguments(text)
+        XCTAssertEqual(args.count, 1)
+        XCTAssertEqual(args.first?["description"] as? String, "fix bug")
+        XCTAssertEqual(args.first?["profile"] as? String, "executor")
+    }
+
+    func testNamelessToolCallArgumentsToleratesStrayClosingTag() {
+        // Exact transcript shape: no </tool_call>, a stray </arguments> tag, and
+        // no name. extractLikelyJSONObject must strip the junk so recovery works.
+        let text = "<tool_call>{\"arguments\":{\"description\":\"fix bug\",\"profile\":\"executor\"}}\n</arguments>"
+        let args = ToolCallParser.namelessToolCallArguments(text)
+        XCTAssertEqual(args.count, 1)
+        XCTAssertEqual(args.first?["profile"] as? String, "executor")
+    }
+
+    func testNamelessToolCallArgumentsRecoversMissingTrailingBrace() {
+        // Exact orchestrator-livelock transcript: no name AND the outer envelope
+        // brace was never emitted (the model stopped after closing `arguments`).
+        // Both the detector and the recovery accessor must balance the brace so
+        // the rich arguments survive instead of forcing a full — and lossy —
+        // re-emit.
+        let text = "<tool_call>{\"arguments\":{\"description\":\"Write StreamingProxyService.cs\",\"profile\":\"executor\",\"response_mode\":\"raw\"}"
+        XCTAssertTrue(ToolCallParser.containsNamelessToolCall(text))
+        let args = ToolCallParser.namelessToolCallArguments(text)
+        XCTAssertEqual(args.count, 1)
+        XCTAssertEqual(args.first?["profile"] as? String, "executor")
+        XCTAssertEqual(args.first?["response_mode"] as? String, "raw")
+        XCTAssertEqual(args.first?["description"] as? String, "Write StreamingProxyService.cs")
+    }
+
+    func testParsesNamedCallTruncatedMidStringValue() {
+        // Length-limit truncation mid-value — the single most common local-model
+        // cut-off. Generation stopped inside the `description` string, so both the
+        // string and the two enclosing braces are missing. The value is truncated
+        // but the call must still dispatch instead of being discarded.
+        let text = "<tool_call>{\"name\":\"task\",\"arguments\":{\"description\":\"Write StreamingProxyService.cs and keep goin"
+        let calls = ToolCallParser.parse(text)
+        XCTAssertEqual(calls.count, 1)
+        XCTAssertEqual(calls.first?.name, "task")
+        XCTAssertEqual(
+            calls.first?.arguments["description"] as? String,
+            "Write StreamingProxyService.cs and keep goin"
+        )
+    }
+
+    func testNamelessToolCallArgumentsRecoversTruncatedMidStringValue() {
+        // Same mid-value truncation, but the `name` was also dropped. The nameless
+        // recovery accessor must still surface the (truncated) arguments so the
+        // tool can be inferred, rather than forcing a lossy full re-emit.
+        let text = "<tool_call>{\"arguments\":{\"profile\":\"executor\",\"description\":\"Write the file and keep goin"
+        XCTAssertTrue(ToolCallParser.containsNamelessToolCall(text))
+        let args = ToolCallParser.namelessToolCallArguments(text)
+        XCTAssertEqual(args.count, 1)
+        XCTAssertEqual(args.first?["profile"] as? String, "executor")
+        XCTAssertEqual(args.first?["description"] as? String, "Write the file and keep goin")
+    }
+
+    func testNamelessToolCallArgumentsSkipsWellFormedAndNestedNameCalls() {
+        // A call with a real top-level name is not "nameless".
+        let named = #"<tool_call>{"name":"task","arguments":{"description":"x"}}</tool_call>"#
+        XCTAssertTrue(ToolCallParser.namelessToolCallArguments(named).isEmpty)
+        // A name nested inside arguments is already recovered by parse(); don't
+        // also report it here (would double-handle).
+        let nested = #"<tool_call>{"arguments":{"description":"x","name":"task"}}</tool_call>"#
+        XCTAssertTrue(ToolCallParser.namelessToolCallArguments(nested).isEmpty)
+        // Empty arguments carry no signal to infer from.
+        let empty = #"<tool_call>{"arguments":{}}</tool_call>"#
+        XCTAssertTrue(ToolCallParser.namelessToolCallArguments(empty).isEmpty)
+    }
+
     func testContainsToolCall() {
         XCTAssertTrue(ToolCallParser.containsToolCall("<tool_call>{}</tool_call>"))
         XCTAssertFalse(ToolCallParser.containsToolCall("just normal text"))

@@ -217,6 +217,22 @@ public actor ToolRegistry {
         return array.compactMap { Self.jsonDictToSendable($0) }
     }
 
+    /// Lightweight parameter signatures for the filtered tools, used to recover a
+    /// *nameless* tool call — `{"arguments":{…}}` with the `name` field dropped —
+    /// by matching the provided argument keys against exactly one tool. Returns
+    /// each tool's full parameter-name set and its required-parameter set so the
+    /// caller can apply a subset/required-superset test (see
+    /// `AgentLoop.recoverNamelessToolCalls`).
+    public func toolSignaturesForInference(
+        filter: ToolPromptFilter = .unfiltered
+    ) -> [(name: String, parameters: Set<String>, required: Set<String>)] {
+        filteredTools(for: filter).map { name, tool in
+            let parameters = Set((tool.parameters.properties ?? [:]).keys)
+            let required = Set(tool.parameters.required ?? [])
+            return (name, parameters, required)
+        }
+    }
+
     private static func jsonDictToSendable(_ dict: [String: Any]) -> [String: any Sendable]? {
         var result: [String: any Sendable] = [:]
         for (key, value) in dict {

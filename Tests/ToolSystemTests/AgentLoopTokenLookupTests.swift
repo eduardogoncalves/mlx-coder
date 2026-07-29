@@ -19,6 +19,39 @@ final class AgentLoopTokenLookupTests: XCTestCase {
         XCTAssertEqual(lookup.count, 3)
     }
 
+    func testUncachedContentsReturnsDedupedContentMissingFromCache() {
+        let snapshot = ["<tool_call>", "hello world", "<tool_call>", "goodbye"]
+        let cache = ["hello world": 2]
+
+        let uncached = AgentLoop.uncachedContents(snapshot: snapshot, cache: cache)
+
+        // "hello world" is already counted; "<tool_call>" appears twice but is
+        // tokenized once. Order isn't guaranteed (Set), so compare as sets.
+        XCTAssertEqual(Set(uncached), Set(["<tool_call>", "goodbye"]))
+    }
+
+    func testUncachedContentsIsEmptyWhenCacheIsWarm() {
+        // Regression guard: once every live content is cached, a subsequent
+        // context-management pass must tokenize nothing — this is what stops
+        // `makeTokenCounter` from re-encoding the whole history each turn.
+        let snapshot = ["system prompt", "user turn", "assistant turn"]
+        let warmCache = ["system prompt": 3, "user turn": 2, "assistant turn": 2]
+
+        XCTAssertTrue(AgentLoop.uncachedContents(snapshot: snapshot, cache: warmCache).isEmpty)
+    }
+
+    func testPrunedTokenCountCacheDropsContentNoLongerLive() {
+        // A purged transient turn / compacted message leaves the history; its
+        // cached count must not linger, so the cache stays bounded by the live
+        // conversation.
+        let cache = ["kept": 1, "purged transient": 5, "also kept": 3]
+        let live = ["kept", "also kept"]
+
+        let pruned = AgentLoop.prunedTokenCountCache(cache, live: live)
+
+        XCTAssertEqual(pruned, ["kept": 1, "also kept": 3])
+    }
+
     func testMakeTokenCountLookupUsesShortestInputLength() {
         let lookup = AgentLoop.makeTokenCountLookup(
             contents: ["a", "b", "c"],
@@ -302,5 +335,36 @@ final class AgentLoopTokenLookupTests: XCTestCase {
         }
 
         XCTAssertEqual(processed, ["a", "b", "c"])
+    }
+
+    // MARK: - Shape C: tool name emitted as the wrapping key inside `arguments`
+
+    func testWrappedNameToolCallRecoversNameAsKey() {
+        // {"arguments":{"read_file":{"path":…,"start_line":100,"end_line":110}}}
+        let args: [String: Any] = [
+            "read_file": ["path": "IntegrationTests.cs", "start_line": 100, "end_line": 110]
+        ]
+        let recovered = AgentLoop.wrappedNameToolCall(
+            from: args,
+            knownToolNames: ["read_file", "list_dir", "grep"]
+        )
+        XCTAssertEqual(recovered?.name, "read_file")
+        XCTAssertEqual(recovered?.arguments["path"] as? String, "IntegrationTests.cs")
+        XCTAssertEqual(recovered?.arguments["start_line"] as? Int, 100)
+    }
+
+    func testWrappedNameToolCallIgnoresUnknownKey() {
+        // A single key that is NOT a tool name is a real argument, not Shape C.
+        let args: [String: Any] = ["path": "a.swift"]
+        XCTAssertNil(AgentLoop.wrappedNameToolCall(from: args, knownToolNames: ["read_file"]))
+    }
+
+    func testWrappedNameToolCallIgnoresNonObjectValueAndMultipleKeys() {
+        // Tool-name key but a non-object value — ambiguous, leave it.
+        let scalarValue: [String: Any] = ["read_file": "a.swift"]
+        XCTAssertNil(AgentLoop.wrappedNameToolCall(from: scalarValue, knownToolNames: ["read_file"]))
+        // More than one key is a normal flat argument set, not Shape C.
+        let multiKey: [String: Any] = ["read_file": ["path": "a"], "extra": 1]
+        XCTAssertNil(AgentLoop.wrappedNameToolCall(from: multiKey, knownToolNames: ["read_file"]))
     }
 }
