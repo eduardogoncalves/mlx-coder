@@ -15,7 +15,8 @@ func registerAllTools(
     renderer: StreamRenderer,
     frontend: any AgentFrontend,
     mcpConfigs: [MCPClient.ServerConfig] = [],
-    skillsRegistry: SkillsRegistry? = nil
+    skillsRegistry: SkillsRegistry? = nil,
+    toolOutputSpool: ToolOutputSpoolConfig = .enabledDefault
 ) async {
     // Filesystem tools
     await registry.register(ReadFileTool(permissions: permissions))
@@ -38,6 +39,7 @@ func registerAllTools(
     // Agent tools
     await registry.register(TodoTool(workspaceRoot: permissions.workspaceRoot))
     await registry.register(TaskOutputTool(permissions: permissions))
+    await registry.register(ReadToolOutputTool())
     // `parentAgentLoop` is nil here because the top-level AgentLoop doesn't exist
     // yet at this point in the startup sequence — remote role delegation (Phase 3)
     // still works immediately, but local role-model residency swapping (Phase 4)
@@ -52,7 +54,8 @@ func registerAllTools(
         parentRegistry: registry,
         frontend: frontend,
         roleModels: AgentRoleRegistry.current(workspaceRoot: permissions.workspaceRoot).roleModelMap,
-        parentAgentLoop: nil
+        parentAgentLoop: nil,
+        toolOutputSpool: toolOutputSpool
     ))
     if let modelContainer {
         await registry.register(ProjectExpertLoRATool(

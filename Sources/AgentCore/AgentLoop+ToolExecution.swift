@@ -73,7 +73,8 @@ extension AgentLoop {
             parentRegistry: registry,
             frontend: frontend,
             roleModels: AgentRoleRegistry.current(workspaceRoot: permissions.workspaceRoot).roleModelMap,
-            parentAgentLoop: self
+            parentAgentLoop: self,
+            toolOutputSpool: toolOutputSpoolConfig
         ))
         if let modelContainer {
             await registry.register(ProjectExpertLoRATool(modelContainer: modelContainer, workspaceRoot: permissions.workspaceRoot, modelPath: modelPath, frontend: frontend))

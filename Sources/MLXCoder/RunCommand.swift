@@ -210,7 +210,8 @@ struct RunCommand: AsyncParsableCommand {
                 runtimeConfigs: runtimeMCPConfigs,
                 cliConfig: makeMCPServerConfig(from: args)
             ),
-            skillsRegistry: skillsRegistry
+            skillsRegistry: skillsRegistry,
+            toolOutputSpool: runtimeConfig.toolOutputSpool ?? .enabledDefault
         )
 
         let skillMetadata = await skillsRegistry.listMetadata()
@@ -250,7 +251,9 @@ struct RunCommand: AsyncParsableCommand {
             promptSectionTokenEstimates: promptComposition.sectionTokenEstimates,
             memoryLimit: budget.totalBytes,
             cacheLimit: budget.cacheBytes,
-            draftModel: draftModel
+            draftModel: draftModel,
+            contextRetrieval: runtimeConfig.contextRetrieval ?? .disabled,
+            toolOutputSpool: runtimeConfig.toolOutputSpool ?? .enabledDefault
         )
 
         // Re-register model-container-dependent tools now that a live AgentLoop

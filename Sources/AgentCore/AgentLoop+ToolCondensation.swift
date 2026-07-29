@@ -49,6 +49,19 @@ extension AgentLoop {
             charsPerToken: condensationConfig.charsPerTokenEstimate
         )
 
+        // Large-output spool: write the FULL raw output to disk once (bash and
+        // other non-web/non-paging tools), so the model can page the rest via
+        // read_tool_output instead of losing it to inline truncation. Web tools
+        // and the read tools are exempt (they page through their own caches /
+        // line ranges), so this is nil for them. Computed once here and reused by
+        // both the mechanical-fallback branch (returns a window + pointer) and
+        // the LLM-summary branch (appends a pointer suffix).
+        let spoolHandle = spoolLargeToolOutput(
+            toolName: toolName,
+            raw: rawToolResponse,
+            estimatedTokens: beforeTokens
+        )
+
         // web_fetch already does its pre-processing outside the main context: it
         // strips HTML, caches the full page to disk, and returns only a bounded
         // window with a continuation marker ("call web_fetch again with offset N —
@@ -81,12 +94,40 @@ extension AgentLoop {
             // check already ran; otherwise (static-threshold path) compute it
             // once here — at most one extra tokenizer pass per actual
             // condensation event, never per tool call.
-            let budget = liveBudget ?? (await currentBudgetContext())
+            let budget: ToolResultCondensationPolicy.BudgetContext
+            if let liveBudget {
+                budget = liveBudget
+            } else {
+                budget = await currentBudgetContext()
+            }
             let effectiveMaxChars = ToolResultCondensationPolicy.effectiveFallbackRawChars(
                 staticMaxChars: condensationConfig.fallbackRawChars,
                 charsPerToken: condensationConfig.charsPerTokenEstimate,
                 budget: budget
             )
+
+            // Spool-eligible mechanical tools (bash/task): return a bounded
+            // window + a pointer to the full on-disk output instead of a
+            // blind char-tail truncation, so the tail the model doesn't see is
+            // still recoverable via read_tool_output.
+            if let spoolHandle {
+                let windowed = ToolOutputSpoolPolicy.windowMessage(
+                    toolName: toolName,
+                    raw: rawToolResponse,
+                    handle: spoolHandle,
+                    windowLines: toolOutputSpoolConfig.inlineWindowLines,
+                    estimatedTokens: beforeTokens
+                )
+                let afterTokens = ToolResultCondensationPolicy.estimatedTokenCount(
+                    for: windowed,
+                    charsPerToken: condensationConfig.charsPerTokenEstimate
+                )
+                await hooks.emit(.compression(toolName: toolName, beforeTokens: beforeTokens, afterTokens: afterTokens, usedFallback: true))
+                if verbose {
+                    frontend.emitStatus("[debug] Tool output spooled to disk for \(toolName): \(spoolHandle.totalLines) lines at \(spoolHandle.path); inline window ≈\(afterTokens) tokens")
+                }
+                return windowed
+            }
 
             let fallback: String
             if budgetForcedTrim, ToolResultCondensationPolicy.readGuardTools.contains(toolName) {
@@ -155,7 +196,12 @@ extension AgentLoop {
                 return fallback
             }
 
-            let condensed = ToolResultCondensationPolicy.formatCondensedToolMessage(toolName: toolName, summary: summary)
+            var condensed = ToolResultCondensationPolicy.formatCondensedToolMessage(toolName: toolName, summary: summary)
+            // If the full raw output was spooled, tell the model where it is so
+            // it can recover exact detail the summary may have dropped.
+            if let spoolHandle {
+                condensed += ToolOutputSpoolPolicy.pointerSuffix(handle: spoolHandle)
+            }
             let afterTokens = ToolResultCondensationPolicy.estimatedTokenCount(
                 for: condensed,
                 charsPerToken: condensationConfig.charsPerTokenEstimate
@@ -332,5 +378,20 @@ extension AgentLoop {
         }
         let tokens = currentTokenCount(using: tokenCounter)
         return ToolResultCondensationPolicy.BudgetContext(currentTokens: tokens, windowTokens: windowTokens)
+    }
+
+    /// Write a large tool result to the on-disk spool, returning a handle the
+    /// model can page via `read_tool_output`. Returns nil (→ inline truncation
+    /// fallback) when spooling is disabled, the tool is exempt (web/read tools),
+    /// or the output isn't large enough to be worth spooling.
+    func spoolLargeToolOutput(
+        toolName: String,
+        raw: String,
+        estimatedTokens: Int
+    ) -> ToolOutputSpool.Handle? {
+        guard toolOutputSpoolConfig.enabled else { return nil }
+        guard ToolOutputSpoolPolicy.isSpoolEligible(toolName: toolName) else { return nil }
+        guard estimatedTokens >= toolOutputSpoolConfig.minTokensToSpool else { return nil }
+        return ToolOutputSpool.shared.spool(content: raw, toolName: toolName)
     }
 }

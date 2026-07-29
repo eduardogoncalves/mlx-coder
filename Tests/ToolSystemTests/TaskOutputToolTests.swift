@@ -37,6 +37,40 @@ final class TaskOutputToolTests: XCTestCase {
         XCTAssertFalse(result.content.contains("Found one vulnerability."))
     }
 
+    func testReadsSpoolPathPassedAsArchiveDirectly() async throws {
+        let workspace = try makeTempWorkspace()
+        defer { try? FileManager.default.removeItem(at: workspace) }
+
+        // A large-output spool file, exactly as a digest's `tool_output:` line
+        // hands it to the orchestrator. Passing it as `archive` must read it
+        // back verbatim — not mangle it into `<spool>.txt/history.json`.
+        let spooled = "line one\nline two\nvulnerable package X 1.0 High"
+        let handle = try XCTUnwrap(ToolOutputSpool.shared.spool(content: spooled, toolName: "task-terminal"))
+        defer { try? FileManager.default.removeItem(atPath: handle.path) }
+
+        let tool = TaskOutputTool(permissions: PermissionEngine(workspaceRoot: workspace.path))
+        let result = try await tool.execute(arguments: ["archive": handle.path])
+
+        XCTAssertFalse(result.isError)
+        XCTAssertEqual(result.content, spooled)
+    }
+
+    func testMissingSpoolFileReturnsActionableError() async throws {
+        let workspace = try makeTempWorkspace()
+        defer { try? FileManager.default.removeItem(at: workspace) }
+
+        // A path inside the spool root that no longer exists (pruned).
+        let missing = ToolOutputSpool.shared.root
+            .appendingPathComponent("1785338929254-task-terminal-DEADBEEF.txt").path
+
+        let tool = TaskOutputTool(permissions: PermissionEngine(workspaceRoot: workspace.path))
+        let result = try await tool.execute(arguments: ["archive": missing])
+
+        XCTAssertTrue(result.isError)
+        XCTAssertTrue(result.content.contains("No spooled output"))
+        XCTAssertFalse(result.content.contains("history.json"))
+    }
+
     func testIncludeFinalReturnsLastAssistantMessage() async throws {
         let workspace = try makeTempWorkspace()
         defer { try? FileManager.default.removeItem(at: workspace) }

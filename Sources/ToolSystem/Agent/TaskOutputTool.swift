@@ -23,7 +23,7 @@ public struct TaskOutputTool: Tool {
     static let defaultMaxCharacters = 50_000
 
     public let name = "task_output"
-    public let description = "Recover the full, un-truncated output of a prior `task` delegation from its archived run log — no re-run or new sub-agent needed. Pass `archive` from a digest's `archive:` line (e.g. .native-agent/subagent-logs/<id>), or just the bare run id. `include`: 'tool_output' (default — every tool result the sub-agent saw, i.e. what got truncated), 'final' (its last message), or 'all' (full transcript). `max_chars` caps the result (default 50000)."
+    public let description = "Recover the full, un-truncated output of a prior `task` delegation — no re-run or new sub-agent needed. Pass `archive` from a digest's `archive:` line (e.g. .native-agent/subagent-logs/<id>), the bare run id, or the digest's `tool_output:` spool path (which is read back directly). `include`: 'tool_output' (default — every tool result the sub-agent saw, i.e. what got truncated), 'final' (its last message), or 'all' (full transcript); ignored when reading a spool path. `max_chars` caps the result (default 50000)."
     public let parameters = JSONSchema(
         type: "object",
         properties: [
@@ -51,6 +51,24 @@ public struct TaskOutputTool: Tool {
         }
 
         let maxChars = (arguments["max_chars"] as? Int).map { max(0, $0) } ?? Self.defaultMaxCharacters
+
+        // A digest carries two different pointers — `archive:` (the run log) and
+        // `tool_output:` (a large-output spool file under the system temp dir).
+        // Small models routinely pass the spool path here instead of the archive
+        // path; treated as a run dir it becomes `<spool>.txt/history.json`, which
+        // is nonsense and lands outside the read roots. Recognize a spool path
+        // and read the already-flat tool output straight back — that's exactly
+        // what the caller was reaching for anyway. `include` doesn't apply (the
+        // spool holds raw tool output, not a transcript), so it's ignored here.
+        if ToolOutputSpool.shared.isWithinRoot(rawArchive) {
+            guard FileManager.default.fileExists(atPath: rawArchive) else {
+                return .error("No spooled output at \(rawArchive) — it may have been pruned. Re-run the task with response_mode:\"raw\" to regenerate it.")
+            }
+            guard let content = try? String(contentsOfFile: rawArchive, encoding: .utf8) else {
+                return .error("Failed to read spooled tool output at \(rawArchive).")
+            }
+            return Self.capped(content, maxChars: maxChars)
+        }
 
         let historyRelative = Self.resolveHistoryPath(rawArchive)
 

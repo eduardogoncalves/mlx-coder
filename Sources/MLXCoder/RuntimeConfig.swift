@@ -31,6 +31,12 @@ struct RuntimeConfig: Sendable, Codable {
     let defaultDryRun: Bool?
     let defaultPolicyFile: String?
     let defaultAuditLogPath: String?
+    /// Automatic pre-turn context-retrieval (lightweight RAG) settings. Nil when
+    /// the config omits `contextRetrieval`; callers substitute `.disabled`.
+    let contextRetrieval: ContextRetrievalConfig?
+    /// Large-tool-output disk-spool settings. Nil when the config omits
+    /// `toolOutputSpool`; callers substitute the enabled default.
+    let toolOutputSpool: ToolOutputSpoolConfig?
 
     init(
         mcpServers: [MCPServer] = [],
@@ -39,7 +45,9 @@ struct RuntimeConfig: Sendable, Codable {
         defaultSandbox: Bool? = nil,
         defaultDryRun: Bool? = nil,
         defaultPolicyFile: String? = nil,
-        defaultAuditLogPath: String? = nil
+        defaultAuditLogPath: String? = nil,
+        contextRetrieval: ContextRetrievalConfig? = nil,
+        toolOutputSpool: ToolOutputSpoolConfig? = nil
     ) {
         self.mcpServers = mcpServers
         self.mcpSettings = mcpSettings
@@ -48,6 +56,8 @@ struct RuntimeConfig: Sendable, Codable {
         self.defaultDryRun = defaultDryRun
         self.defaultPolicyFile = defaultPolicyFile
         self.defaultAuditLogPath = defaultAuditLogPath
+        self.contextRetrieval = contextRetrieval
+        self.toolOutputSpool = toolOutputSpool
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -58,6 +68,8 @@ struct RuntimeConfig: Sendable, Codable {
         case defaultDryRun
         case defaultPolicyFile
         case defaultAuditLogPath
+        case contextRetrieval
+        case toolOutputSpool
     }
 
     init(from decoder: Decoder) throws {
@@ -69,6 +81,8 @@ struct RuntimeConfig: Sendable, Codable {
         self.defaultDryRun = try container.decodeIfPresent(Bool.self, forKey: .defaultDryRun)
         self.defaultPolicyFile = try container.decodeIfPresent(String.self, forKey: .defaultPolicyFile)
         self.defaultAuditLogPath = try container.decodeIfPresent(String.self, forKey: .defaultAuditLogPath)
+        self.contextRetrieval = try container.decodeIfPresent(ContextRetrievalConfig.self, forKey: .contextRetrieval)
+        self.toolOutputSpool = try container.decodeIfPresent(ToolOutputSpoolConfig.self, forKey: .toolOutputSpool)
     }
 }
 
@@ -121,7 +135,9 @@ enum RuntimeConfigLoader {
             ),
             defaultDryRun: workspaceConfig.defaultDryRun ?? userConfig.defaultDryRun,
             defaultPolicyFile: workspaceConfig.defaultPolicyFile ?? userConfig.defaultPolicyFile,
-            defaultAuditLogPath: workspaceConfig.defaultAuditLogPath ?? userConfig.defaultAuditLogPath
+            defaultAuditLogPath: workspaceConfig.defaultAuditLogPath ?? userConfig.defaultAuditLogPath,
+            contextRetrieval: workspaceConfig.contextRetrieval ?? userConfig.contextRetrieval,
+            toolOutputSpool: workspaceConfig.toolOutputSpool ?? userConfig.toolOutputSpool
         )
     }
 
