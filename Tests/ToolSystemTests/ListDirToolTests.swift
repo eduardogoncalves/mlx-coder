@@ -78,6 +78,68 @@ final class ListDirToolTests: XCTestCase {
         XCTAssertFalse(result.content.contains(".env"))
     }
 
+    func testHidesHarnessInternalArtifactsByDefault() async throws {
+        let workspace = try makeTempWorkspace()
+        defer { try? FileManager.default.removeItem(at: workspace) }
+
+        try "hello".write(to: workspace.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
+        try "[ ] x".write(to: workspace.appendingPathComponent(".mlx-coder-todo"), atomically: true, encoding: .utf8)
+        try "[ ] y".write(to: workspace.appendingPathComponent(".mlx-coder-todo-abc123"), atomically: true, encoding: .utf8)
+        try "TOKEN=1".write(to: workspace.appendingPathComponent(".mlx-coder.env"), atomically: true, encoding: .utf8)
+        try "[ ] z".write(to: workspace.appendingPathComponent(".native-agent-todo.md"), atomically: true, encoding: .utf8)
+        try FileManager.default.createDirectory(at: workspace.appendingPathComponent(".native-agent"), withIntermediateDirectories: true)
+
+        let permissions = PermissionEngine(workspaceRoot: workspace.path)
+        let tool = ListDirTool(permissions: permissions)
+        let result = try await tool.execute(arguments: ["path": "."])
+
+        // Check the emoji-prefixed *entry* forms are absent — the skip-summary
+        // line at the bottom legitimately echoes the hidden names, so a raw
+        // substring check would false-positive on that.
+        XCTAssertFalse(result.isError)
+        XCTAssertTrue(result.content.contains("README.md"))
+        XCTAssertFalse(result.content.contains("📄 .mlx-coder-todo"))
+        XCTAssertFalse(result.content.contains("📄 .mlx-coder.env"))
+        XCTAssertFalse(result.content.contains("📄 .native-agent-todo.md"))
+        XCTAssertFalse(result.content.contains("📁 .native-agent"))
+        XCTAssertTrue(result.content.contains("Skipped build-output / mlx-coder-internal entries"))
+    }
+
+    func testIncludeBuildDirsRevealsHarnessArtifacts() async throws {
+        let workspace = try makeTempWorkspace()
+        defer { try? FileManager.default.removeItem(at: workspace) }
+
+        try "TOKEN=1".write(to: workspace.appendingPathComponent(".mlx-coder.env"), atomically: true, encoding: .utf8)
+
+        let permissions = PermissionEngine(workspaceRoot: workspace.path)
+        let tool = ListDirTool(permissions: permissions)
+        let result = try await tool.execute(arguments: ["path": ".", "include_build_dirs": true])
+
+        XCTAssertFalse(result.isError)
+        XCTAssertTrue(result.content.contains(".mlx-coder.env"))
+    }
+
+    func testListingHarnessDirectlyIsSkipped() async throws {
+        let workspace = try makeTempWorkspace()
+        defer { try? FileManager.default.removeItem(at: workspace) }
+
+        let logs = workspace.appendingPathComponent(".native-agent/subagent-logs")
+        try FileManager.default.createDirectory(at: logs, withIntermediateDirectories: true)
+        try "{}".write(to: logs.appendingPathComponent("history.json"), atomically: true, encoding: .utf8)
+
+        let permissions = PermissionEngine(workspaceRoot: workspace.path)
+        let tool = ListDirTool(permissions: permissions)
+
+        let skipped = try await tool.execute(arguments: ["path": ".native-agent", "recursive": true])
+        XCTAssertFalse(skipped.isError)
+        XCTAssertFalse(skipped.content.contains("history.json"))
+        XCTAssertTrue(skipped.content.contains("internal workspace state"))
+
+        // Escape hatch still works.
+        let revealed = try await tool.execute(arguments: ["path": ".native-agent", "recursive": true, "include_build_dirs": true])
+        XCTAssertTrue(revealed.content.contains("history.json"))
+    }
+
     private func makeTempWorkspace() throws -> URL {
         let root = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
             .appendingPathComponent("mlx-coder-list-dir-tests-\(UUID().uuidString)", isDirectory: true)

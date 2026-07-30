@@ -17,7 +17,9 @@ public enum BuildOutputFilter {
     /// so `src/bin` and `./bin` are both filtered.
     public static let ignoredNames: Set<String> = [
         // .NET
-        "bin", "obj",
+        "bin", "obj", ".dotnet", ".nuget",
+        // Per-user tool/data caches (dotnet, NuGet migrations, etc.)
+        ".local",
         // Node.js / JavaScript / TypeScript
         "node_modules", ".npm",
         // Python
@@ -43,15 +45,40 @@ public enum BuildOutputFilter {
         ".native-agent",
     ]
 
-    /// Returns `true` when *any* component of `path` matches an ignored name.
-    public static func isBuildOutput(path: String) -> Bool {
-        let components = (path as NSString).pathComponents
-        return components.contains { ignoredNames.contains($0) }
+    /// mlx-coder's own workspace bookkeeping written alongside the project: the
+    /// sub-agent log dir (`.native-agent`), the todo lists (`.mlx-coder-todo`,
+    /// `.mlx-coder-todo-<session>`, legacy `.native-agent-todo.md`), and the
+    /// project env file (`.mlx-coder.env`, which may hold secrets). This is
+    /// harness state, not project content — hidden from listings/search/reads by
+    /// default and revealed with `include_build_dirs: true`, exactly like build
+    /// output. Names not covered by the dir-name-only `ignoredNames` above are
+    /// matched here so `list_dir`/`read_file`/`grep`/`glob` all skip them, files
+    /// included.
+    public static let harnessArtifactNames: Set<String> = [
+        ".native-agent",
+        ".native-agent-todo.md",
+        ".mlx-coder-todo",
+        ".mlx-coder.env",
+    ]
+
+    /// Prefix-matched harness artifacts (session-namespaced todo files such as
+    /// `.mlx-coder-todo-abc123`), which have no fixed full name to list above.
+    public static let harnessArtifactPrefixes: [String] = [".mlx-coder-todo-"]
+
+    /// True when `name` is one of mlx-coder's own workspace artifacts.
+    public static func isHarnessArtifact(name: String) -> Bool {
+        harnessArtifactNames.contains(name)
+            || harnessArtifactPrefixes.contains { name.hasPrefix($0) }
     }
 
-    /// Returns the first matching ignored component in `path`, or `nil` if none.
+    /// Returns `true` when *any* component of `path` matches an ignored name.
+    public static func isBuildOutput(path: String) -> Bool {
+        matchedComponent(in: path) != nil
+    }
+
+    /// Returns the first ignored/harness-internal component in `path`, or `nil`.
     public static func matchedComponent(in path: String) -> String? {
         let components = (path as NSString).pathComponents
-        return components.first { ignoredNames.contains($0) }
+        return components.first { ignoredNames.contains($0) || isHarnessArtifact(name: $0) }
     }
 }

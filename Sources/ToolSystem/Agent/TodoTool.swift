@@ -86,7 +86,11 @@ public struct TodoTool: Tool {
         case "read":
             return readTodos()
         case "add":
-            guard let item = arguments["item_text"] as? String else {
+            // Canonical arg is `item_text`, but small models commonly reach for
+            // `text` or put the todo string straight into `item` (the field they
+            // otherwise use for the numeric index). Accept those aliases so a
+            // well-formed add isn't rejected over a field-name mismatch.
+            guard let item = addItemText(from: arguments) else {
                 return .error("Missing required argument: item_text (for 'add')")
             }
             return addTodo(item)
@@ -201,6 +205,23 @@ public struct TodoTool: Tool {
     private func successMessage(_ message: String, persisted: Bool) -> String {
         guard !persisted else { return message }
         return "\(message) (warning: failed to persist todo file changes)"
+    }
+
+    /// Resolves the todo text for an `add`, tolerating the common field-name
+    /// aliases small models emit. `item` is accepted only when it carries a
+    /// non-numeric string (its numeric form is the index for other actions).
+    private func addItemText(from arguments: [String: Any]) -> String? {
+        for key in ["item_text", "text"] {
+            if let value = arguments[key] as? String,
+               !value.trimmingCharacters(in: .whitespaces).isEmpty {
+                return value
+            }
+        }
+        if let value = arguments["item"] as? String,
+           !value.trimmingCharacters(in: .whitespaces).isEmpty {
+            return value
+        }
+        return nil
     }
 
     private func integerTodoIndex(from rawValue: Any?) -> Int? {

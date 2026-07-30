@@ -98,15 +98,24 @@ final class TodoToolTests: XCTestCase {
         XCTAssertEqual(content, "[ ] first")
     }
 
-    func testAddRejectsLegacyStringItemField() async throws {
+    func testAddAcceptsStringItemAlias() async throws {
+        // Small models commonly put the todo text straight into `item` (the field
+        // otherwise used for the numeric index) or into `text`. Both are accepted
+        // as aliases for `item_text` so a well-formed add isn't rejected over a
+        // field-name mismatch.
         let workspace = try makeWorkspace()
         defer { try? FileManager.default.removeItem(at: workspace) }
 
         let tool = TodoTool(workspaceRoot: workspace.path)
-        let result = try await tool.execute(arguments: ["action": "add", "item": "first"])
+        let viaItem = try await tool.execute(arguments: ["action": "add", "item": "first"])
+        XCTAssertFalse(viaItem.isError)
 
-        XCTAssertTrue(result.isError)
-        XCTAssertTrue(result.content.contains("item_text"))
+        let viaText = try await tool.execute(arguments: ["action": "add", "text": "second"])
+        XCTAssertFalse(viaText.isError)
+
+        let todoFile = workspace.appendingPathComponent(".mlx-coder-todo")
+        let content = try String(contentsOf: todoFile, encoding: .utf8)
+        XCTAssertEqual(content, "[ ] first\n[ ] second")
     }
 
     func testReadNormalizesLegacyUncheckedCheckboxFormat() async throws {

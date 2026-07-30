@@ -62,6 +62,38 @@ enum WorkspacePathRewrite {
     }
 }
 
+/// Strips a redundant leading path segment that duplicates the workspace
+/// root's own directory name — but ONLY when doing so actually resolves to an
+/// existing file while the original path does not.
+///
+/// This fixes isolated sub-agents whose root is e.g. `<repo>/ChatStreamingAPI`
+/// but which keep using the parent orchestrator's `ChatStreamingAPI/Program.cs`
+/// convention, which resolves to the non-existent
+/// `<repo>/ChatStreamingAPI/ChatStreamingAPI/Program.cs` and produces a stream
+/// of "File not found" errors. The rewrite is evidence-gated: it only fires
+/// when the stripped path exists on disk and the original does not, so it can
+/// never clobber a genuine same-named subdirectory.
+enum RedundantRootPrefixRewrite {
+    static func rewriteIfResolvable(_ path: String, workspaceRoot: String) -> (newPath: String, message: String)? {
+        guard !path.isEmpty, !(path as NSString).isAbsolutePath, !workspaceRoot.isEmpty else { return nil }
+        let rootBase = (workspaceRoot as NSString).lastPathComponent
+        guard !rootBase.isEmpty else { return nil }
+
+        let components = path.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
+        guard components.count > 1, components.first == rootBase else { return nil }
+
+        let stripped = components.dropFirst().joined(separator: "/")
+        guard !stripped.isEmpty else { return nil }
+
+        let fm = FileManager.default
+        let originalResolved = (workspaceRoot as NSString).appendingPathComponent(path)
+        let strippedResolved = (workspaceRoot as NSString).appendingPathComponent(stripped)
+        guard !fm.fileExists(atPath: originalResolved), fm.fileExists(atPath: strippedResolved) else { return nil }
+
+        return (stripped, "Rewrote '\(path)' to '\(stripped)' (stripped redundant workspace-root prefix; original path did not exist)")
+    }
+}
+
 /// Service that detects and fixes common tool call parameter errors.
 ///
 /// This service applies deterministic, safe corrections to fix formatting/syntactic issues
@@ -228,7 +260,14 @@ public struct ParameterCorrectionService: Sendable {
             if !strippedPath.isEmpty {
                 corrections.append("Stripped leading './' from path: '\(path)' -> '\(strippedPath)'")
                 corrected["path"] = strippedPath
+                path = strippedPath
             }
+        }
+
+        if let rewrite = RedundantRootPrefixRewrite.rewriteIfResolvable(path, workspaceRoot: workspaceRoot) {
+            corrections.append(rewrite.message)
+            corrected["path"] = rewrite.newPath
+            path = rewrite.newPath
         }
 
         // Ensure old_text and new_text are present
@@ -290,7 +329,8 @@ public struct ParameterCorrectionService: Sendable {
                     )
                 }
 
-                corrections.append("Auto-corrected old_text: '\(oldText.prefix(50))...' -> '\(bestMatch.prefix(50))...' (fuzzy match in file)")
+                let searchLineCount = oldText.components(separatedBy: .newlines).count
+                corrections.append("Auto-corrected old_text to nearest unique match in file (\(searchLineCount)-line search): [\(auditPreview(bestMatch))]")
                 corrected["old_text"] = bestMatch
                 corrected["new_text"] = newText
             }
@@ -303,8 +343,28 @@ public struct ParameterCorrectionService: Sendable {
         )
     }
 
-    /// Find the best matching substring in the file content for the given search text.
-    /// Uses line-by-line similarity to handle whitespace differences and minor edits.
+    /// Minimum average line similarity for a window to be considered a match.
+    private static let matchThreshold = 0.7
+    /// A runner-up within this score of the best candidate makes the match
+    /// ambiguous — two different file locations fit about equally well, so we
+    /// cannot know which one the model meant and must refuse rather than guess.
+    private static let ambiguityMargin = 0.05
+
+    /// Find the best matching substring in the file content for the given search
+    /// text, or nil when there is no confident, unambiguous match.
+    ///
+    /// Safety rules — added after a fuzzy "correction" silently corrupted a
+    /// `.csproj` (it collapsed a 3-line `<ItemGroup>` block onto the single bare
+    /// `<ItemGroup>` line and then let the multi-line replacement land there,
+    /// duplicating structure and orphaning tags):
+    ///  - A multi-line `searchText` may ONLY match a window with the same line
+    ///    count. It is never repaired into a single file line — that is exactly
+    ///    what changed the shape of the file and mangled it.
+    ///  - When two *different* locations match about equally well the choice is
+    ///    ambiguous; we return nil so `edit_file` fails cleanly with
+    ///    "old_text not found" (prompting an exact retry) instead of editing the
+    ///    wrong region.
+    /// Uses line-by-line similarity to tolerate whitespace/indentation drift.
     private static func findBestMatch(for searchText: String, in fileContent: String) -> String? {
         let searchLines = searchText.components(separatedBy: .newlines)
             .map { $0.trimmingCharacters(in: .whitespaces) }
@@ -313,49 +373,65 @@ public struct ParameterCorrectionService: Sendable {
         guard !searchLines.isEmpty else { return nil }
 
         let fileLines = fileContent.components(separatedBy: .newlines)
-        var bestMatch: (score: Double, text: String)?
+        let windowSize = searchLines.count
+        var scored: [(score: Double, text: String)] = []
 
-        // Sliding window: try to match search lines against consecutive file lines
-        if fileLines.count >= searchLines.count {
-            for startIdx in 0...(fileLines.count - searchLines.count) {
-                let endIdx = min(startIdx + searchLines.count, fileLines.count)
-                let candidateLines = Array(fileLines[startIdx..<endIdx])
+        // Sliding window: match the search lines against a same-line-count run
+        // of consecutive file lines.
+        if fileLines.count >= windowSize {
+            for startIdx in 0...(fileLines.count - windowSize) {
+                let candidateLines = Array(fileLines[startIdx..<(startIdx + windowSize)])
 
                 var matchScore: Double = 0
                 for (i, searchLine) in searchLines.enumerated() {
-                    if i < candidateLines.count {
-                        let fileLine = candidateLines[i].trimmingCharacters(in: .whitespaces)
-                        let similarity = lineSimilarity(searchLine, fileLine)
-                        matchScore += similarity
-                    }
+                    let fileLine = candidateLines[i].trimmingCharacters(in: .whitespaces)
+                    matchScore += lineSimilarity(searchLine, fileLine)
                 }
-                let avgScore = matchScore / Double(searchLines.count)
+                let avgScore = matchScore / Double(windowSize)
 
-                if avgScore > 0.7 {
-                    let candidateText = candidateLines.joined(separator: "\n")
-                    if bestMatch == nil || avgScore > bestMatch!.score {
-                        bestMatch = (avgScore, candidateText)
-                    }
+                if avgScore > matchThreshold {
+                    scored.append((avgScore, candidateLines.joined(separator: "\n")))
                 }
             }
         }
 
-        // If no multi-line match found, try single-line matching
-        if bestMatch == nil {
-            for searchLine in searchLines {
-                for fileLine in fileLines {
-                    let trimmedFileLine = fileLine.trimmingCharacters(in: .whitespaces)
-                    let similarity = lineSimilarity(searchLine, trimmedFileLine)
-                    if similarity > 0.7 {
-                        if bestMatch == nil || similarity > bestMatch!.score {
-                            bestMatch = (similarity, fileLine)
-                        }
-                    }
+        // Single-line fallback ONLY when the search text is itself a single
+        // line. A multi-line old_text must never collapse onto one file line.
+        if scored.isEmpty && windowSize == 1 {
+            let searchLine = searchLines[0]
+            for fileLine in fileLines {
+                let similarity = lineSimilarity(searchLine, fileLine.trimmingCharacters(in: .whitespaces))
+                if similarity > matchThreshold {
+                    scored.append((similarity, fileLine))
                 }
             }
         }
 
-        return bestMatch?.text
+        return bestUnambiguousMatch(from: scored)
+    }
+
+    /// Picks the highest-scoring candidate, but only if no *other* distinct
+    /// candidate scores within `ambiguityMargin` of it. Identical-text
+    /// candidates (the same block appearing more than once) are not treated as
+    /// ambiguous here — `FileMutationSupport.editContent`'s own uniqueness check
+    /// rejects a non-unique `old_text` downstream with a clear message.
+    private static func bestUnambiguousMatch(from scored: [(score: Double, text: String)]) -> String? {
+        guard let best = scored.max(by: { $0.score < $1.score }) else { return nil }
+        let ambiguousRivals = scored.contains {
+            $0.text != best.text && $0.score >= best.score - ambiguityMargin
+        }
+        return ambiguousRivals ? nil : best.text
+    }
+
+    /// Compact, non-misleading preview of a (possibly multi-line) correction
+    /// target for the audit log. The previous `.prefix(50)` rendering hid the
+    /// fact that a multi-line block was being substituted, so a destructive
+    /// rewrite could not be audited from its log line.
+    private static func auditPreview(_ text: String, maxChars: Int = 80) -> String {
+        let lines = text.components(separatedBy: .newlines)
+        let firstLine = lines.first ?? text
+        let clipped = firstLine.count > maxChars ? String(firstLine.prefix(maxChars)) + "…" : firstLine
+        return lines.count > 1 ? "\(clipped) …(+\(lines.count - 1) more line(s))" : clipped
     }
 
     /// Calculate similarity between two strings (0.0 to 1.0).
@@ -420,7 +496,13 @@ public struct ParameterCorrectionService: Sendable {
                 if !strippedPath.isEmpty {
                     corrections.append("Stripped leading './' from path: '\(path)' -> '\(strippedPath)'")
                     corrected["path"] = strippedPath
+                    path = strippedPath
                 }
+            }
+
+            if let rewrite = RedundantRootPrefixRewrite.rewriteIfResolvable(path, workspaceRoot: workspaceRoot) {
+                corrections.append(rewrite.message)
+                corrected["path"] = rewrite.newPath
             }
         }
 
@@ -504,7 +586,13 @@ public struct ParameterCorrectionService: Sendable {
                 if !strippedPath.isEmpty {
                     corrections.append("Stripped leading './' from path: '\(path)' -> '\(strippedPath)'")
                     corrected["path"] = strippedPath
+                    path = strippedPath
                 }
+            }
+
+            if let rewrite = RedundantRootPrefixRewrite.rewriteIfResolvable(path, workspaceRoot: workspaceRoot) {
+                corrections.append(rewrite.message)
+                corrected["path"] = rewrite.newPath
             }
         }
 
@@ -550,7 +638,13 @@ public struct ParameterCorrectionService: Sendable {
                 if !strippedPath.isEmpty {
                     corrections.append("Stripped leading './' from path: '\(path)' -> '\(strippedPath)'")
                     corrected["path"] = strippedPath
+                    path = strippedPath
                 }
+            }
+
+            if let rewrite = RedundantRootPrefixRewrite.rewriteIfResolvable(path, workspaceRoot: workspaceRoot) {
+                corrections.append(rewrite.message)
+                corrected["path"] = rewrite.newPath
             }
         }
 

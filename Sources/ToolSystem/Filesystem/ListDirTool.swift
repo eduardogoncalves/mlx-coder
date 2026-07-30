@@ -50,6 +50,15 @@ public struct ListDirTool: Tool {
             return .error("Not a directory: \(path)")
         }
 
+        // Listing mlx-coder's own bookkeeping directly (e.g. `list_dir .native-agent`)
+        // returns only internal state — sub-agent logs, todo/env files — not
+        // project content. Skip it by default; the same escape hatch as build
+        // output reveals it when genuinely needed.
+        if !includeBuildDirs,
+           let harness = (path as NSString).pathComponents.first(where: { BuildOutputFilter.isHarnessArtifact(name: $0) }) {
+            return .success("\(harness) is mlx-coder's internal workspace state (sub-agent logs, todo/env files), not project content — skipped. Pass include_build_dirs: true to inspect it anyway.")
+        }
+
         var entries: [String] = []
         var skippedBuildDirs: [String] = []
         let basePath = resolvedPath
@@ -89,12 +98,16 @@ public struct ListDirTool: Tool {
                     var isDir: ObjCBool = false
                     FileManager.default.fileExists(atPath: validatedPath, isDirectory: &isDir)
 
+                    // Skip build-output/dependency-cache directories AND mlx-coder's
+                    // own workspace artifacts (todo/env files, sub-agent logs) —
+                    // files included, since harness bookkeeping is not project
+                    // content. `matchedComponent` covers both name sets.
+                    if !includeBuildDirs, BuildOutputFilter.matchedComponent(in: item) != nil {
+                        skippedBuildDirs.append(isDir.boolValue ? relativePath + "/" : relativePath)
+                        continue
+                    }
+
                     if isDir.boolValue {
-                        // Optionally skip build-output / dependency-cache directories
-                        if !includeBuildDirs && BuildOutputFilter.ignoredNames.contains(item) {
-                            skippedBuildDirs.append(relativePath)
-                            continue
-                        }
                         entries.append("📁 \(relativePath)/")
                         if recursive {
                             listContents(at: validatedPath, depth: depth + 1)
@@ -120,7 +133,7 @@ public struct ListDirTool: Tool {
         var lines = entries
         if !skippedBuildDirs.isEmpty {
             let names = skippedBuildDirs.joined(separator: ", ")
-            lines.append("[Build output dirs skipped: \(names) — use include_build_dirs: true to inspect]")
+            lines.append("[Skipped build-output / mlx-coder-internal entries: \(names) — use include_build_dirs: true to inspect]")
         }
 
         let omitted = entries.count >= maxEntries ? "\n[... entries omitted, limit \(maxEntries) ...]" : ""

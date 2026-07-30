@@ -133,9 +133,10 @@ enum FileMutationSupport {
     static func writeGuardBlock(path: String, resolvedPath: String) -> ToolResult? {
         guard FileManager.default.fileExists(atPath: resolvedPath) else { return nil }
         return .error("""
-            \(path) already exists. write_file only creates new files — it will not blanket-overwrite an existing one, because replacing the whole file destroys any unrelated content a small model didn't intend to touch. To change it instead:
-            - Read \(path), then call edit_file with path: "\(path)", old_text: <the exact snippet to replace>, new_text: <its replacement> for a targeted change.
+            \(path) already exists. write_file will not overwrite it by default, because replacing the whole file destroys any unrelated content a small model didn't intend to touch. Choose one:
+            - Read \(path), then call edit_file with path: "\(path)", old_text: <the exact snippet to replace>, new_text: <its replacement> for a targeted change (preferred).
             - Or call append_file with path: "\(path)", content: <text to add> to add content at the end without touching the rest.
+            - Or, if you truly intend to replace the entire file, call write_file again with the same path, content, and overwrite: true.
             """)
     }
 
