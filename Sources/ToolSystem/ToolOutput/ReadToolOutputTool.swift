@@ -43,6 +43,14 @@ public struct ReadToolOutputTool: Tool {
         }
 
         guard spool.isWithinRoot(path) else {
+            // A very common miss: the model appends `/tool_output` (the digest's
+            // spool-pointer LABEL) onto the digest's `archive:` run dir and passes
+            // that here. No such file exists — the right recovery is task_output
+            // with the run id, so route it there instead of the generic read_file
+            // hint (which can't help — there is no workspace file to read).
+            if let redirect = Self.subagentArchiveRedirect(for: path) {
+                return .error(redirect)
+            }
             return .error("'\(path)' is not a spooled tool-output file. read_tool_output only reads files under the tool-output spool directory. Use read_file for workspace files.")
         }
 
@@ -66,5 +74,17 @@ public struct ReadToolOutputTool: Tool {
             return ToolResult(content: result.content, truncationMarker: marker)
         }
         return .success(result.content)
+    }
+
+    /// If `path` looks like a sub-agent archive path (a `.native-agent/subagent-logs/<id>`
+    /// run dir, optionally with a conflated `/tool_output` suffix) rather than a
+    /// spool file, return a corrective message pointing at `task_output` with the
+    /// extracted run id. Returns nil for any other outside-the-root path.
+    static func subagentArchiveRedirect(for path: String) -> String? {
+        let marker = ".native-agent/subagent-logs/"
+        guard let range = path.range(of: marker) else { return nil }
+        let runID = path[range.upperBound...].split(separator: "/").first.map(String.init) ?? ""
+        guard !runID.isEmpty else { return nil }
+        return "'\(path)' is a sub-agent archive path, not a spool file — read_tool_output only reads the system-temp spool. To recover this sub-agent's tool output, call task_output with archive: \"\(runID)\" (the digest's `archive:` line). Only a path from the digest's `tool_output:` line is valid for read_tool_output."
     }
 }

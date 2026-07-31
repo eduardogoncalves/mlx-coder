@@ -115,10 +115,19 @@ public struct TaskOutputTool: Tool {
         if archive.hasSuffix(".json") {
             return archive
         }
-        if archive.contains("/") {
-            return "\(archive)/history.json"
+        // Models sometimes append the digest's `tool_output:` label onto the
+        // `archive:` run dir (e.g. ".../subagent-logs/<id>/tool_output"). That
+        // isn't a real file — strip it back to the run dir so the archive still
+        // resolves instead of forming a nonsense ".../tool_output/history.json".
+        var normalized = archive
+        for suffix in ["/tool_output", "/tool_output.txt"] where normalized.hasSuffix(suffix) {
+            normalized.removeLast(suffix.count)
+            break
         }
-        return ".native-agent/subagent-logs/\(archive)/history.json"
+        if normalized.contains("/") {
+            return "\(normalized)/history.json"
+        }
+        return ".native-agent/subagent-logs/\(normalized)/history.json"
     }
 
     static func extractToolOutput(from messages: [Message]) -> String {

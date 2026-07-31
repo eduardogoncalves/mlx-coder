@@ -133,6 +133,41 @@ final class TaskOutputToolTests: XCTestCase {
         XCTAssertTrue(viaBareID.content.contains("bare-id tool output"))
     }
 
+    func testReadToolOutputRedirectsSubagentArchivePathToTaskOutput() async throws {
+        // A subagent-logs archive path passed to read_tool_output (not a spool
+        // file) should be rejected WITH a corrective pointer to task_output +
+        // the run id — not the generic "use read_file" hint.
+        let tool = ReadToolOutputTool()
+        let result = try await tool.execute(arguments: [
+            "path": "/ws/.native-agent/subagent-logs/20260731-145155-executor-f94e77a8/tool_output",
+        ])
+        XCTAssertTrue(result.isError)
+        XCTAssertTrue(result.content.contains("task_output"))
+        XCTAssertTrue(result.content.contains("20260731-145155-executor-f94e77a8"))
+        XCTAssertFalse(result.content.contains("Use read_file"))
+    }
+
+    func testConflatedToolOutputSuffixStillResolvesArchive() async throws {
+        // A model commonly appends the digest's `tool_output:` label onto the
+        // `archive:` run dir. task_output should strip it back to the run dir
+        // rather than form a nonsense ".../tool_output/history.json".
+        let workspace = try makeTempWorkspace()
+        defer { try? FileManager.default.removeItem(at: workspace) }
+
+        try makeArchive(in: workspace, runID: "run7", messages: [
+            Message(role: .tool, content: "conflated-path tool output", toolCallId: "bash"),
+        ])
+
+        let tool = TaskOutputTool(permissions: PermissionEngine(workspaceRoot: workspace.path))
+
+        let viaConflated = try await tool.execute(arguments: ["archive": ".native-agent/subagent-logs/run7/tool_output"])
+        let viaBareID = try await tool.execute(arguments: ["archive": "run7"])
+
+        XCTAssertFalse(viaConflated.isError)
+        XCTAssertEqual(viaConflated.content, viaBareID.content)
+        XCTAssertTrue(viaConflated.content.contains("conflated-path tool output"))
+    }
+
     func testMissingArchiveReturnsError() async throws {
         let workspace = try makeTempWorkspace()
         defer { try? FileManager.default.removeItem(at: workspace) }
