@@ -130,6 +130,31 @@ public struct StatusMessage: Sendable {
         self.text = text
         self.severity = severity
     }
+
+    /// Leading sentinel (a bare ESC) shared by every *control* status — a
+    /// `.status` whose text is a machine-readable instruction to the display
+    /// layer, never user-facing prose. A frontend that doesn't recognize a
+    /// given control prefix must silently drop it rather than print it.
+    public static let controlChannelSentinel = "\u{001B}"
+
+    /// Prefix marking a `.status` line as a *tool progress phase* (e.g.
+    /// web_fetch's "fetching" / "extracting" steps) rather than a transcript
+    /// line. Frontends that render their own footer spinner
+    /// (`AgentFrontend.rendersOwnToolSpinner`) intercept these to update the
+    /// spinner label in place instead of printing them into the scroll area.
+    /// The remaining text after the prefix is the human-readable phase.
+    public static let toolProgressPrefix = "\u{001B}toolphase\u{001B} "
+
+    /// Prefix marking a `.status` line as a *steering-queue depth* update. The
+    /// remaining text is the new pending count as a decimal integer. Emitted
+    /// whenever AgentCore drains queued steering messages mid-run so a
+    /// frontend showing a "[N queued]" badge can update it the moment the
+    /// messages are consumed, rather than only when the whole turn ends.
+    public static let steeringQueuePrefix = "\u{001B}steerqueue\u{001B} "
+
+    /// Whether `text` is a control status (see `controlChannelSentinel`) that
+    /// non-handling frontends must drop instead of rendering.
+    public var isControlChannel: Bool { text.hasPrefix(StatusMessage.controlChannelSentinel) }
 }
 
 public struct StatsSnapshot: Sendable {

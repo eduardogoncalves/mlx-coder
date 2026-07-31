@@ -21,11 +21,27 @@ public protocol AgentFrontend: AnyObject, Sendable {
     /// cancellation; cancellation should resolve to a "cancelled" response
     /// (`.deny(suggestion: nil)`, `.optionSelect(nil)`, `.textInput(nil)`).
     func request(_ request: AgentRequest) async -> AgentResponse
+
+    /// Whether this frontend already renders its own managed tool-execution
+    /// spinner (in a fixed footer region, above the input) in response to
+    /// `.toolCallStarted`/`.toolCallResult`. When `true`, AgentCore must NOT
+    /// spin up its own raw stdout `Spinner` for slow tools (web_search /
+    /// web_fetch): doing so would draw a second animation at the current
+    /// cursor position — i.e. inside the input area — fighting the frontend's
+    /// own footer spinner. Frontends that own their spinner surface tool
+    /// progress phases through `.status` lines prefixed with
+    /// `StatusMessage.toolProgressPrefix` instead. Defaults to `false` (raw
+    /// terminal frontends that expect AgentCore to drive the spinner).
+    var rendersOwnToolSpinner: Bool { get }
 }
 
 // MARK: - Convenience helpers
 
 public extension AgentFrontend {
+
+    /// Default: AgentCore drives the tool spinner (raw terminal frontends).
+    /// The TUI overrides this to `true`.
+    var rendersOwnToolSpinner: Bool { false }
 
     func emitText(_ chunk: String) {
         emit(.assistantTextChunk(chunk))

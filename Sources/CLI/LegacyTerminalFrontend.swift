@@ -152,6 +152,11 @@ public final class LegacyTerminalFrontend: AgentFrontend, @unchecked Sendable {
             // corrupts the layout with cascading indentation. SwiftCoderTUIFrontend
             // already drops these; mirror that here.
             if status.severity == .debug { return }
+            // Control statuses (tool-progress phases, steering-queue depth, …)
+            // are instructions for frontends that render their own managed
+            // footer. This raw terminal frontend has no such surface, so drop
+            // them instead of printing the escape-prefixed payload.
+            if status.isControlChannel { return }
             // Same spinner/direct-print race as .toolCallStarted — status
             // lines (including "Turn complete."/"Sub-task complete.", the
             // most common one) can arrive while the spinner is still ticking.

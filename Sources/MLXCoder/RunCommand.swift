@@ -69,7 +69,7 @@ struct RunCommand: AsyncParsableCommand {
         let budget = MemoryGuard.budgetFor(chip: chipInfo)
         MemoryGuard.configure(budget: budget)
 
-        let selectedModel = args.model
+        let selectedModel = args.resolvedModelPath(workspaceRoot: args.workspace)
         let selectedBackend = InferenceBackend(modelPath: selectedModel)
         if let providerID = selectedBackend.providerID, !RemoteProviderRegistry.isConfigured(providerID) {
             renderer.printError("Online model selected but provider '\(providerID)' is not configured. Add it to ~/.mlx-coder/config.json.")

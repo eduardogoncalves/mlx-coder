@@ -1037,6 +1037,10 @@ public actor AgentLoop {
             }
             await hooks.emit(.steeringInjected(message: item.message))
         }
+        // The queue is now empty; tell any frontend showing a "[N queued]"
+        // badge to clear it. Without this the badge lingers until the whole
+        // turn ends, even though the messages were already injected here.
+        frontend.emitStatus("\(StatusMessage.steeringQueuePrefix)\(steeringQueue.count)")
         return true
     }
 
@@ -1799,7 +1803,19 @@ public actor AgentLoop {
                 } else if isDestructive && dryRun {
                     result = .success("Dry-run mode: skipped execution of destructive tool '\(call.name)'. Arguments: \(correctionResult.correctedArguments)")
                 } else if let tool = resolvedTool {
-                    let showToolSpinner = (call.name == "web_search" || call.name == "web_fetch")
+                    // Slow web tools want a live "still working" animation.
+                    // A frontend that renders its own managed spinner (the TUI,
+                    // in a fixed footer above the input) already shows one for
+                    // every tool via `.toolCallStarted`; starting our own raw
+                    // stdout `Spinner` on top of it would draw a second
+                    // animation at the current cursor position — inside the
+                    // input area. Only drive the raw spinner for frontends that
+                    // don't own theirs (legacy terminal); otherwise route phase
+                    // progress through prefixed `.status` lines the frontend
+                    // folds into its footer label.
+                    let isSlowWebTool = (call.name == "web_search" || call.name == "web_fetch")
+                    let showToolSpinner = isSlowWebTool && !frontend.rendersOwnToolSpinner
+                    let emitToolPhaseToFooter = isSlowWebTool && frontend.rendersOwnToolSpinner
                     let toolSpinner = Spinner(message: "Executing \(call.name)...")
                     if showToolSpinner {
                         toolSpinner.start()
@@ -1841,11 +1857,18 @@ public actor AgentLoop {
                     let applyWatchdog = call.name != "task"
                     let toolStart = Date()
                     ToolWatchdogConfig.log("dispatching tool \(watchdogToolName)\(applyWatchdog ? " (watchdog \(Int(watchdogSeconds))s)" : " (no watchdog)")")
+                    // Capture the frontend as a Sendable local so the @Sendable
+                    // invoke closure can route phase updates without touching
+                    // actor-isolated `self.frontend`. nil unless the frontend
+                    // owns its spinner and this is a slow web tool.
+                    let phaseFrontend: (any AgentFrontend)? = emitToolPhaseToFooter ? frontend : nil
                     let invoke: @Sendable () async throws -> ToolResult = {
                         if let progressTool = tool as? ProgressReportingTool {
                             return try await progressTool.execute(arguments: isolatedExecutionArguments) { phase in
                                 if showToolSpinner {
                                     toolSpinner.updateMessage("\(watchdogToolName): \(phase)")
+                                } else if let phaseFrontend {
+                                    phaseFrontend.emitStatus("\(StatusMessage.toolProgressPrefix)\(watchdogToolName): \(phase)")
                                 }
                             }
                         } else {

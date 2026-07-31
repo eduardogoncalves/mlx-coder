@@ -173,6 +173,24 @@ struct ModelArguments: ParsableArguments, Sendable {
         isLongOptionExplicitlyProvided("--draft-model")
     }
 
+    /// The top-level ("orchestrator") model to load. When `--model` is passed
+    /// explicitly it always wins; otherwise a `defaultModel` from
+    /// `~/.mlx-coder/config.json` (or a workspace override) is used, falling back
+    /// to the built-in `defaultModelPath` when neither is set.
+    func resolvedModelPath(workspaceRoot: String) -> String {
+        if isLongOptionExplicitlyProvided("--model") {
+            return model
+        }
+        let configured = RuntimeConfigLoader
+            .loadMerged(workspaceRoot: workspaceRoot)
+            .defaultModel?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if let configured, !configured.isEmpty {
+            return configured
+        }
+        return model
+    }
+
     private func isLongOptionExplicitlyProvided(_ optionName: String) -> Bool {
         let optionPrefix = "\(optionName)="
         return ProcessInfo.processInfo.arguments.contains { argument in

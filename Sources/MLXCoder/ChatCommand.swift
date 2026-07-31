@@ -28,7 +28,7 @@ struct ChatCommand: AsyncParsableCommand {
         interactiveInput.voiceLocale = args.resolvedVoiceLocale
         let frontend = LegacyTerminalFrontend(renderer: renderer, interactiveInput: interactiveInput)
 
-        var selectedModel = args.model
+        var selectedModel = args.resolvedModelPath(workspaceRoot: args.workspace)
 
         // Detect chip and configure memory
         let chipInfo = ChipDetector.detect()

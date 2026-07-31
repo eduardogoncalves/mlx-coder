@@ -241,6 +241,34 @@ public struct TaskTool: Tool {
         }
     }
 
+    /// The fine-grained `AgentRolesConfig` key a profile can be assigned its own
+    /// model under, independent of the coarse `roleModelKey` bucket. Only the
+    /// profiles that map 1:1 to a configurable role return a key here; profiles
+    /// without a dedicated slot (general/filesystem/terminal/docs/security_review)
+    /// return nil and rely solely on their coarse bucket.
+    static func fineRoleModelKey(forProfile profileName: String) -> String? {
+        guard let profile = SpecialistProfile(rawValue: profileName) else { return nil }
+        switch profile {
+        case .planner:          return "planner"
+        case .codebaseResearch: return "codebaseResearch"
+        case .executor:         return "executor"
+        case .testEngineering:  return "testEngineering"
+        case .reviewer:         return "reviewer"
+        default:                return nil
+        }
+    }
+
+    /// Resolve the configured model carrier for a profile: prefer the profile's
+    /// own fine-grained assignment (e.g. `codebaseResearch`/`testEngineering`),
+    /// then fall back to its coarse `planner`/`executor`/`reviewer` bucket, then
+    /// nil (meaning "inherit the parent/orchestrator model").
+    static func roleModel(forProfile profileName: String, in roleModels: [String: String]) -> String? {
+        if let fine = fineRoleModelKey(forProfile: profileName), let model = roleModels[fine] {
+            return model
+        }
+        return roleModels[roleModelKey(forProfile: profileName)]
+    }
+
     static func normalizeProfileName(_ value: String?) -> String {
         guard let value else { return SpecialistProfile.general.rawValue }
         let normalized = value
@@ -1011,8 +1039,8 @@ public struct TaskTool: Tool {
         var resolvedModelPath = modelPath
         var releasedParentLocalModel = false
 
-        let roleModelKey = TaskTool.roleModelKey(forProfile: profileName)
-        if let roleModelPath = roleModels[roleModelKey], roleModelPath != modelPath {
+        if let roleModelPath = TaskTool.roleModel(forProfile: profileName, in: roleModels),
+           roleModelPath != modelPath {
             let roleBackend = InferenceBackend(modelPath: roleModelPath)
             resolvedModelPath = roleModelPath
             if roleBackend.isOnline {

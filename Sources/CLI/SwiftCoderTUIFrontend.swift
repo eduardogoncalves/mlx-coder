@@ -99,6 +99,12 @@ public final class SwiftCoderTUIFrontend: AgentFrontend, @unchecked Sendable {
         continuation.yield(.event(event))
     }
 
+    /// The TUI draws a managed spinner in a fixed footer (above the input) for
+    /// every tool via `.toolCallStarted`, so AgentCore must not start its own
+    /// raw stdout spinner for slow web tools — see
+    /// `AgentFrontend.rendersOwnToolSpinner`.
+    public let rendersOwnToolSpinner = true
+
     public func request(_ request: AgentRequest) async -> AgentResponse {
         switch request {
         case .approval(let req):
@@ -355,6 +361,31 @@ public final class SwiftCoderTUIFrontend: AgentFrontend, @unchecked Sendable {
             // Internal status noise (e.g. tool-call writer debug progress)
             // should not be printed into the user-visible chat transcript.
             if s.severity == .debug { return }
+            // Slow web tools (web_search/web_fetch) report progress phases as
+            // prefixed status lines. We own the tool spinner, so fold the
+            // phase into its footer label instead of printing it — this is the
+            // TUI-side replacement for AgentCore's raw stdout spinner, which
+            // we suppress via `rendersOwnToolSpinner`.
+            if s.text.hasPrefix(StatusMessage.toolProgressPrefix) {
+                guard toolExecuting else { return }
+                let phase = String(s.text.dropFirst(StatusMessage.toolProgressPrefix.count))
+                spinnerBaseLabel = phase.isEmpty ? spinnerBaseLabel : "\(phase)…"
+                await renderer.setThinking(spinnerLabel())
+                await renderer.renderFooter()
+                return
+            }
+            // Steering queue drained mid-run: update the "[N queued]" badge in
+            // place so it clears the moment the messages are injected, not only
+            // when the turn ends.
+            if s.text.hasPrefix(StatusMessage.steeringQueuePrefix) {
+                let countText = String(s.text.dropFirst(StatusMessage.steeringQueuePrefix.count))
+                await renderer.setPendingCount(Int(countText) ?? 0)
+                await renderer.renderFooter()
+                return
+            }
+            // Any other control status this frontend doesn't recognize is an
+            // instruction to the display layer, not prose — drop it.
+            if s.isControlChannel { return }
             // During streamed tool-call writes, surface the tmp-file path in the
             // animated footer label (REPL parity) instead of only printing it.
             if s.severity == .info,

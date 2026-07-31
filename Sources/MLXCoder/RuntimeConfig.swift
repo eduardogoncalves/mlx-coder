@@ -26,6 +26,10 @@ struct RuntimeConfig: Sendable, Codable {
 
     let mcpServers: [MCPServer]
     let mcpSettings: MCPSettings?
+    /// Top-level "orchestrator" model used when `--model` isn't passed explicitly.
+    /// A local path/Hub id, or a `<providerID>:<modelID>` remote carrier. Nil when
+    /// the config omits `defaultModel`; callers fall back to the built-in default.
+    let defaultModel: String?
     let defaultApprovalMode: String?
     let defaultSandbox: Bool?
     let defaultDryRun: Bool?
@@ -41,6 +45,7 @@ struct RuntimeConfig: Sendable, Codable {
     init(
         mcpServers: [MCPServer] = [],
         mcpSettings: MCPSettings? = nil,
+        defaultModel: String? = nil,
         defaultApprovalMode: String? = nil,
         defaultSandbox: Bool? = nil,
         defaultDryRun: Bool? = nil,
@@ -51,6 +56,7 @@ struct RuntimeConfig: Sendable, Codable {
     ) {
         self.mcpServers = mcpServers
         self.mcpSettings = mcpSettings
+        self.defaultModel = defaultModel
         self.defaultApprovalMode = defaultApprovalMode
         self.defaultSandbox = defaultSandbox
         self.defaultDryRun = defaultDryRun
@@ -63,6 +69,7 @@ struct RuntimeConfig: Sendable, Codable {
     private enum CodingKeys: String, CodingKey {
         case mcpServers
         case mcpSettings
+        case defaultModel
         case defaultApprovalMode
         case defaultSandbox
         case defaultDryRun
@@ -76,6 +83,7 @@ struct RuntimeConfig: Sendable, Codable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         self.mcpServers = try container.decodeIfPresent([MCPServer].self, forKey: .mcpServers) ?? []
         self.mcpSettings = try container.decodeIfPresent(MCPSettings.self, forKey: .mcpSettings)
+        self.defaultModel = try container.decodeIfPresent(String.self, forKey: .defaultModel)
         self.defaultApprovalMode = try container.decodeIfPresent(String.self, forKey: .defaultApprovalMode)
         self.defaultSandbox = try container.decodeIfPresent(Bool.self, forKey: .defaultSandbox)
         self.defaultDryRun = try container.decodeIfPresent(Bool.self, forKey: .defaultDryRun)
@@ -125,6 +133,7 @@ enum RuntimeConfigLoader {
         return RuntimeConfig(
             mcpServers: mergedServers,
             mcpSettings: mergedMCPSettings,
+            defaultModel: workspaceConfig.defaultModel ?? userConfig.defaultModel,
             defaultApprovalMode: mergeApprovalMode(
                 user: userConfig.defaultApprovalMode,
                 workspace: workspaceConfig.defaultApprovalMode

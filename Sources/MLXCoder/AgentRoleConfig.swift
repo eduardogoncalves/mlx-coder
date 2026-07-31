@@ -16,36 +16,65 @@ struct AgentRolesConfig: Codable, Sendable, Equatable {
     var planner: String?
     var executor: String?
     var reviewer: String?
+    /// Codebase-traversal sub-agent (`codebase_research` profile). When unset it
+    /// falls back to `planner`'s model — see `TaskTool.roleModel(forProfile:in:)`.
+    var codebaseResearch: String?
+    /// Test-runner sub-agent (`test_engineering` profile). When unset it falls
+    /// back to `executor`'s model — see `TaskTool.roleModel(forProfile:in:)`.
+    var testEngineering: String?
 
-    init(planner: String? = nil, executor: String? = nil, reviewer: String? = nil) {
+    init(
+        planner: String? = nil,
+        executor: String? = nil,
+        reviewer: String? = nil,
+        codebaseResearch: String? = nil,
+        testEngineering: String? = nil
+    ) {
         self.planner = planner
         self.executor = executor
         self.reviewer = reviewer
+        self.codebaseResearch = codebaseResearch
+        self.testEngineering = testEngineering
     }
 
-    /// Look up a role by its lowercase name ("planner", "executor", "reviewer").
-    /// Unknown role names return nil.
+    /// Normalize a role token for lookup: lowercase, drop `_`/`-`, so
+    /// "codebase_research", "codebaseResearch", and "codebaseresearch" all match.
+    private static func normalizeRole(_ role: String) -> String {
+        role.lowercased()
+            .replacingOccurrences(of: "_", with: "")
+            .replacingOccurrences(of: "-", with: "")
+    }
+
+    /// Look up a role by name (case- and separator-insensitive, e.g. "planner",
+    /// "codebase_research", "testEngineering"). Unknown role names return nil.
     subscript(role: String) -> String? {
         get {
-            switch role.lowercased() {
+            switch AgentRolesConfig.normalizeRole(role) {
             case "planner": return planner
             case "executor": return executor
             case "reviewer": return reviewer
+            case "codebaseresearch": return codebaseResearch
+            case "testengineering": return testEngineering
             default: return nil
             }
         }
         set {
-            switch role.lowercased() {
+            switch AgentRolesConfig.normalizeRole(role) {
             case "planner": planner = newValue
             case "executor": executor = newValue
             case "reviewer": reviewer = newValue
+            case "codebaseresearch": codebaseResearch = newValue
+            case "testengineering": testEngineering = newValue
             default: break
             }
         }
     }
 
-    /// All known role names, in a stable display order.
-    static let roleNames = ["planner", "executor", "reviewer"]
+    /// All known role names, in a stable display order. The two extra roles
+    /// (`codebaseResearch`, `testEngineering`) let a codebase-research or
+    /// test-engineering sub-agent run on its own model instead of inheriting the
+    /// coarse planner/executor bucket.
+    static let roleNames = ["planner", "codebaseResearch", "executor", "testEngineering", "reviewer"]
 
     /// Non-nil (role, model) pairs, in `roleNames` order.
     var assignments: [(role: String, model: String)] {
