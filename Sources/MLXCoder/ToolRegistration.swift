@@ -16,7 +16,8 @@ func registerAllTools(
     frontend: any AgentFrontend,
     mcpConfigs: [MCPClient.ServerConfig] = [],
     skillsRegistry: SkillsRegistry? = nil,
-    toolOutputSpool: ToolOutputSpoolConfig = .enabledDefault
+    toolOutputSpool: ToolOutputSpoolConfig = .enabledDefault,
+    codeGraphIndexer: CodeGraphIndexer? = nil
 ) async {
     // Filesystem tools
     await registry.register(ReadFileTool(permissions: permissions))
@@ -94,6 +95,13 @@ func registerAllTools(
     // Memory tools
     await registry.register(LogKnowledgeTool(workspaceRoot: permissions.workspaceRoot))
     await registry.register(SearchKnowledgeTool(workspaceRoot: permissions.workspaceRoot))
+
+    // Code graph (optional — only registered when `codeGraph.enabled` in
+    // config.json produced a live indexer; ships off by default so the tool
+    // isn't advertised/prompt-token-costed until opted in).
+    if let codeGraphIndexer {
+        await registry.register(CodeGraphExploreTool(indexer: codeGraphIndexer))
+    }
 
     // MCP tools (optional)
     for mcpConfig in mcpConfigs {

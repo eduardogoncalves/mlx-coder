@@ -110,17 +110,24 @@ public struct ContextRetriever: Sendable {
     let config: ContextRetrievalConfig
     /// Optional verbose sink (assembled block, stage counts) for `--verbose`.
     let log: (@Sendable (String) -> Void)?
+    /// Optional code graph store for Stage-2 neighbor fusion (plan §12.1).
+    /// `nil` (the default) reproduces pre-M4 behavior byte-for-byte — callers
+    /// only pass a store when `codeGraph.enabled` and the indexer is live
+    /// (`AgentLoop` threads `codeGraphIndexer?.store`).
+    let graphStore: CodeGraphStore?
 
     public init(
         llm: LLMClient,
         permissions: PermissionEngine,
         config: ContextRetrievalConfig,
-        log: (@Sendable (String) -> Void)? = nil
+        log: (@Sendable (String) -> Void)? = nil,
+        graphStore: CodeGraphStore? = nil
     ) {
         self.llm = llm
         self.permissions = permissions
         self.config = config
         self.log = log
+        self.graphStore = graphStore
     }
 
     // MARK: - Gate (Stage 0)
@@ -253,7 +260,73 @@ public struct ContextRetriever: Sendable {
                   !result.isError else { continue }
             rawHits.append(contentsOf: Self.parseSearchLines(result.content))
         }
+        // Graph-neighbor fusion (plan §12.1) — appended as extra raw hits so
+        // `aggregateCandidates`'s existing rank-by-hit-count logic gives
+        // graph-confirmed files a natural small boost (a file lexical search
+        // AND the graph both surfaced ranks above one only lexical search
+        // found) without a second ranking pass. No-op (byte-identical to
+        // pre-M4 output) when `graphStore` is nil or the graph is empty.
+        rawHits.append(contentsOf: await gatherGraphNeighborHits(subqueries: subqueries))
         return aggregateCandidates(from: rawHits, cap: config.maxCandidates)
+    }
+
+    /// Deterministic, no-LLM Stage-2 extension: for every symbol-shaped token
+    /// in the subqueries, look up matching graph symbols and pull in the
+    /// file(s) of the symbol itself plus its structural neighbors
+    /// (`imports`/`extends`/`implements`/`references` — `calls` once M5
+    /// lands). Bounded query count acts as the budget discipline; any store
+    /// failure degrades to no additional hits, never throws (plan §7, §11).
+    func gatherGraphNeighborHits(subqueries: [String]) async -> [(path: String, line: Int, text: String)] {
+        guard let graphStore else { return [] }
+        guard let stats = try? await graphStore.stats(), stats.symbolCount > 0 else { return [] }
+        let tokens = Self.extractSymbolTokens(from: subqueries, cap: Self.graphTokenQueryCap)
+        guard !tokens.isEmpty else { return [] }
+
+        var hits: [(String, Int, String)] = []
+        for token in tokens {
+            guard let matches = try? await graphStore.findSymbols(named: token, limit: 3), !matches.isEmpty else { continue }
+            for match in matches {
+                if permissions.isPathIgnored(match.path) { continue }
+                hits.append((match.path, max(1, match.startLine), "graph:\(match.symbolKey)"))
+                guard let outgoing = try? await graphStore.outgoingEdges(symbolID: match.id) else { continue }
+                for edge in outgoing {
+                    guard let dstId = edge.dstId,
+                          let dstSymbol = try? await graphStore.symbol(id: dstId),
+                          !permissions.isPathIgnored(dstSymbol.path)
+                    else { continue }
+                    hits.append((dstSymbol.path, max(1, dstSymbol.startLine), "graph:\(edge.kind):\(dstSymbol.symbolKey)"))
+                }
+            }
+        }
+        return hits
+    }
+
+    /// Hard cap on distinct symbol-name lookups issued to the graph store per
+    /// `retrieve` call — bounds Stage 2's added latency regardless of how many
+    /// subqueries Stage 1 produced (budget discipline, plan §12.1).
+    static let graphTokenQueryCap = 12
+
+    /// Extract identifier-shaped tokens from free-text subqueries: split on
+    /// non-identifier characters (including `.`, so `AgentLoop.processTurn`
+    /// yields both `AgentLoop` and `processTurn` — `cg_symbols.name` is
+    /// always the bare name, never the qualified one). Short/low-signal
+    /// tokens are dropped to avoid burning the query budget on English prose
+    /// words; exact-name lookups make false positives cheap even if a token
+    /// slips through (they simply return zero matches).
+    static func extractSymbolTokens(from subqueries: [String], cap: Int) -> [String] {
+        var seen = Set<String>()
+        var out: [String] = []
+        for query in subqueries {
+            let pieces = query.split { !($0.isLetter || $0.isNumber || $0 == "_") }
+            for piece in pieces {
+                let token = String(piece)
+                guard token.count >= 3 else { continue }
+                guard seen.insert(token).inserted else { continue }
+                out.append(token)
+                if out.count >= cap { return out }
+            }
+        }
+        return out
     }
 
     /// Parse `code_search` / `grep`-style `.content` into raw hits. Accepts the

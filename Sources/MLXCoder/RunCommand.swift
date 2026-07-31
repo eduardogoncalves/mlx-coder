@@ -190,6 +190,20 @@ struct RunCommand: AsyncParsableCommand {
         )
         warnIfUnsafeCommandExecution(renderer: renderer, sandboxEnabled: effectiveSandbox, permissions: permissions)
 
+        // Code graph (optional — ships disabled; see `codeGraph.enabled` in
+        // config.json). Bootstrapping + the initial workspace scan run
+        // detached/low-priority so they never block startup — the tool's own
+        // staleness banner covers the window until the scan catches up.
+        let codeGraphConfig = runtimeConfig.codeGraph ?? .disabled
+        let codeGraphStore = CodeGraphStore()
+        let codeGraphIndexer = CodeGraphIndexer(store: codeGraphStore, permissions: permissions, config: codeGraphConfig)
+        if codeGraphConfig.enabled {
+            await codeGraphIndexer.bootstrap()
+            Task.detached(priority: .background) { [codeGraphIndexer] in
+                await codeGraphIndexer.scanWorkspace(root: absWorkspace)
+            }
+        }
+
         let registry = ToolRegistry()
         let runtimeMCPConfigs = runtimeMCPServerConfigs(
             from: runtimeConfig,
@@ -211,7 +225,8 @@ struct RunCommand: AsyncParsableCommand {
                 cliConfig: makeMCPServerConfig(from: args)
             ),
             skillsRegistry: skillsRegistry,
-            toolOutputSpool: runtimeConfig.toolOutputSpool ?? .enabledDefault
+            toolOutputSpool: runtimeConfig.toolOutputSpool ?? .enabledDefault,
+            codeGraphIndexer: codeGraphConfig.enabled ? codeGraphIndexer : nil
         )
 
         let skillMetadata = await skillsRegistry.listMetadata()
@@ -252,6 +267,7 @@ struct RunCommand: AsyncParsableCommand {
             memoryLimit: budget.totalBytes,
             cacheLimit: budget.cacheBytes,
             draftModel: draftModel,
+            codeGraphIndexer: codeGraphConfig.enabled ? codeGraphIndexer : nil,
             contextRetrieval: runtimeConfig.contextRetrieval ?? .disabled,
             toolOutputSpool: runtimeConfig.toolOutputSpool ?? .enabledDefault
         )

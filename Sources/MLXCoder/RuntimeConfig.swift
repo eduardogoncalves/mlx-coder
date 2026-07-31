@@ -41,6 +41,9 @@ struct RuntimeConfig: Sendable, Codable {
     /// Large-tool-output disk-spool settings. Nil when the config omits
     /// `toolOutputSpool`; callers substitute the enabled default.
     let toolOutputSpool: ToolOutputSpoolConfig?
+    /// Auto-recorded code graph settings. Nil when the config omits
+    /// `codeGraph`; callers substitute `.disabled`.
+    let codeGraph: CodeGraphConfig?
 
     init(
         mcpServers: [MCPServer] = [],
@@ -52,7 +55,8 @@ struct RuntimeConfig: Sendable, Codable {
         defaultPolicyFile: String? = nil,
         defaultAuditLogPath: String? = nil,
         contextRetrieval: ContextRetrievalConfig? = nil,
-        toolOutputSpool: ToolOutputSpoolConfig? = nil
+        toolOutputSpool: ToolOutputSpoolConfig? = nil,
+        codeGraph: CodeGraphConfig? = nil
     ) {
         self.mcpServers = mcpServers
         self.mcpSettings = mcpSettings
@@ -64,6 +68,7 @@ struct RuntimeConfig: Sendable, Codable {
         self.defaultAuditLogPath = defaultAuditLogPath
         self.contextRetrieval = contextRetrieval
         self.toolOutputSpool = toolOutputSpool
+        self.codeGraph = codeGraph
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -77,6 +82,7 @@ struct RuntimeConfig: Sendable, Codable {
         case defaultAuditLogPath
         case contextRetrieval
         case toolOutputSpool
+        case codeGraph
     }
 
     init(from decoder: Decoder) throws {
@@ -91,6 +97,7 @@ struct RuntimeConfig: Sendable, Codable {
         self.defaultAuditLogPath = try container.decodeIfPresent(String.self, forKey: .defaultAuditLogPath)
         self.contextRetrieval = try container.decodeIfPresent(ContextRetrievalConfig.self, forKey: .contextRetrieval)
         self.toolOutputSpool = try container.decodeIfPresent(ToolOutputSpoolConfig.self, forKey: .toolOutputSpool)
+        self.codeGraph = try container.decodeIfPresent(CodeGraphConfig.self, forKey: .codeGraph)
     }
 }
 
@@ -146,7 +153,8 @@ enum RuntimeConfigLoader {
             defaultPolicyFile: workspaceConfig.defaultPolicyFile ?? userConfig.defaultPolicyFile,
             defaultAuditLogPath: workspaceConfig.defaultAuditLogPath ?? userConfig.defaultAuditLogPath,
             contextRetrieval: workspaceConfig.contextRetrieval ?? userConfig.contextRetrieval,
-            toolOutputSpool: workspaceConfig.toolOutputSpool ?? userConfig.toolOutputSpool
+            toolOutputSpool: workspaceConfig.toolOutputSpool ?? userConfig.toolOutputSpool,
+            codeGraph: workspaceConfig.codeGraph ?? userConfig.codeGraph
         )
     }
 

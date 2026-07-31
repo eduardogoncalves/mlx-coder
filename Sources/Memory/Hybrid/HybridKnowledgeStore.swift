@@ -106,12 +106,17 @@ public actor HybridKnowledgeStore {
     private let reranker: Reranker
     public let config: Config
     private var db: OpaquePointer?
+    /// Optional code graph store for best-effort `entities_json` symbol
+    /// tagging on write (plan §12.2). `nil` (the default) reproduces
+    /// pre-M4 behavior exactly — no tagging, no graph reads.
+    private let graphStore: CodeGraphStore?
 
     public init(
         dbPath: String? = nil,
         embedder: EmbeddingProvider = HashEmbeddingProvider(),
         reranker: Reranker = LexicalReranker(),
-        config: Config = .default
+        config: Config = .default,
+        graphStore: CodeGraphStore? = nil
     ) {
         if let dbPath {
             self.dbPath = dbPath
@@ -125,6 +130,7 @@ public actor HybridKnowledgeStore {
         self.embedder = embedder
         self.reranker = reranker
         self.config = config
+        self.graphStore = graphStore
     }
 
     // MARK: - Lifecycle
@@ -164,6 +170,18 @@ public actor HybridKnowledgeStore {
     @discardableResult
     public func write(_ input: DocumentInput) async throws -> WriteOutcome {
         guard db != nil else { throw StoreError.databaseNotOpen }
+
+        // Best-effort graph symbol tagging (plan §12.2) — folded in before
+        // any of the three write branches below so every path (dedup-upgrade,
+        // near-dup-supersede, plain-insert) tags `entities_json` identically.
+        var input = input
+        let detected = await detectSymbolEntities(in: input.content)
+        if !detected.isEmpty {
+            var seen = Set(input.entities)
+            for key in detected where seen.insert(key).inserted {
+                input.entities.append(key)
+            }
+        }
 
         let normalizedContent = HashEmbeddingProvider.normalize(input.content)
         let contentHash = sha256(normalizedContent)
@@ -1047,6 +1065,112 @@ public actor HybridKnowledgeStore {
         }
         // Preserve fused order
         return ids.compactMap { byID[$0] }
+    }
+
+    // MARK: - Code graph symbol join (plan §12.2)
+
+    /// Documents whose `entities_json` was tagged with the stable
+    /// `symbol_key` string `symbolKey` (§3.2 — never a numeric id). Powers
+    /// "what do I know about symbol X" and lets `code_graph_explore`
+    /// optionally attach logged rationale to a symbol. A rename produces a
+    /// new `symbol_key`, so old tags simply stop matching — no explicit
+    /// invalidation needed, and stale entries are never resurrected under a
+    /// reused name.
+    public func documents(referencingSymbol symbolKey: String, limit: Int = 20) async throws -> [MemoryDocument] {
+        guard let db else { throw StoreError.databaseNotOpen }
+        let sql = """
+            SELECT d.id, d.doc_uuid, d.memory_type, d.knowledge_kind,
+                   d.content, d.content_hash, d.source, d.project_root,
+                   d.branch, d.surface, d.confidence, d.importance,
+                   d.status, d.version, d.supersedes_id,
+                   d.created_at, d.updated_at, d.expires_at,
+                   d.last_access_at, d.access_count,
+                   m.tags_json, m.entities_json, m.session_id, m.task_id, m.feedback_score
+            FROM memory_documents d
+            JOIN memory_metadata m ON m.doc_id = d.id
+            WHERE d.status = 'active' AND m.entities_json LIKE ? ESCAPE '\\'
+            ORDER BY d.updated_at DESC
+            LIMIT ?;
+        """
+        var stmt: OpaquePointer?
+        defer { sqlite3_finalize(stmt) }
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+            throw StoreError.sqliteError("entities lookup prepare", sqlite3_errcode(db))
+        }
+        sqlite3_bind_text(stmt, 1, Self.likePattern(forJSONArrayElement: symbolKey), -1, _swift_sqlite_transient)
+        sqlite3_bind_int(stmt, 2, Int32(max(1, limit)))
+        var docs: [MemoryDocument] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            if let doc = parseDocument(stmt: stmt) { docs.append(doc) }
+        }
+        return docs
+    }
+
+    /// Best-effort, deterministic symbol tagging: tokenize `content`, look up
+    /// exact-name matches in the (optional) graph store, and return their
+    /// stable `symbol_key` strings. No LLM. Degrades to `[]` — never throws —
+    /// when there's no graph store, an empty graph, or a store failure, so a
+    /// miss just means no tag (plan §12.2, §7).
+    private func detectSymbolEntities(in content: String) async -> [String] {
+        guard let graphStore else { return [] }
+        guard let stats = try? await graphStore.stats(), stats.symbolCount > 0 else { return [] }
+        let tokens = Self.extractCandidateTokens(from: content, cap: Self.symbolDetectionTokenCap)
+        guard !tokens.isEmpty else { return [] }
+
+        var seen = Set<String>()
+        var keys: [String] = []
+        for token in tokens {
+            guard let matches = try? await graphStore.findSymbols(named: token, limit: 3) else { continue }
+            for match in matches where seen.insert(match.symbolKey).inserted {
+                keys.append(match.symbolKey)
+            }
+        }
+        return keys
+    }
+
+    /// Hard cap on distinct symbol-name lookups per `write` call — bounds the
+    /// added latency regardless of document length.
+    private static let symbolDetectionTokenCap = 24
+
+    /// Extract identifier-shaped tokens (letters/digits/underscore runs,
+    /// length ≥ 3) from free-text content, deduped, first-seen order.
+    private static func extractCandidateTokens(from content: String, cap: Int) -> [String] {
+        var seen = Set<String>()
+        var out: [String] = []
+        for piece in content.split(whereSeparator: { !($0.isLetter || $0.isNumber || $0 == "_") }) {
+            let token = String(piece)
+            guard token.count >= 3 else { continue }
+            guard seen.insert(token).inserted else { continue }
+            out.append(token)
+            if out.count >= cap { break }
+        }
+        return out
+    }
+
+    /// Builds a `LIKE` pattern matching `value` as an exact JSON-string array
+    /// element inside `entities_json` (`…"<value>"…`). JSON-escapes `value`
+    /// the same way `entities_json` itself was serialized (by round-tripping
+    /// through `JSONEncoder` on a one-element array and stripping the
+    /// brackets) so the pattern matches the on-disk bytes even when `value`
+    /// contains characters JSON escapes, then escapes SQL LIKE's own
+    /// wildcards (`%`, `_`, and the escape character) so a symbol key
+    /// containing them can't turn into an unintended wildcard.
+    static func likePattern(forJSONArrayElement value: String) -> String {
+        let jsonElement: String
+        if let data = try? JSONEncoder().encode([value]),
+           let arrayStr = String(data: data, encoding: .utf8),
+           arrayStr.hasPrefix("["), arrayStr.hasSuffix("]") {
+            jsonElement = String(arrayStr.dropFirst().dropLast())
+        } else {
+            jsonElement = "\"\(value)\""
+        }
+        var escaped = ""
+        escaped.reserveCapacity(jsonElement.count)
+        for ch in jsonElement {
+            if ch == "\\" || ch == "%" || ch == "_" { escaped.append("\\") }
+            escaped.append(ch)
+        }
+        return "%\(escaped)%"
     }
 
     private func fetchActiveDocuments(scope: RetrievalScope, limit: Int) throws -> [MemoryDocument] {

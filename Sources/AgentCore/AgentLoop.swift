@@ -86,6 +86,13 @@ public actor AgentLoop {
     /// turn so the provider can mine the conversation for new memories.
     /// Defaults to nil, which preserves legacy behaviour (no reflection).
     let memoryProvider: (any MemoryProvider)?
+    /// Optional auto-recorded code graph indexer (see `Sources/CodeGraph/`).
+    /// When non-nil (i.e. `codeGraph.enabled` in `~/.mlx-coder/config.json`),
+    /// the end-of-turn hook enqueues the turn's `modifiedFilePaths` for
+    /// background indexing — see the detached block alongside the memory
+    /// reflection call at the end of `processUserMessage`. `nil` preserves
+    /// legacy behaviour (no graph indexing), matching `memoryProvider`.
+    let codeGraphIndexer: CodeGraphIndexer?
     let customizationPromptSection: String?
     let skillsMetadata: [SkillMetadata]
     var promptSectionTokenEstimates: [PromptSection: Int]
@@ -266,10 +273,12 @@ public actor AgentLoop {
         draftModel: DraftModelHandle? = nil,
         role: String? = nil,
         subAgentBaseInstructions: String? = nil,
+        codeGraphIndexer: CodeGraphIndexer? = nil,
         contextRetrieval: ContextRetrievalConfig = .disabled,
         toolOutputSpool: ToolOutputSpoolConfig = .enabledDefault
     ) {
         self.role = role
+        self.codeGraphIndexer = codeGraphIndexer
         self.contextRetrievalConfig = contextRetrieval
         self.toolOutputSpoolConfig = toolOutputSpool
         self.subAgentBaseInstructions = subAgentBaseInstructions
@@ -786,6 +795,22 @@ public actor AgentLoop {
                     }
                 }
 
+                // Best-effort end-of-turn code graph indexing. Co-located with
+                // the reflection hook above (same seam — plan §4), but
+                // deliberately NOT nested inside `if let provider = memoryProvider`:
+                // the graph must stay fresh even when long-term memory is
+                // disabled/absent. Coalesces the turn's whole modified-file set
+                // into one enqueue on the single serializing `CodeGraphIndexer`
+                // actor (never spawns overlapping indexers — plan §11). Indexing
+                // failures degrade to "stale" inside the indexer and never throw
+                // into the turn.
+                if let codeGraphIndexer, !modifiedFilePaths.isEmpty {
+                    let paths = modifiedFilePaths
+                    Task.detached(priority: .utility) { [codeGraphIndexer] in
+                        await codeGraphIndexer.enqueue(paths: paths)
+                    }
+                }
+
                 // Emit accumulated token stats for the whole turn (all rounds summed).
                 if hasTurnStats {
                     let tps = turnTotalElapsed > 0
@@ -1005,7 +1030,8 @@ public actor AgentLoop {
             llm: client,
             permissions: permissions,
             config: contextRetrievalConfig,
-            log: log
+            log: log,
+            graphStore: codeGraphIndexer?.store
         )
         return await retriever.retrieve(userRequest: userRequest)
     }

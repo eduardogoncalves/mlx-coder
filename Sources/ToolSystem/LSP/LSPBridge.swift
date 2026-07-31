@@ -1,5 +1,13 @@
 // Sources/ToolSystem/LSP/LSPBridge.swift
-// Actor-backed bridge to csharp-ls over stdio JSON-RPC.
+// Actor-backed bridge to a language server over stdio JSON-RPC. Originally
+// csharp-ls-only; generalized in M5b (plan §13.1) to launch any server
+// described by an `LSPServerSpec` — the generic JSON-RPC transport, framing,
+// and handshake below are unchanged and now shared by csharp-ls,
+// sourcekit-lsp, and typescript-language-server. `DotnetLSPService` keeps
+// using the `.csharpLS` default so its existing hover/rename/diagnostics
+// tool-facing behavior is unaffected; `LSPCallHierarchyEnricher`
+// (`Sources/CodeGraph/SemanticEdgeEnricher.swift`) is the first consumer to
+// pass a different spec.
 
 import Foundation
 import Darwin
@@ -14,6 +22,7 @@ actor LSPBridge {
         let workspaceFolders: [LSPInitializeParams.WorkspaceFolder]?
     }
 
+    private let serverSpec: LSPServerSpec
     private var process: Process?
     private var inputPipe: Pipe?
     private var outputPipe: Pipe?
@@ -37,6 +46,10 @@ actor LSPBridge {
     private let maxStderrTailBytes = 16 * 1024
     private let maxStdoutTailBytes = 16 * 1024
     private let initializeTimeoutSeconds: Double = 60
+
+    init(serverSpec: LSPServerSpec = .csharpLS) {
+        self.serverSpec = serverSpec
+    }
 
     deinit {
         readerTask?.cancel()
@@ -348,6 +361,51 @@ actor LSPBridge {
         return result == "null" ? "[]" : result
     }
 
+    /// `textDocument/prepareCallHierarchy` — the entry point for
+    /// `SemanticEdgeEnricher` (plan §13.1). Returns the server's raw JSON
+    /// text; `LSPCallHierarchyParser` (pure, no I/O) does the parsing so it
+    /// can be unit-tested without a live server.
+    func prepareCallHierarchy(filePath: String, line: Int, character: Int) async throws -> String {
+        let uri = fileURI(fromPath: filePath)
+        try await openDocumentIfNeeded(filePath: filePath, uri: uri)
+
+        let params = LSPTextDocumentPositionParams(
+            textDocument: .init(uri: uri),
+            position: .init(line: line, character: character)
+        )
+        let result = try await sendRequest(method: "textDocument/prepareCallHierarchy", params: params, timeoutSeconds: 20)
+        return result == "null" ? "[]" : result
+    }
+
+    /// `callHierarchy/outgoingCalls` — resolves the callees of `itemJSON`
+    /// (one element from `prepareCallHierarchy`'s result, passed through
+    /// verbatim so any server-specific fields — e.g. Roslyn's opaque
+    /// `data` — round-trip correctly).
+    func outgoingCalls(itemJSON: String) async throws -> String {
+        let result = try await sendRawItemRequest(method: "callHierarchy/outgoingCalls", itemJSON: itemJSON, timeoutSeconds: 20)
+        return result == "null" ? "[]" : result
+    }
+
+    /// `callHierarchy/incomingCalls` — mirrors `outgoingCalls`; not used by
+    /// `LSPCallHierarchyEnricher` today (it only needs outgoing calls to
+    /// build `calls` edges from a symbol) but implemented alongside it for
+    /// completeness (plan §13.1 names both).
+    func incomingCalls(itemJSON: String) async throws -> String {
+        let result = try await sendRawItemRequest(method: "callHierarchy/incomingCalls", itemJSON: itemJSON, timeoutSeconds: 20)
+        return result == "null" ? "[]" : result
+    }
+
+    /// Sends `{ "item": <itemJSON> }` without round-tripping `itemJSON`
+    /// through `Encodable` (it's already-serialized server output, and may
+    /// contain fields no local Swift type models).
+    private func sendRawItemRequest(method: String, itemJSON: String, timeoutSeconds: Double) async throws -> String {
+        guard let itemData = itemJSON.data(using: .utf8),
+              let itemObject = try? JSONSerialization.jsonObject(with: itemData) else {
+            throw LSPBridgeError.invalidResponse("call hierarchy item is not valid JSON")
+        }
+        return try await sendRequestWithRawParams(method: method, params: ["item": itemObject], timeoutSeconds: timeoutSeconds)
+    }
+
     func rename(filePath: String, line: Int, character: Int, newName: String) async throws -> String {
         let uri = fileURI(fromPath: filePath)
         try await openDocumentIfNeeded(filePath: filePath, uri: uri)
@@ -419,7 +477,7 @@ actor LSPBridge {
 
         let source = try String(contentsOfFile: filePath, encoding: .utf8)
         let params = LSPDidOpenTextDocumentParams(
-            textDocument: .init(uri: uri, languageId: "csharp", version: 0, text: source)
+            textDocument: .init(uri: uri, languageId: serverSpec.languageId, version: 0, text: source)
         )
 
         try await sendNotification(method: "textDocument/didOpen", params: params)
@@ -459,24 +517,31 @@ actor LSPBridge {
     /// - Returns: The full response string from the server
     /// - Throws: `LSPBridgeError.requestTimedOut` if timeout expires
     private func sendRequest<T: Encodable>(method: String, params: T?, timeoutSeconds: Double) async throws -> String {
-        if process == nil || !(process?.isRunning ?? false) {
-            if restartCount == 0, let rootURI, let rootURL = URL(string: rootURI) {
-                restartCount = 1
-                try await start(workspacePath: rootURL)
-            } else {
-                throw LSPBridgeError.disabledForSession("csharp-ls crashed twice.")
-            }
-        }
-
-        let requestId = nextId
-        nextId += 1
-
         let paramsObject: Any
         if let params {
             paramsObject = try encodeAsJSONObject(params)
         } else {
             paramsObject = NSNull()
         }
+        return try await sendRequestWithRawParams(method: method, params: paramsObject, timeoutSeconds: timeoutSeconds)
+    }
+
+    /// Shared core for both the `Encodable`-typed `sendRequest` above and
+    /// call-hierarchy's already-JSON `itemJSON` round-trip
+    /// (`sendRawItemRequest`), which has no local Swift type to encode
+    /// through (the item may carry server-specific opaque fields).
+    private func sendRequestWithRawParams(method: String, params paramsObject: Any, timeoutSeconds: Double) async throws -> String {
+        if process == nil || !(process?.isRunning ?? false) {
+            if restartCount == 0, let rootURI, let rootURL = URL(string: rootURI) {
+                restartCount = 1
+                try await start(workspacePath: rootURL)
+            } else {
+                throw LSPBridgeError.disabledForSession("\(serverSpec.executableName) crashed twice.")
+            }
+        }
+
+        let requestId = nextId
+        nextId += 1
 
         let request: [String: Any] = [
             "jsonrpc": "2.0",
@@ -760,11 +825,33 @@ actor LSPBridge {
         output: Pipe,
         error: Pipe
     ) -> Process {
+        // csharp-ls keeps its existing, more elaborate resolution (checks
+        // ~/.dotnet/tools first, supports --solution and CSHARP_LS_PATH) —
+        // preserved exactly so `DotnetLSPService` (the C# hover/rename/
+        // diagnostics tool surface) sees zero behavior change. Every other
+        // server spec (sourcekit-lsp, typescript-language-server, …) uses
+        // the simpler generic path below.
+        if serverSpec == .csharpLS {
+            return makeCSharpLSProcess(
+                workspacePath: workspacePath, startupTargetPath: startupTargetPath,
+                input: input, output: output, error: error
+            )
+        }
+        return makeGenericServerProcess(workspacePath: workspacePath, input: input, output: output, error: error)
+    }
+
+    private func makeCSharpLSProcess(
+        workspacePath: URL,
+        startupTargetPath: String?,
+        input: Pipe,
+        output: Pipe,
+        error: Pipe
+    ) -> Process {
         let process = Process()
 
         let home = NSHomeDirectory()
         let dotnetToolBinary = URL(filePath: "\(home)/.dotnet/tools/csharp-ls")
-        var csharpArguments = ["--loglevel", "warning"]
+        var csharpArguments = serverSpec.arguments
 
           if let startupTargetPath,
               !startupTargetPath.isEmpty,
@@ -810,12 +897,46 @@ actor LSPBridge {
         return process
     }
 
+    /// Generic launch path for every non-csharp-ls server spec: resolve
+    /// `<LANG>_LSP_PATH`-style env override (mirrors `CSHARP_LS_PATH`) else
+    /// fall back to `/usr/bin/env <executableName>` (PATH lookup) — matches
+    /// how `sourcekit-lsp`/`typescript-language-server` are normally
+    /// installed (Xcode toolchain / npm global bin, both already on PATH).
+    private func makeGenericServerProcess(
+        workspacePath: URL,
+        input: Pipe,
+        output: Pipe,
+        error: Pipe
+    ) -> Process {
+        let process = Process()
+        let envOverrideKey = "\(serverSpec.languageId.uppercased())_LSP_PATH"
+        if let customPath = ProcessInfo.processInfo.environment[envOverrideKey],
+           FileManager.default.isExecutableFile(atPath: customPath) {
+            process.executableURL = URL(filePath: customPath)
+            process.arguments = serverSpec.arguments
+        } else {
+            process.executableURL = URL(filePath: "/usr/bin/env")
+            process.arguments = [serverSpec.executableName] + serverSpec.arguments
+        }
+        process.currentDirectoryURL = workspacePath
+        process.standardInput = input
+        process.standardOutput = output
+        process.standardError = error
+        process.environment = ProcessInfo.processInfo.environment
+        return process
+    }
+
     private func attemptSelfHealIfNeeded(reason: String) async throws -> Bool {
+        // Self-heal (auto `dotnet tool install`) is csharp-ls-specific;
+        // every other server spec just surfaces `installHint` via
+        // `LSPBridgeError.serverUnavailable` and degrades gracefully.
+        guard serverSpec == .csharpLS else { return false }
+
         // Don't self-heal if NATIVE_AGENT_LSP_DISABLED is set
         if ProcessInfo.processInfo.environment["NATIVE_AGENT_LSP_DISABLED"] == "1" {
             return false
         }
-        
+
         guard !didAttemptSelfHealInstall else {
             return false
         }

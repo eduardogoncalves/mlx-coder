@@ -177,6 +177,20 @@ struct ChatCommand: AsyncParsableCommand {
             numDraftTokens: args.numDraftTokens
         )
 
+        // Code graph (optional — ships disabled; see `codeGraph.enabled` in
+        // config.json). Bootstrapping + the initial workspace scan run
+        // detached/low-priority so they never block startup — the tool's own
+        // staleness banner covers the window until the scan catches up.
+        let codeGraphConfig = runtimeConfig.codeGraph ?? .disabled
+        let codeGraphStore = CodeGraphStore()
+        let codeGraphIndexer = CodeGraphIndexer(store: codeGraphStore, permissions: permissions, config: codeGraphConfig)
+        if codeGraphConfig.enabled {
+            await codeGraphIndexer.bootstrap()
+            Task.detached(priority: .background) { [codeGraphIndexer] in
+                await codeGraphIndexer.scanWorkspace(root: absWorkspace)
+            }
+        }
+
         // Set up tool registry
         let registry = ToolRegistry()
         let runtimeMCPConfigs = runtimeMCPServerConfigs(
@@ -199,7 +213,8 @@ struct ChatCommand: AsyncParsableCommand {
                 cliConfig: makeMCPServerConfig(from: args)
             ),
             skillsRegistry: skillsRegistry,
-            toolOutputSpool: runtimeConfig.toolOutputSpool ?? .enabledDefault
+            toolOutputSpool: runtimeConfig.toolOutputSpool ?? .enabledDefault,
+            codeGraphIndexer: codeGraphConfig.enabled ? codeGraphIndexer : nil
         )
 
         let toolCount = await registry.count
@@ -249,6 +264,7 @@ struct ChatCommand: AsyncParsableCommand {
             memoryLimit: budget.totalBytes,
             cacheLimit: budget.cacheBytes,
             draftModel: draftModel,
+            codeGraphIndexer: codeGraphConfig.enabled ? codeGraphIndexer : nil,
             contextRetrieval: runtimeConfig.contextRetrieval ?? .disabled,
             toolOutputSpool: runtimeConfig.toolOutputSpool ?? .enabledDefault
         )

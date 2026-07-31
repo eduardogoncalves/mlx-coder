@@ -18,6 +18,60 @@ let package = Package(
             name: "CSQLite",
             pkgConfig: "sqlite3"
         ),
+        // Vendored tree-sitter runtime + tier-1 grammars (plan §13.2, §13.6).
+        // Not SPM package dependencies — plain C sources fetched/pinned by
+        // `scripts/sync-grammars.sh` into `grammars/manifest.json`. Each
+        // grammar target compiles only its generated `parser.c` (+
+        // `scanner.c` where the grammar has an external scanner); the
+        // `CTreeSitter` runtime target compiles only `lib.c`, which
+        // `#include`s the rest of `lib/src` as a single translation unit —
+        // see the `sources:` restriction below, which is what keeps SPM from
+        // also trying to compile those files individually.
+        .target(
+            name: "CTreeSitter",
+            path: "Sources/CTreeSitter",
+            sources: ["lib.c"],
+            publicHeadersPath: "include"
+        ),
+        .target(
+            name: "CTreeSitterSwift",
+            dependencies: ["CTreeSitter"],
+            path: "Sources/CTreeSitterSwift",
+            sources: ["src/parser.c", "src/scanner.c"],
+            publicHeadersPath: "include",
+            cSettings: [.headerSearchPath("src")]
+        ),
+        .target(
+            name: "CTreeSitterCSharp",
+            dependencies: ["CTreeSitter"],
+            path: "Sources/CTreeSitterCSharp",
+            sources: ["src/parser.c", "src/scanner.c"],
+            publicHeadersPath: "include",
+            cSettings: [.headerSearchPath("src")]
+        ),
+        .target(
+            name: "CTreeSitterJavaScript",
+            dependencies: ["CTreeSitter"],
+            path: "Sources/CTreeSitterJavaScript",
+            sources: ["src/parser.c", "src/scanner.c"],
+            publicHeadersPath: "include",
+            cSettings: [.headerSearchPath("src")]
+        ),
+        .target(
+            name: "CTreeSitterTypeScript",
+            dependencies: ["CTreeSitter"],
+            path: "Sources/CTreeSitterTypeScript",
+            sources: ["typescript/src/parser.c", "typescript/src/scanner.c"],
+            publicHeadersPath: "include",
+            // The vendored `common/scanner.h` shared with tsx/ (not vendored
+            // here — tier-1 scope is `.ts` only) does `#include
+            // "tree_sitter/parser.h"` with no relative prefix, so (unlike
+            // the other three grammars, whose own scanner.c sits directly
+            // beside their `tree_sitter/` dir and resolves it via the
+            // plain same-directory quote-include rule) this one needs the
+            // explicit search path.
+            cSettings: [.headerSearchPath("typescript/src")]
+        ),
         .executableTarget(
             name: "MLXCoder",
             dependencies: [
@@ -34,8 +88,20 @@ let package = Package(
                 .product(name: "SwiftCoderTUI", package: "swift-coder-tui"),
                 .product(name: "SwiftSoup", package: "SwiftSoup"),
                 "CSQLite",
+                "CTreeSitter",
+                "CTreeSitterSwift",
+                "CTreeSitterCSharp",
+                "CTreeSitterJavaScript",
+                "CTreeSitterTypeScript",
             ],
             path: "Sources",
+            exclude: [
+                "CTreeSitter",
+                "CTreeSitterSwift",
+                "CTreeSitterCSharp",
+                "CTreeSitterJavaScript",
+                "CTreeSitterTypeScript",
+            ],
             linkerSettings: [
                 .linkedLibrary("sqlite3")
             ]
@@ -73,6 +139,11 @@ let package = Package(
             name: "AgentCoreTests",
             dependencies: ["MLXCoder"],
             path: "Tests/AgentCoreTests"
+        ),
+        .testTarget(
+            name: "CodeGraphTests",
+            dependencies: ["MLXCoder"],
+            path: "Tests/CodeGraphTests"
         ),
     ]
 )

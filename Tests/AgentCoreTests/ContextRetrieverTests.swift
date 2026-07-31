@@ -15,14 +15,15 @@ final class ContextRetrieverTests: XCTestCase {
     /// the LLM stages degrade to their fallbacks — perfect for deterministic tests.
     private func makeRetriever(
         permissions: PermissionEngine,
-        config: ContextRetrievalConfig = ContextRetrievalConfig(enabled: true)
+        config: ContextRetrievalConfig = ContextRetrievalConfig(enabled: true),
+        graphStore: CodeGraphStore? = nil
     ) -> ContextRetriever {
         let llm = LLMClient(
             backend: .local(modelPath: "/models/none"),
             container: nil,
             baseConfig: GenerationEngine.Config()
         )
-        return ContextRetriever(llm: llm, permissions: permissions, config: config)
+        return ContextRetriever(llm: llm, permissions: permissions, config: config, graphStore: graphStore)
     }
 
     private func makeTempWorkspace() throws -> URL {
@@ -31,6 +32,16 @@ final class ContextRetrieverTests: XCTestCase {
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         // Resolve symlinks so paths line up with PermissionEngine's standardized root.
         return URL(filePath: dir.resolvingSymlinksInPath().path)
+    }
+
+    /// A freshly-initialized, empty `CodeGraphStore` backed by a temp file —
+    /// caller is responsible for closing it and removing `dir`.
+    private func makeGraphStore() async throws -> (store: CodeGraphStore, dir: String) {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("ctxretriever-graph-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let store = CodeGraphStore(dbPath: dir.appendingPathComponent("codegraph.db").path)
+        try await store.initialize()
+        return (store, dir.path)
     }
 
     // MARK: - Gate (Stage 0)
@@ -142,6 +153,123 @@ final class ContextRetrieverTests: XCTestCase {
         ]
         let candidates = retriever.aggregateCandidates(from: raw, cap: 10)
         XCTAssertEqual(candidates.map(\.path), ["Keep.swift"])
+    }
+
+    // MARK: - Stage 2 graph-neighbor fusion (M4, plan §12.1)
+
+    func testExtractSymbolTokens_dedupesAndDropsShortTokens() {
+        let tokens = ContextRetriever.extractSymbolTokens(from: ["Foo.Foo a bb ccc"], cap: 10)
+        XCTAssertEqual(tokens, ["Foo", "ccc"])
+    }
+
+    func testExtractSymbolTokens_respectsCap() {
+        let tokens = ContextRetriever.extractSymbolTokens(
+            from: ["AAA BBB CCC DDD EEE FFF GGG HHH"], cap: 3
+        )
+        XCTAssertEqual(tokens.count, 3)
+    }
+
+    func testGatherGraphNeighborHits_nilStoreIsNoOp() async {
+        let permissions = PermissionEngine(workspaceRoot: "/tmp/ws")
+        let retriever = makeRetriever(permissions: permissions)
+        let hits = await retriever.gatherGraphNeighborHits(subqueries: ["Foo"])
+        XCTAssertTrue(hits.isEmpty, "no graphStore configured ⇒ byte-identical to pre-M4 behavior")
+    }
+
+    func testGatherGraphNeighborHits_emptyGraphIsNoOp() async throws {
+        let (store, dir) = try await makeGraphStore()
+        defer { Task { await store.close(); try? FileManager.default.removeItem(atPath: dir) } }
+        let permissions = PermissionEngine(workspaceRoot: "/tmp/ws")
+        let retriever = makeRetriever(permissions: permissions, graphStore: store)
+        let hits = await retriever.gatherGraphNeighborHits(subqueries: ["Foo"])
+        XCTAssertTrue(hits.isEmpty, "empty graph ⇒ no fusion hits")
+    }
+
+    func testGatherGraphNeighborHits_findsSymbolAndStructuralNeighborFiles() async throws {
+        let (store, dir) = try await makeGraphStore()
+        defer { Task { await store.close(); try? FileManager.default.removeItem(atPath: dir) } }
+
+        let baseExtraction = LexicalSymbolExtractor().extract(path: "Base.swift", source: "protocol Greeter {\n}\n")
+        _ = try await store.upsertFile(
+            path: "Base.swift", contentHash: "h1", language: "swift",
+            symbols: baseExtraction.symbols, edges: baseExtraction.edges
+        )
+        let fooExtraction = LexicalSymbolExtractor().extract(path: "Foo.swift", source: "class Foo: Greeter {\n}\n")
+        _ = try await store.upsertFile(
+            path: "Foo.swift", contentHash: "h2", language: "swift",
+            symbols: fooExtraction.symbols, edges: fooExtraction.edges
+        )
+
+        let permissions = PermissionEngine(workspaceRoot: "/tmp/ws")
+        let retriever = makeRetriever(permissions: permissions, graphStore: store)
+        let hits = await retriever.gatherGraphNeighborHits(subqueries: ["Foo"])
+        let paths = Set(hits.map(\.path))
+        XCTAssertTrue(paths.contains("Foo.swift"), "the matched symbol's own file is included")
+        XCTAssertTrue(paths.contains("Base.swift"), "its structural (implements) neighbor's file is included")
+    }
+
+    func testGatherGraphNeighborHits_respectsIgnoredPaths() async throws {
+        let (store, dir) = try await makeGraphStore()
+        defer { Task { await store.close(); try? FileManager.default.removeItem(atPath: dir) } }
+        let extraction = LexicalSymbolExtractor().extract(path: "Secret.generated.swift", source: "class Secret {\n}\n")
+        _ = try await store.upsertFile(
+            path: "Secret.generated.swift", contentHash: "h1", language: "swift",
+            symbols: extraction.symbols, edges: extraction.edges
+        )
+        let permissions = PermissionEngine(workspaceRoot: "/tmp/ws", ignoredPathPatterns: ["*.generated.swift"])
+        let retriever = makeRetriever(permissions: permissions, graphStore: store)
+        let hits = await retriever.gatherGraphNeighborHits(subqueries: ["Secret"])
+        XCTAssertTrue(hits.isEmpty, "ignored paths must never surface via graph fusion")
+    }
+
+    func testGatherCandidates_mergesGraphOnlyNeighborNotFoundLexically() async throws {
+        let ws = try makeTempWorkspace()
+        defer { try? FileManager.default.removeItem(at: ws) }
+        try "protocol Greeter {}\n".write(to: ws.appendingPathComponent("Base.swift"), atomically: true, encoding: .utf8)
+        try "class Foo: Greeter {}\n".write(to: ws.appendingPathComponent("Foo.swift"), atomically: true, encoding: .utf8)
+
+        let (store, dir) = try await makeGraphStore()
+        defer { Task { await store.close(); try? FileManager.default.removeItem(atPath: dir) } }
+        let baseExtraction = LexicalSymbolExtractor().extract(path: "Base.swift", source: "protocol Greeter {}\n")
+        _ = try await store.upsertFile(
+            path: "Base.swift", contentHash: "h1", language: "swift",
+            symbols: baseExtraction.symbols, edges: baseExtraction.edges
+        )
+        let fooExtraction = LexicalSymbolExtractor().extract(path: "Foo.swift", source: "class Foo: Greeter {}\n")
+        _ = try await store.upsertFile(
+            path: "Foo.swift", contentHash: "h2", language: "swift",
+            symbols: fooExtraction.symbols, edges: fooExtraction.edges
+        )
+
+        let permissions = PermissionEngine(workspaceRoot: ws.path)
+        let retriever = makeRetriever(permissions: permissions, graphStore: store)
+        let candidates = await retriever.gatherCandidates(subqueries: ["Foo"])
+        XCTAssertTrue(
+            candidates.map(\.path).contains("Base.swift"),
+            "Base.swift has no lexical hit for 'Foo' — it only surfaces via graph-neighbor fusion"
+        )
+    }
+
+    func testGatherCandidates_respectsMaxCandidatesWithGraphHits() async throws {
+        let ws = try makeTempWorkspace()
+        defer { try? FileManager.default.removeItem(at: ws) }
+        let (store, dir) = try await makeGraphStore()
+        defer { Task { await store.close(); try? FileManager.default.removeItem(atPath: dir) } }
+        for i in 0..<5 {
+            let name = "S\(i).swift"
+            let source = "class Sym\(i) {}\n"
+            try source.write(to: ws.appendingPathComponent(name), atomically: true, encoding: .utf8)
+            let extraction = LexicalSymbolExtractor().extract(path: name, source: source)
+            _ = try await store.upsertFile(path: name, contentHash: "h\(i)", language: "swift", symbols: extraction.symbols, edges: extraction.edges)
+        }
+        let permissions = PermissionEngine(workspaceRoot: ws.path)
+        let retriever = makeRetriever(
+            permissions: permissions,
+            config: ContextRetrievalConfig(enabled: true, maxCandidates: 2),
+            graphStore: store
+        )
+        let candidates = await retriever.gatherCandidates(subqueries: ["Sym0 Sym1 Sym2 Sym3 Sym4"])
+        XCTAssertLessThanOrEqual(candidates.count, 2, "maxCandidates cap still respected with graph fusion merged in")
     }
 
     // MARK: - Stage 3 answer parsing

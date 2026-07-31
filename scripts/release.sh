@@ -163,6 +163,20 @@ for tool in swift git xcodebuild; do
 done
 log_ok "Required tools present (swift, git, xcodebuild)"
 
+# Vendored tree-sitter runtime + tier-1 grammars must match grammars/manifest.json
+# (plan §13.2) — fast, offline, no network. Fails the build on any hash drift
+# between what's pinned and what's actually vendored under Sources/CTreeSitter*/.
+if [[ -x "${REPO_ROOT}/scripts/sync-grammars.sh" ]]; then
+  log_info "Checking vendored tree-sitter grammars against grammars/manifest.json…"
+  if ! "${REPO_ROOT}/scripts/sync-grammars.sh" --check; then
+    log_error "Grammar manifest check failed. Run scripts/sync-grammars.sh to re-vendor, or investigate the drift."
+    exit 1
+  fi
+  log_ok "Vendored grammars match grammars/manifest.json"
+else
+  log_warn "scripts/sync-grammars.sh not found or not executable — skipping grammar manifest check"
+fi
+
 # Must be on main branch (skipped with --build-only since no git operations occur)
 if ! $BUILD_ONLY; then
   CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)

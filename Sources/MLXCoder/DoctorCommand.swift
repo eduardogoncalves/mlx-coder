@@ -32,6 +32,9 @@ struct DoctorCommand: AsyncParsableCommand {
     @Flag(name: .long, help: "Treat warnings as failures (non-zero exit code when warn/fail checks exist)")
     var strict: Bool = false
 
+    @Flag(name: .long, help: "Force a full code graph rebuild (drop + re-scan the workspace) before reporting its health")
+    var rebuildGraph: Bool = false
+
     @OptionGroup var testAbsorber: TestAbsorber
 
     mutating func run() async throws {
@@ -70,6 +73,13 @@ struct DoctorCommand: AsyncParsableCommand {
 
         let memoryCheck = await memoryDoctorCheck()
         payload = appendDoctorCheck(payload, check: memoryCheck)
+
+        let codeGraphCheck = await codeGraphDoctorCheck(
+            workspaceRoot: absWorkspace,
+            runtimeConfig: runtimeConfig,
+            rebuild: rebuildGraph
+        )
+        payload = appendDoctorCheck(payload, check: codeGraphCheck)
 
         #if canImport(Speech)
         let voiceCheck = voiceDoctorCheck()
@@ -174,6 +184,62 @@ func memoryDoctorCheck() async -> DoctorCheck {
     }
 }
 
+
+// MARK: - Code Graph Doctor Check
+
+/// Reports the health of the auto-recorded code graph (`Sources/CodeGraph/`).
+/// When disabled (the default), this is a pass-through — the feature ships
+/// off until opted in via `codeGraph.enabled` in config.json. When `rebuild`
+/// is set, forces a full drop + re-scan (synchronous — waits for the result)
+/// before reporting stats, mirroring `doctor --rebuild-graph`.
+func codeGraphDoctorCheck(
+    workspaceRoot: String,
+    runtimeConfig: RuntimeConfig,
+    rebuild: Bool
+) async -> DoctorCheck {
+    let config = runtimeConfig.codeGraph ?? .disabled
+    guard config.enabled else {
+        if rebuild {
+            return DoctorCheck(name: "code-graph", status: .warn, message: "codeGraph.enabled=false — nothing to rebuild. Set it in ~/.mlx-coder/config.json to use the code graph.")
+        }
+        return DoctorCheck(name: "code-graph", status: .pass, message: "Code graph disabled (codeGraph.enabled=false).")
+    }
+
+    let permissions = PermissionEngine(workspaceRoot: workspaceRoot, ignoredPathPatterns: loadIgnorePatterns(workspaceRoot: workspaceRoot))
+    let store = CodeGraphStore()
+    let indexer = CodeGraphIndexer(store: store, permissions: permissions, config: config)
+
+    if rebuild {
+        let status = await indexer.rebuildSynchronously(root: workspaceRoot)
+        if let error = status.lastError {
+            return DoctorCheck(name: "code-graph", status: .fail, message: "Rebuild failed: \(error)")
+        }
+        do {
+            let stats = try await store.stats()
+            return DoctorCheck(
+                name: "code-graph", status: .pass,
+                message: "Rebuilt: \(stats.fileCount) file(s), \(stats.symbolCount) symbol(s), \(stats.edgeCount) edge(s) (\(stats.unresolvedEdgeCount) unresolved)."
+            )
+        } catch {
+            return DoctorCheck(name: "code-graph", status: .warn, message: "Rebuilt but failed to read stats: \(error.localizedDescription)")
+        }
+    }
+
+    await indexer.bootstrap()
+    do {
+        let stats = try await store.stats()
+        let dbSizeMB = Double(stats.dbSizeBytes) / 1_000_000.0
+        if stats.fileCount == 0 {
+            return DoctorCheck(name: "code-graph", status: .warn, message: "Code graph enabled but empty — run 'mlx-coder doctor --rebuild-graph' or start a session to trigger the initial scan.")
+        }
+        return DoctorCheck(
+            name: "code-graph", status: .pass,
+            message: "Code graph accessible: \(stats.fileCount) file(s), \(stats.symbolCount) symbol(s), \(stats.edgeCount) edge(s), \(String(format: "%.2f", dbSizeMB)) MB."
+        )
+    } catch {
+        return DoctorCheck(name: "code-graph", status: .warn, message: "Code graph not accessible: \(error.localizedDescription)")
+    }
+}
 
 func lspDoctorCheck(isDotnetWorkspace: Bool, csharpLSAvailable: Bool) -> DoctorCheck {
     if !isDotnetWorkspace {

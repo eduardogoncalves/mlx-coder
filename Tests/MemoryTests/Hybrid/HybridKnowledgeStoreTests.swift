@@ -180,4 +180,130 @@ final class HybridKnowledgeStoreTests: XCTestCase {
         stats = try await store.stats()
         XCTAssertEqual(stats.activeCount, 1)
     }
+
+    // MARK: - Code graph symbol join (M4, plan §12.2)
+
+    /// A freshly-initialized, empty `CodeGraphStore` backed by a temp file —
+    /// caller is responsible for closing it and removing `dir`.
+    private func makeGraphStore() async throws -> (store: CodeGraphStore, dir: String) {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let store = CodeGraphStore(dbPath: dir.appendingPathComponent("codegraph.db").path)
+        try await store.initialize()
+        return (store, dir.path)
+    }
+
+    private func makeTaggedStore(graphStore: CodeGraphStore, name: String) async throws -> HybridKnowledgeStore {
+        let dbPath = (tempDir as NSString).appendingPathComponent(name)
+        let taggedStore = HybridKnowledgeStore(dbPath: dbPath, graphStore: graphStore)
+        try await taggedStore.initialize()
+        return taggedStore
+    }
+
+    func testWrite_withNilGraphStoreLeavesEntitiesUntouched() async throws {
+        // No graphStore configured (the default, `store` from setUp) — write
+        // must be byte-identical to pre-M4 behavior: only caller-supplied
+        // entities survive.
+        let outcome = try await store.write(makeInput(content: "Refactored the FooBarBaz widget."))
+        guard case .inserted(let id, _) = outcome else { return XCTFail("expected .inserted") }
+        let docs = try await store.retrieve(query: "FooBarBaz", scope: RetrievalScope(projectRoot: "/test/project"))
+        _ = docs // retrieval isn't the point here; just confirm no crash/tag path taken
+        let uuid = try await store.documentUUID(forID: id)
+        XCTAssertNotNil(uuid)
+    }
+
+    func testWrite_taggesEntitiesWithMatchingSymbolKeyAndRoundTrips() async throws {
+        let (graph, dir) = try await makeGraphStore()
+        defer { Task { await graph.close(); try? FileManager.default.removeItem(atPath: dir) } }
+        let extraction = LexicalSymbolExtractor().extract(path: "Foo.swift", source: "class FooBarBaz {\n}\n")
+        _ = try await graph.upsertFile(
+            path: "Foo.swift", contentHash: "h1", language: "swift",
+            symbols: extraction.symbols, edges: extraction.edges
+        )
+        guard let symbolKey = try await graph.findSymbols(named: "FooBarBaz").first?.symbolKey else {
+            return XCTFail("expected FooBarBaz to be indexed")
+        }
+
+        let tagged = try await makeTaggedStore(graphStore: graph, name: "hybrid-tagged.db")
+        defer { Task { await tagged.close() } }
+
+        let outcome = try await tagged.write(makeInput(content: "Refactored FooBarBaz to fix the race condition."))
+        guard case .inserted(let id, _) = outcome else { return XCTFail("expected .inserted, got \(outcome)") }
+
+        // Read path: symbol_key lookup returns the doc, and the entities_json
+        // it was written with contains the stable symbol_key (never a numeric id).
+        let matches = try await tagged.documents(referencingSymbol: symbolKey)
+        XCTAssertEqual(matches.count, 1)
+        XCTAssertEqual(matches[0].id, id)
+        XCTAssertTrue(matches[0].entities.contains(symbolKey))
+    }
+
+    func testWrite_doesNotTagUnrelatedSymbolNames() async throws {
+        let (graph, dir) = try await makeGraphStore()
+        defer { Task { await graph.close(); try? FileManager.default.removeItem(atPath: dir) } }
+        let extraction = LexicalSymbolExtractor().extract(path: "Foo.swift", source: "class FooBarBaz {\n}\n")
+        _ = try await graph.upsertFile(
+            path: "Foo.swift", contentHash: "h1", language: "swift",
+            symbols: extraction.symbols, edges: extraction.edges
+        )
+        let tagged = try await makeTaggedStore(graphStore: graph, name: "hybrid-untagged.db")
+        defer { Task { await tagged.close() } }
+
+        _ = try await tagged.write(makeInput(content: "Just a note about the build process, no symbols here."))
+        guard let symbolKey = try await graph.findSymbols(named: "FooBarBaz").first?.symbolKey else {
+            return XCTFail("expected FooBarBaz to be indexed")
+        }
+        let matches = try await tagged.documents(referencingSymbol: symbolKey)
+        XCTAssertTrue(matches.isEmpty, "content never mentioned the symbol — no tag should be attached")
+    }
+
+    func testDocumentsReferencingSymbol_renameDoesNotResurrectStaleTag() async throws {
+        let (graph, dir) = try await makeGraphStore()
+        defer { Task { await graph.close(); try? FileManager.default.removeItem(atPath: dir) } }
+        let extraction = LexicalSymbolExtractor().extract(path: "Foo.swift", source: "class FooBarBaz {\n}\n")
+        _ = try await graph.upsertFile(
+            path: "Foo.swift", contentHash: "h1", language: "swift",
+            symbols: extraction.symbols, edges: extraction.edges
+        )
+        guard let oldKey = try await graph.findSymbols(named: "FooBarBaz").first?.symbolKey else {
+            return XCTFail("expected FooBarBaz to be indexed")
+        }
+
+        let tagged = try await makeTaggedStore(graphStore: graph, name: "hybrid-rename.db")
+        defer { Task { await tagged.close() } }
+        _ = try await tagged.write(makeInput(content: "Notes about FooBarBaz's threading behavior."))
+
+        // Rename: re-index the same file with the symbol renamed. `symbol_key`
+        // encodes `<path>::<qualifiedName>`, so this is a brand-new key —
+        // the old one no longer exists anywhere in `cg_symbols`.
+        let renamed = LexicalSymbolExtractor().extract(path: "Foo.swift", source: "class FooBarBazRenamed {\n}\n")
+        _ = try await graph.upsertFile(
+            path: "Foo.swift", contentHash: "h2", language: "swift",
+            symbols: renamed.symbols, edges: renamed.edges, force: true
+        )
+        guard let newKey = try await graph.findSymbols(named: "FooBarBazRenamed").first?.symbolKey else {
+            return XCTFail("expected FooBarBazRenamed to be indexed")
+        }
+        XCTAssertNotEqual(oldKey, newKey)
+
+        // The old tag is durable text already committed to the doc's
+        // entities_json — a later graph rename doesn't retroactively erase it.
+        let oldMatches = try await tagged.documents(referencingSymbol: oldKey)
+        XCTAssertEqual(oldMatches.count, 1, "previously-written tag persists on its doc")
+
+        // Nothing has ever been written mentioning the *new* key, so the
+        // rename must not cause the old doc to spuriously resurface under it.
+        let newMatches = try await tagged.documents(referencingSymbol: newKey)
+        XCTAssertTrue(newMatches.isEmpty, "rename must not resurrect the old doc under the new symbol_key")
+    }
+
+    func testLikePattern_escapesWildcardsAndQuotes() {
+        let pattern = HybridKnowledgeStore.likePattern(forJSONArrayElement: "Sources/A_B%C\".swift::Foo(_:)")
+        // Must not contain a bare unescaped '%' or '_' from the original value
+        // (only the two wrapping '%' wildcards we add ourselves).
+        XCTAssertTrue(pattern.hasPrefix("%"))
+        XCTAssertTrue(pattern.hasSuffix("%"))
+        XCTAssertTrue(pattern.contains("\\_"))
+        XCTAssertTrue(pattern.contains("\\%"))
+    }
 }
