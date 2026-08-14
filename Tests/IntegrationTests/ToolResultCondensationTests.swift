@@ -419,4 +419,24 @@ final class ToolResultCondensationTests: XCTestCase {
         )
         XCTAssertEqual(message, shortContent)
     }
+
+    func testBudgetTrimmedReadMessageAcceptsACustomReasonForNonBudgetTrims() {
+        // A static-threshold trim (a file just over the per-call cap, no
+        // live context pressure involved) must still get the same
+        // start_line continuation guidance as a budget-forced trim — only
+        // the stated reason differs, since "would exceed the remaining
+        // context window" would be false for a static-threshold trim.
+        let manyLines = (1...100).map { "line \($0)" }.joined(separator: "\n")
+        let message = ToolResultCondensationPolicy.budgetTrimmedReadMessage(
+            toolName: "read_file",
+            raw: manyLines,
+            headLines: 30,
+            estimatedTokens: 2500,
+            reason: "reading it in full would exceed this tool's per-call output limit"
+        )
+
+        XCTAssertTrue(message.contains("this tool's per-call output limit"))
+        XCTAssertFalse(message.contains("remaining context window"))
+        XCTAssertTrue(message.lowercased().contains("do not re-read this file in full"))
+    }
 }

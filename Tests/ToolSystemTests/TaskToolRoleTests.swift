@@ -257,4 +257,38 @@ final class TaskToolRoleTests: XCTestCase {
         // whether triggered directly or via a delegated planner sub-agent.
         XCTAssertFalse(TaskTool.isMutatingTaskCall(arguments: ["profile": "planner", "tools": ["plan_file"]]))
     }
+
+    // MARK: - toolResultLooksTruncated (used to detect a trailing-fragment
+    // final response right after a truncated tool result — see the
+    // else-if branch in TaskTool.run beside the empty-response nudge).
+
+    func testToolResultLooksTruncatedDetectsBoundedRawFallbackMarker() {
+        let message = Message(
+            role: .tool,
+            content: "[Tool output could not be summarized; bounded raw fallback]\nTool: read_file\n...\n[... 1124 characters omitted ...]"
+        )
+        XCTAssertTrue(TaskTool.toolResultLooksTruncated(message))
+    }
+
+    func testToolResultLooksTruncatedDetectsBudgetGuardMarker() {
+        let message = Message(role: .tool, content: "[Context budget guard] This result has 400 lines...")
+        XCTAssertTrue(TaskTool.toolResultLooksTruncated(message))
+    }
+
+    func testToolResultLooksTruncatedDetectsReadFileContinuationMarker() {
+        let message = Message(role: .tool, content: "[Read lines 1-200 of 900. File continues — call read_file with start_line: 201 to read the next section.]")
+        XCTAssertTrue(TaskTool.toolResultLooksTruncated(message))
+    }
+
+    func testToolResultLooksTruncatedFalseForOrdinaryResult() {
+        let message = Message(role: .tool, content: "using System;\nnamespace Foo { }")
+        XCTAssertFalse(TaskTool.toolResultLooksTruncated(message))
+    }
+
+    func testToolResultLooksTruncatedFalseForNonToolRole() {
+        // The marker text alone must not match on a non-tool message — only
+        // an actual tool result can have been truncated.
+        let message = Message(role: .assistant, content: "characters omitted, as I was saying")
+        XCTAssertFalse(TaskTool.toolResultLooksTruncated(message))
+    }
 }

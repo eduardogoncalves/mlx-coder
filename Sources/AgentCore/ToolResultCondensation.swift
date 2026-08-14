@@ -212,7 +212,8 @@ enum ToolResultCondensationPolicy {
         toolName: String,
         raw: String,
         headLines: Int,
-        estimatedTokens: Int
+        estimatedTokens: Int,
+        reason: String = "reading it in full would exceed the remaining context window"
     ) -> String {
         let lines = raw.isEmpty ? [] : raw.components(separatedBy: "\n")
         let totalLines = lines.count
@@ -224,7 +225,7 @@ enum ToolResultCondensationPolicy {
         }
         let kept = lines.prefix(headLines).joined(separator: "\n")
         return """
-        [Context budget guard] This result has \(totalLines) lines (~\(estimatedTokens) tokens estimated) — reading it in full would exceed the remaining context window, so only the first \(headLines) lines are shown below.
+        [Context budget guard] This result has \(totalLines) lines (~\(estimatedTokens) tokens estimated) — \(reason), so only the first \(headLines) lines are shown below.
         Tool: \(toolName)
         - Use these lines to understand the file's structure (imports, top-level declarations, overall shape).
         - Narrow down with grep / code_search / glob to find the specific section you need, then call \(toolName) again with a specific start_line/end_line range.

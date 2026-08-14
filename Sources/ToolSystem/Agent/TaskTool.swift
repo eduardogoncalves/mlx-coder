@@ -870,6 +870,25 @@ public struct TaskTool: Tool {
     /// Prefix identifying the status line in a digest (see `makeSubagentDigest`).
     static let statusLinePrefix = "status: "
 
+    /// Markers used by every truncated/bounded-fallback tool-result shape in
+    /// the codebase — see `ToolResultCondensationPolicy.boundedFallbackRawMessage`/
+    /// `budgetTrimmedReadMessage`, `ReadFileTool`'s own line-range continuation
+    /// marker, and `WebFetchTool`'s offset marker. Used by
+    /// `finalResponseLooksLikeTrailingFragment` to recognize when a sub-agent's
+    /// last tool call got a truncated result, since that's the situation most
+    /// likely to produce a dangling non-answer instead of a real conclusion.
+    private static let truncationMarkers = [
+        "characters omitted", "File continues —", "[Context budget guard]",
+        "could not be summarized", "Tool output truncated",
+    ]
+
+    /// Whether a tool-role message's content shows one of the known
+    /// truncated/bounded-fallback shapes.
+    static func toolResultLooksTruncated(_ message: Message) -> Bool {
+        guard message.role == .tool else { return false }
+        return truncationMarkers.contains { message.content.contains($0) }
+    }
+
     /// Parses the `status:` line out of a digest (`"success"`/`"partial"`).
     /// Returns `nil` when the digest has no status line (e.g. a hard-error
     /// `ToolResult` that never reached `makeSubagentDigest`). The workflow
@@ -1332,6 +1351,32 @@ public struct TaskTool: Tool {
                 let followUpPrompt = responseMode == "raw"
                     ? "You stopped without writing a final response. Do not call any more tools — respond now with the exact, complete output requested (e.g. the full stdout), verbatim. Do NOT summarize, truncate, paraphrase, or add commentary."
                     : "You stopped without writing a final summary. Do not call any more tools — respond now with a short plain-text report (2-6 sentences) of what you did and what you found or produced."
+                try? await subAgent.processUserMessage(followUpPrompt)
+                subMessages = await subAgent.history.messages
+                finalAssistantResponse = subMessages.last(where: { $0.role == .assistant })?.content
+                trimmedFinalResponse = finalAssistantResponse?.trimmingCharacters(in: .whitespacesAndNewlines)
+            } else if let lastToolMessage = subMessages.last(where: { $0.role == .tool }),
+                TaskTool.toolResultLooksTruncated(lastToolMessage),
+                (trimmedFinalResponse?.count ?? 0) < 220 {
+                // A short final message that immediately follows a truncated
+                // tool result is very likely a trailing fragment, not a real
+                // conclusion — e.g. "The file is truncated. Let's read
+                // full." with no tool call. Recognized structurally (short +
+                // right after a truncation marker), not by matching specific
+                // wording, since phrasing varies by model. Observed for real
+                // in two separate `/fix` sub-agent runs that both stalled on
+                // the exact same truncated `read_file` result instead of
+                // calling it again with `start_line`.
+                //
+                // Unlike the empty-response nudge above, this one explicitly
+                // invites another tool call rather than demanding a summary
+                // right now — the sub-agent hasn't actually finished the
+                // task, and forcing a "short plain-text report" out of it
+                // here would just manufacture a confident-sounding stub
+                // (this is exactly how a prior `/fix` executor stage
+                // reported a fabricated fix after making zero tool calls).
+                frontend.emitStatus("Sub-agent trailed off right after a truncated tool result without finishing; nudging it to continue.", severity: .warning)
+                let followUpPrompt = "Your last tool result was truncated, and your previous message did not finish the task. If you still need the rest of it, call the same tool again (e.g. read_file with start_line set past what you already saw) — do not just describe what you plan to do. Once you actually have what you need, give your final summary."
                 try? await subAgent.processUserMessage(followUpPrompt)
                 subMessages = await subAgent.history.messages
                 finalAssistantResponse = subMessages.last(where: { $0.role == .assistant })?.content

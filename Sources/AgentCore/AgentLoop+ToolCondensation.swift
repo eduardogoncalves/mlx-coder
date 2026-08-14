@@ -130,18 +130,28 @@ extension AgentLoop {
             }
 
             let fallback: String
-            if budgetForcedTrim, ToolResultCondensationPolicy.readGuardTools.contains(toolName) {
-                // Budget-forced trim on a read-style tool: use the head-N
-                // "read guard" message (structure slice + explicit "don't
-                // re-read in full" steering) rather than the generic bounded
-                // fallback below — only for the NEW trigger path, so results
-                // that already crossed the static threshold keep today's
-                // existing message shape unchanged.
+            if ToolResultCondensationPolicy.readGuardTools.contains(toolName) {
+                // Any trim on a read-style tool — budget-forced or a plain
+                // static-threshold overflow — uses the head-N "read guard"
+                // message (structure slice + explicit "call again with
+                // start_line" steering) rather than the generic bounded
+                // fallback below. The generic fallback's blind char-count cut
+                // (`[... N characters omitted ...]`) gives read_file/read_many
+                // no way back to the rest of the file — small models that hit
+                // it on an ordinary-sized file (no live budget pressure
+                // needed, just a file over the static cap) reliably stall
+                // mid-thought instead of paging further, since nothing tells
+                // them `start_line` exists. See the two tracecotton.core
+                // sub-agent runs that both hung on this exact message shape.
+                let reason = budgetForcedTrim
+                    ? "reading it in full would exceed the remaining context window"
+                    : "reading it in full would exceed this tool's per-call output limit"
                 fallback = ToolResultCondensationPolicy.budgetTrimmedReadMessage(
                     toolName: toolName,
                     raw: rawToolResponse,
                     headLines: ToolResultCondensationPolicy.readGuardHeadLines,
-                    estimatedTokens: beforeTokens
+                    estimatedTokens: beforeTokens,
+                    reason: reason
                 )
             } else {
                 fallback = ToolResultCondensationPolicy.boundedFallbackRawMessage(
