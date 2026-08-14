@@ -101,6 +101,172 @@ final class EditFileToolTests: XCTestCase {
                       "error should say old_text must be unique")
     }
 
+    // MARK: - CRLF tolerance: models generate "\n"-only old_text/new_text, but
+    // Windows-authored/.NET repos routinely have CRLF files on disk. edit_file
+    // must still match and must not leave the edited region's line endings
+    // inconsistent with the rest of the (untouched) CRLF file.
+
+    func testMultiLineOldTextMatchesAcrossCRLFFile() async throws {
+        let workspace = try makeTempWorkspace()
+        defer { try? FileManager.default.removeItem(at: workspace) }
+
+        try write("line1\r\nfoo\r\nbar\r\nline4\r\n", named: "file.txt", in: workspace)
+
+        let tool = EditFileTool(permissions: PermissionEngine(workspaceRoot: workspace.path))
+        let result = try await tool.execute(arguments: [
+            "path": "file.txt",
+            "old_text": "foo\nbar",
+            "new_text": "foo\nbaz\nbar"
+        ])
+
+        XCTAssertFalse(result.isError, "old_text with \\n line endings should match a CRLF file: \(result.content)")
+
+        let written = try String(contentsOf: workspace.appendingPathComponent("file.txt"), encoding: .utf8)
+        XCTAssertEqual(written, "line1\r\nfoo\r\nbaz\r\nbar\r\nline4\r\n",
+                       "inserted new_text should adopt the file's CRLF convention, and untouched lines must stay byte-identical")
+    }
+
+    func testSingleLineOldTextStillMatchesExactlyOnCRLFFile() async throws {
+        // A single-line snippet doesn't straddle a line ending, so the plain
+        // exact-match path (not the CRLF fallback) should already handle it.
+        let workspace = try makeTempWorkspace()
+        defer { try? FileManager.default.removeItem(at: workspace) }
+
+        try write("line1\r\nfoo\r\nline3\r\n", named: "file.txt", in: workspace)
+
+        let tool = EditFileTool(permissions: PermissionEngine(workspaceRoot: workspace.path))
+        let result = try await tool.execute(arguments: [
+            "path": "file.txt",
+            "old_text": "foo",
+            "new_text": "bar"
+        ])
+
+        XCTAssertFalse(result.isError)
+        let written = try String(contentsOf: workspace.appendingPathComponent("file.txt"), encoding: .utf8)
+        XCTAssertEqual(written, "line1\r\nbar\r\nline3\r\n")
+    }
+
+    func testMultiLineOldTextAmbiguousAcrossCRLFFileReturnsUniqueError() async throws {
+        let workspace = try makeTempWorkspace()
+        defer { try? FileManager.default.removeItem(at: workspace) }
+
+        try write("foo\r\nbar\r\nfoo\r\nbar\r\n", named: "file.txt", in: workspace)
+
+        let tool = EditFileTool(permissions: PermissionEngine(workspaceRoot: workspace.path))
+        let result = try await tool.execute(arguments: [
+            "path": "file.txt",
+            "old_text": "foo\nbar",
+            "new_text": "baz"
+        ])
+
+        XCTAssertTrue(result.isError)
+        XCTAssertTrue(result.content.contains("2"))
+        XCTAssertTrue(result.content.contains("unique"))
+    }
+
+    func testOldTextGenuinelyMissingFromCRLFFileStillReturnsNotFoundError() async throws {
+        let workspace = try makeTempWorkspace()
+        defer { try? FileManager.default.removeItem(at: workspace) }
+
+        try write("line1\r\nfoo\r\nline3\r\n", named: "file.txt", in: workspace)
+
+        let tool = EditFileTool(permissions: PermissionEngine(workspaceRoot: workspace.path))
+        let result = try await tool.execute(arguments: [
+            "path": "file.txt",
+            "old_text": "does\nnot\nexist",
+            "new_text": "replacement"
+        ])
+
+        XCTAssertTrue(result.isError)
+        XCTAssertTrue(result.content.lowercased().contains("not found"))
+    }
+
+    // MARK: - Unicode lookalike tolerance: models routinely "typographically
+    // autocorrect" curly quotes, em/en dashes, and non-breaking spaces when
+    // reproducing text from memory, even though the source file only ever
+    // contains plain ASCII. Ported from qwen-code's UNICODE_EQUIVALENT_MAP.
+
+    func testCurlyQuotesInOldTextMatchStraightQuotesInFile() async throws {
+        let workspace = try makeTempWorkspace()
+        defer { try? FileManager.default.removeItem(at: workspace) }
+
+        try write("let x = \"hello\";\n", named: "file.txt", in: workspace)
+
+        let tool = EditFileTool(permissions: PermissionEngine(workspaceRoot: workspace.path))
+        // old_text uses curly double quotes (\u{201C}/\u{201D}) instead of the
+        // file's straight ASCII quotes.
+        let result = try await tool.execute(arguments: [
+            "path": "file.txt",
+            "old_text": "let x = \u{201C}hello\u{201D};",
+            "new_text": "let x = \"world\";"
+        ])
+
+        XCTAssertFalse(result.isError, "curly-quote old_text should still match straight-quote file content: \(result.content)")
+        let written = try String(contentsOf: workspace.appendingPathComponent("file.txt"), encoding: .utf8)
+        XCTAssertEqual(written, "let x = \"world\";\n")
+    }
+
+    func testEmDashInOldTextMatchesHyphenInFile() async throws {
+        let workspace = try makeTempWorkspace()
+        defer { try? FileManager.default.removeItem(at: workspace) }
+
+        try write("// a workaround - see ticket 42\n", named: "file.txt", in: workspace)
+
+        let tool = EditFileTool(permissions: PermissionEngine(workspaceRoot: workspace.path))
+        let result = try await tool.execute(arguments: [
+            "path": "file.txt",
+            "old_text": "// a workaround \u{2014} see ticket 42",
+            "new_text": "// a workaround - see ticket 43"
+        ])
+
+        XCTAssertFalse(result.isError, "em-dash old_text should still match a plain-hyphen file: \(result.content)")
+        let written = try String(contentsOf: workspace.appendingPathComponent("file.txt"), encoding: .utf8)
+        XCTAssertEqual(written, "// a workaround - see ticket 43\n")
+    }
+
+    // MARK: - Line-based fuzzy tolerance: a multi-line old_text reconstructed
+    // from memory routinely drifts on individual lines' trailing whitespace or
+    // punctuation. Ported from qwen-code's findLineBasedMatch.
+
+    func testTrailingWhitespaceDriftOnOneLineOfMultiLineOldTextStillMatches() async throws {
+        let workspace = try makeTempWorkspace()
+        defer { try? FileManager.default.removeItem(at: workspace) }
+
+        // The file's middle line has trailing spaces the model's old_text omits.
+        try write("line1\nfoo   \nbar\nline4\n", named: "file.txt", in: workspace)
+
+        let tool = EditFileTool(permissions: PermissionEngine(workspaceRoot: workspace.path))
+        let result = try await tool.execute(arguments: [
+            "path": "file.txt",
+            "old_text": "foo\nbar",
+            "new_text": "baz\nbar"
+        ])
+
+        XCTAssertFalse(result.isError, "trailing-whitespace drift on one line should still match: \(result.content)")
+        let written = try String(contentsOf: workspace.appendingPathComponent("file.txt"), encoding: .utf8)
+        XCTAssertEqual(written, "line1\nbaz\nbar\nline4\n")
+    }
+
+    func testLineBasedFallbackNotTriggeredWhenExactMatchAlreadySucceeds() async throws {
+        // Sanity check that the new fallback tiers don't change behavior for
+        // the common, already-exact case.
+        let workspace = try makeTempWorkspace()
+        defer { try? FileManager.default.removeItem(at: workspace) }
+
+        try write("foo\nbar\n", named: "file.txt", in: workspace)
+
+        let tool = EditFileTool(permissions: PermissionEngine(workspaceRoot: workspace.path))
+        let result = try await tool.execute(arguments: [
+            "path": "file.txt",
+            "old_text": "foo\nbar",
+            "new_text": "baz\nqux"
+        ])
+
+        XCTAssertFalse(result.isError)
+        let written = try String(contentsOf: workspace.appendingPathComponent("file.txt"), encoding: .utf8)
+        XCTAssertEqual(written, "baz\nqux\n")
+    }
+
     // MARK: - generateUnifiedDiff unit tests
 
     func testDiffHelperSingleLineChange() {

@@ -95,6 +95,29 @@ final class ReadFileToolTests: XCTestCase {
         XCTAssertTrue(marker.contains("read_skill"))
     }
 
+    func testCRLFFileIsReturnedWithPlainNewlines() async throws {
+        // CRLF files (routine in Windows-authored/.NET repos) must not leak a
+        // trailing "\r" into the model's view of the file: a model reproduces
+        // what it read as "\n"-only text in a later edit_file old_text, and if
+        // read_file silently carried the "\r" through, every such edit would
+        // fail to match — invisibly, since a bare "\r" renders as nothing (or
+        // as a stray line-overwrite glitch) in most terminal output.
+        let workspace = try makeTempWorkspace()
+        defer { try? FileManager.default.removeItem(at: workspace) }
+
+        let url = workspace.appendingPathComponent("crlf.txt")
+        try "line1\r\nline2\r\nline3\r\n".write(to: url, atomically: true, encoding: .utf8)
+
+        let permissions = PermissionEngine(workspaceRoot: workspace.path)
+        let tool = ReadFileTool(permissions: permissions, maxOutputLines: 500)
+
+        let result = try await tool.execute(arguments: ["path": "crlf.txt"])
+
+        XCTAssertFalse(result.isError)
+        XCTAssertFalse(result.content.contains("\r"), "no line should carry a trailing carriage return into the model-visible content")
+        XCTAssertEqual(result.content, "line1\nline2\nline3")
+    }
+
     private func writeLines(count: Int, to url: URL) throws {
         let content = (1...count).map { "line \($0)" }.joined(separator: "\n") + "\n"
         try content.write(to: url, atomically: true, encoding: .utf8)

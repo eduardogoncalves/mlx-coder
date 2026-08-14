@@ -54,6 +54,13 @@ public struct ReadFileTool: Tool {
             if allLines.count > 1, allLines.last?.isEmpty == true {
                 allLines.removeLast()
             }
+            // CRLF files leave a trailing "\r" on every line after splitting on
+            // "\n" alone. Strip it so the model's view of the file is the same
+            // plain "\n" text it will naturally reproduce in an edit_file
+            // old_text/new_text — edit_file's own CRLF-tolerant matching
+            // (FileMutationSupport.editContent) reconciles this back with the
+            // file's real on-disk line endings.
+            allLines = allLines.map { $0.hasSuffix("\r") ? String($0.dropLast()) : $0 }
             let totalLines = allLines.count
 
             let startLine = (arguments["start_line"] as? Int ?? 1) - 1 // Convert to 0-indexed
