@@ -34,12 +34,19 @@ public enum BuildOutputFilter {
         "Pods",
         // Frontend frameworks
         ".next", ".nuxt", ".output",
-        // Test coverage artefacts
-        "coverage", ".nyc_output",
+        // Generic web bundler output (webpack/vite/rollup/esbuild/tsc, etc.)
+        "dist", "build",
+        // Test coverage / e2e report artefacts
+        "coverage", ".nyc_output", "playwright-report", "test-results",
         // Ruby – Bundler
         ".bundle",
         // Misc package caches
         ".cache",
+        // Version control internals — never project content, and .git in
+        // particular is large/binary and pollutes recursive listings.
+        ".git", ".hg", ".svn",
+        // OS bookkeeping
+        ".DS_Store",
         // mlx-coder's own sub-agent run archives/logs — internal bookkeeping,
         // not project content the model should be browsing or grepping.
         ".native-agent",
@@ -47,18 +54,25 @@ public enum BuildOutputFilter {
 
     /// mlx-coder's own workspace bookkeeping written alongside the project: the
     /// sub-agent log dir (`.native-agent`), the todo lists (`.mlx-coder-todo`,
-    /// `.mlx-coder-todo-<session>`, legacy `.native-agent-todo.md`), and the
-    /// project env file (`.mlx-coder.env`, which may hold secrets). This is
-    /// harness state, not project content — hidden from listings/search/reads by
-    /// default and revealed with `include_build_dirs: true`, exactly like build
-    /// output. Names not covered by the dir-name-only `ignoredNames` above are
-    /// matched here so `list_dir`/`read_file`/`grep`/`glob` all skip them, files
-    /// included.
+    /// `.mlx-coder-todo-<session>`, legacy `.native-agent-todo.md`), the
+    /// workspace config (`.mlx-coder-config.json`, legacy `.native-agent-config.json`),
+    /// the tool policy document (`.mlx-coder-policy.json`), the search-ignore
+    /// patterns file (`.mlx-coder-ignore`), and the project env file
+    /// (`.mlx-coder.env`, which may hold secrets). This is harness state, not
+    /// project content — hidden from listings/search/reads by default and
+    /// revealed with `include_build_dirs: true`, exactly like build output.
+    /// Names not covered by the dir-name-only `ignoredNames` above are matched
+    /// here so `list_dir`/`read_file`/`read_many`/`grep`/`code_search`/`glob`
+    /// all skip them, files included.
     public static let harnessArtifactNames: Set<String> = [
         ".native-agent",
         ".native-agent-todo.md",
+        ".native-agent-config.json",
         ".mlx-coder-todo",
         ".mlx-coder.env",
+        ".mlx-coder-config.json",
+        ".mlx-coder-policy.json",
+        ".mlx-coder-ignore",
     ]
 
     /// Prefix-matched harness artifacts (session-namespaced todo files such as

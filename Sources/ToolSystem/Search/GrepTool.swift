@@ -48,7 +48,7 @@ public struct GrepTool: Tool {
         var args = ["-rnI"] // recursive, line numbers, skip binary files
         if caseInsensitive { args.append("-i") }
         if let include { args.append(contentsOf: ["--include", include]) }
-        args.append(contentsOf: ["--exclude-dir=.git", "--exclude-dir=.build", "--exclude-dir=node_modules", "--exclude-dir=.native-agent"])
+        args.append(contentsOf: excludeDirArguments())
         args.append(pattern)
         args.append(resolvedPath)
 
@@ -78,7 +78,7 @@ public struct GrepTool: Tool {
             .map { relativizeGrepLine($0) }
             .filter { line in
                 let pathPart = String(line.split(separator: ":", maxSplits: 1).first ?? "")
-                return !permissions.isPathIgnored(pathPart)
+                return !permissions.isPathIgnored(pathPart) && !BuildOutputFilter.isBuildOutput(path: pathPart)
             }
 
         if lines.isEmpty {
@@ -93,6 +93,11 @@ public struct GrepTool: Tool {
             content: truncated.joined(separator: "\n"),
             truncationMarker: marker
         )
+    }
+
+    private func excludeDirArguments() -> [String] {
+        (BuildOutputFilter.ignoredNames.union(BuildOutputFilter.harnessArtifactNames))
+            .map { "--exclude-dir=\($0)" }
     }
 
     private func relativizeGrepLine(_ line: String) -> String {

@@ -66,8 +66,7 @@ public struct CodeSearchTool: Tool {
 
             process.arguments = [
                 "-rnI", "-E",
-            ] + includeArguments(for: language) + [
-                "--exclude-dir=.git", "--exclude-dir=.build",
+            ] + includeArguments(for: language) + excludeDirArguments() + [
                 "-A", "2",  // 2 lines of context after match
                 pattern,
                 resolvedPath
@@ -95,7 +94,7 @@ public struct CodeSearchTool: Tool {
                 .map { relativizeGrepLine($0) }
                 .filter { line in
                     let pathPart = String(line.split(separator: ":", maxSplits: 1).first ?? "")
-                    return !permissions.isPathIgnored(pathPart)
+                    return !permissions.isPathIgnored(pathPart) && !BuildOutputFilter.isBuildOutput(path: pathPart)
                 }
 
             allResults.append(contentsOf: lines)
@@ -232,6 +231,11 @@ public struct CodeSearchTool: Tool {
                 let pathPart = String(line.split(separator: ":", maxSplits: 1).first ?? "")
                 return !permissions.isPathIgnored(pathPart) && !BuildOutputFilter.isBuildOutput(path: pathPart)
             }
+    }
+
+    private func excludeDirArguments() -> [String] {
+        (BuildOutputFilter.ignoredNames.union(BuildOutputFilter.harnessArtifactNames))
+            .map { "--exclude-dir=\($0)" }
     }
 
     private func findPruneArguments() -> [String] {
