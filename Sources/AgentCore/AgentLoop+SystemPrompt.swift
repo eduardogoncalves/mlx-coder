@@ -134,32 +134,22 @@ extension AgentLoop {
 
         {"name": "task", "arguments": {"profile": "executor", "description": "Add a null check to parseConfig() in Config.swift:42"}}
 
-        See the `profile` parameter's allowed values for which specialist profiles exist: \
-        `planner` (research + produce a plan via `plan_file`; also has `web_search`/`web_fetch` \
-        for external pages, docs, or URLs the user gives you; cannot edit or run commands), \
-        `executor` (implement: reads, writes, edits, patches, runs shell commands), \
-        `reviewer` (inspects code and can run `build_check`; cannot edit anything), \
-        `filesystem` (file read/write/edit only, no shell), `terminal` (shell commands \
-        only, no file edits), `codebase_research` (locate and PROVE the exact files, symbols, and \
-        call sites with `file:line` evidence; read-only, no edits or commands), `test_engineering` \
-        (run the narrowest relevant tests and interpret pass/fail, diagnosing failures), \
-        `security_review` (read-only audit for real, pointable security risks), `docs` (write or \
-        update user-facing documentation to match actual behavior), and `general` (a focused \
-        single-task worker for a small, self-contained job that doesn't fit the roles above). You \
-        never have web access \
-        yourself, but `planner` does (web_search/web_fetch by default) — delegate "fetch/summarize \
-        this URL" straight to `planner` rather than refusing. To give another profile web access, \
-        pass an explicit `tools` list on the `task` call.
-
-        PROFILE SELECTION (pick by the task's VERB, not by convenience): \
+        PROFILE SELECTION — route by the task's VERB, not convenience: \
         find / locate / search / "where is" / understand / explain / trace / "how does X work" \
-        → `codebase_research` (NEVER `general` or `executor` for a read-only lookup). \
-        Add / implement / fix / edit / refactor / write code / run a command → `executor`. \
-        Produce a plan / decide an approach / fetch a URL → `planner`. \
-        Run or diagnose tests → `test_engineering`. Review / audit correctness → `reviewer` \
-        (security → `security_review`). Write docs → `docs`. \
-        `general` is a LAST RESORT — use it ONLY when the job fits NONE of the roles above; a \
-        locate/understand request is codebase_research, so it never belongs in `general`.
+        → `codebase_research` (locate and PROVE files/symbols/call sites with `file:line` \
+        evidence; read-only — NEVER `general` or `executor` for a lookup). \
+        Add / implement / fix / edit / refactor / write code / run a command → `executor` \
+        (reads, writes, edits, patches, runs shell commands). \
+        Produce a plan / decide an approach / fetch a URL → `planner` (also has \
+        `web_search`/`web_fetch`; cannot edit or run commands — you have no web access \
+        yourself, so delegate "fetch/summarize this URL" straight to `planner` rather than \
+        refusing). Run or diagnose tests → `test_engineering`. Review / audit correctness → \
+        `reviewer` (runs `build_check`; cannot edit anything); security → `security_review`. \
+        Write docs → `docs`. File edits only, no shell → `filesystem`; shell only, no file \
+        edits → `terminal`. `general` is a LAST RESORT for a job that fits NONE of the roles \
+        above — a locate/understand request is codebase_research, so it never belongs in \
+        `general`. To give a profile web access it lacks by default, pass an explicit `tools` \
+        list on the `task` call.
 
         Do NOT do the work yourself in your response text, even when you already know the \
         answer: never write code, diffs, file contents, shell commands, or a step-by-step \
@@ -169,11 +159,6 @@ extension AgentLoop {
         to delegate, the `task(...)` call itself, and — once sub-agents report back — a \
         concise summary of what they did for the user. Use `plan_file` only to persist a \
         plan a sub-agent already produced, never to draft one yourself.
-
-        Typical flow for a non-trivial request: decompose it, delegate codebase \
-        location/understanding to `codebase_research`, delegate planning to `planner`, delegate \
-        implementation to `executor` (ONE focused task per call), then optionally delegate a check \
-        to `reviewer` before reporting back to the user.
 
         RESEARCH & PLAN BEFORE IMPLEMENTING (MUST): Do NOT delegate to `executor` or `general` (nor \
         to `filesystem`/`terminal` for a change) until you have FIRST delegated to `codebase_research` \
@@ -333,7 +318,7 @@ extension AgentLoop {
         """
 
         // Remote/online backends receive tool schemas via the request's native
-        // `tools` API field (see AgentLoop+OpenRouterGeneration.swift) — the provider's
+        // `tools` API field (see AgentLoop+RemoteGeneration.swift) — the provider's
         // own chat template renders them for the model. Repeating the same JSON
         // schemas as prompt text here would double the token cost and instruct the
         // model to emit text-based <tool_call> tags it doesn't need to use.
