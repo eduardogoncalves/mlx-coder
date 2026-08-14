@@ -45,23 +45,37 @@ public struct JSONSchema: Sendable, Codable {
 }
 
 /// Schema for a single property within a JSON Schema.
-/// Uses a final class (reference type) to support recursive `items` field.
+/// Uses a final class (reference type) to support recursive `items`/`properties` fields.
 public final class PropertySchema: Sendable, Codable {
     public let type: String
     public let description: String?
     public let items: PropertySchema?
     public let enumValues: [String]?
+    /// Nested field schemas, for `type == "object"` (including an `"object"`
+    /// used as an array's `items`, e.g. an array of structured records).
+    public let properties: [String: PropertySchema]?
+    /// Required field names among `properties`.
+    public let required: [String]?
 
     enum CodingKeys: String, CodingKey {
-        case type, description, items
+        case type, description, items, properties, required
         case enumValues = "enum"
     }
 
-    public init(type: String, description: String? = nil, items: PropertySchema? = nil, enumValues: [String]? = nil) {
+    public init(
+        type: String,
+        description: String? = nil,
+        items: PropertySchema? = nil,
+        enumValues: [String]? = nil,
+        properties: [String: PropertySchema]? = nil,
+        required: [String]? = nil
+    ) {
         self.type = type
         self.description = description
         self.items = items
         self.enumValues = enumValues
+        self.properties = properties
+        self.required = required
     }
 }
 

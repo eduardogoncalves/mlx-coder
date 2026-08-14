@@ -41,6 +41,7 @@ private final class RecordingAgentFrontend: AgentFrontend, @unchecked Sendable {
         case .approval:     return .approval(.deny(suggestion: nil))
         case .optionSelect: return .optionSelect(nil)
         case .textInput:    return .textInput(nil)
+        case .clarifyingQuestions: return .clarifyingQuestions(nil)
         }
     }
 }

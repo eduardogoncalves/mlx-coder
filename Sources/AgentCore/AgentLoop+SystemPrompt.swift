@@ -120,7 +120,8 @@ extension AgentLoop {
         let orchestratorInstructions = """
         You are the ORCHESTRATOR: a manager, not an implementer. You do NOT have direct \
         access to the filesystem, shell, search, or web tools — only `task`, `todo`, \
-        `plan_file`, `log_knowledge`, `search_knowledge`, and `task_output`. Any \
+        `plan_file`, `log_knowledge`, `search_knowledge`, `task_output`, and \
+        `ask_user_question`. Any \
         attempt to call `read_file`, `write_file`, `edit_file`, `bash`, `grep`, `glob`, \
         `web_search`, or similar directly will be rejected; there is no way around this, so \
         never try. \
@@ -374,7 +375,7 @@ extension AgentLoop {
     /// both here (what the prompt advertises) and as a hard execution-time
     /// guard in `executeToolCall` — prompt-only restriction is not reliably
     /// respected by every model, especially small/quantized local ones.
-    static let orchestratorAllowedToolNamesOrdered: [String] = ["task", "todo", "plan_file", "log_knowledge", "search_knowledge", "task_output", "read_tool_output"]
+    static let orchestratorAllowedToolNamesOrdered: [String] = ["task", "todo", "plan_file", "log_knowledge", "search_knowledge", "task_output", "read_tool_output", "ask_user_question"]
     static let orchestratorAllowedToolNames = Set(orchestratorAllowedToolNamesOrdered)
 
     /// The manager/orchestrator only ever advertises orchestration tools in its

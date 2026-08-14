@@ -2007,7 +2007,10 @@ public actor AgentLoop {
                     // ToolWatchdog.swift.
                     let watchdogSeconds = ToolWatchdogConfig.seconds
                     let watchdogToolName = call.name
-                    let applyWatchdog = call.name != "task"
+                    // `ask_user_question` blocks on a human, who may well take
+                    // longer than the watchdog ceiling to answer — exempt it
+                    // the same way `task` is exempt for its own reasons.
+                    let applyWatchdog = call.name != "task" && call.name != "ask_user_question"
                     let toolStart = Date()
                     ToolWatchdogConfig.log("dispatching tool \(watchdogToolName)\(applyWatchdog ? " (watchdog \(Int(watchdogSeconds))s)" : " (no watchdog)")")
                     // Capture the frontend as a Sendable local so the @Sendable

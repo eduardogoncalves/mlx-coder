@@ -124,9 +124,10 @@ public final class NullAgentFrontend: AgentFrontend {
     public func emit(_ event: AgentEvent) {}
     public func request(_ request: AgentRequest) async -> AgentResponse {
         switch request {
-        case .approval:     return .approval(.deny(suggestion: nil))
-        case .optionSelect: return .optionSelect(nil)
-        case .textInput:    return .textInput(nil)
+        case .approval:            return .approval(.deny(suggestion: nil))
+        case .optionSelect:        return .optionSelect(nil)
+        case .textInput:           return .textInput(nil)
+        case .clarifyingQuestions: return .clarifyingQuestions(nil)
         }
     }
 }

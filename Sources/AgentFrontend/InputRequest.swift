@@ -11,12 +11,14 @@ public enum AgentRequest: Sendable {
     case approval(ApprovalRequest)
     case optionSelect(OptionSelectRequest)
     case textInput(TextInputRequest)
+    case clarifyingQuestions(ClarifyingQuestionsRequest)
 }
 
 public enum AgentResponse: Sendable {
     case approval(ApprovalDecision)
     case optionSelect(Int?)        // selected index, nil = cancelled
     case textInput(String?)        // entered text, nil = cancelled
+    case clarifyingQuestions([ClarifyingAnswer]?)  // one per question, nil = cancelled
 }
 
 // MARK: - Approval
@@ -88,5 +90,53 @@ public struct TextInputRequest: Sendable {
         self.placeholder = placeholder
         self.initialText = initialText
         self.multiline = multiline
+    }
+}
+
+// MARK: - Clarifying questions (model-initiated "ask the user" UI)
+
+/// One choice within a `ClarifyingQuestion` — a short label plus an optional
+/// longer description shown alongside it.
+public struct ClarifyingOption: Sendable {
+    public let label: String
+    public let description: String
+    public init(label: String, description: String = "") {
+        self.label = label
+        self.description = description
+    }
+}
+
+/// A single clarifying question the model wants to ask the user: a short
+/// header chip (e.g. "Auth method"), the full question text, its options,
+/// and whether more than one option may be chosen. Every question also gets
+/// an implicit "Other" choice so the user can type a free-form answer.
+public struct ClarifyingQuestion: Sendable {
+    public let header: String
+    public let question: String
+    public let options: [ClarifyingOption]
+    public let multiSelect: Bool
+    public init(header: String, question: String, options: [ClarifyingOption], multiSelect: Bool = false) {
+        self.header = header
+        self.question = question
+        self.options = options
+        self.multiSelect = multiSelect
+    }
+}
+
+/// One or more clarifying questions to present together, mirroring Claude
+/// Code / opencode's `AskUserQuestion`-style UI.
+public struct ClarifyingQuestionsRequest: Sendable {
+    public let questions: [ClarifyingQuestion]
+    public init(questions: [ClarifyingQuestion]) {
+        self.questions = questions
+    }
+}
+
+/// One question's answer — the labels of every option the user chose, plus
+/// any free-typed "Other" text appended last.
+public struct ClarifyingAnswer: Sendable {
+    public let selectedLabels: [String]
+    public init(selectedLabels: [String]) {
+        self.selectedLabels = selectedLabels
     }
 }

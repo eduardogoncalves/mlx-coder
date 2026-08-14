@@ -38,6 +38,13 @@ extension AgentLoop {
         // Skills
         await registry.register(ReadSkillTool(skills: SkillsRegistry(workspaceRoot: permissions.workspaceRoot)))
 
+        // Lets the orchestrator pause the turn to ask the human a structured
+        // multiple-choice clarifying question instead of guessing or asking
+        // in free-form prose. Only available to the top-level orchestrator —
+        // sub-agents talk to the orchestrator, not the human, so they never
+        // get this tool registered in their own scoped registry (TaskTool.swift).
+        await registry.register(AskUserQuestionTool(frontend: frontend))
+
         // Web tools that don't need a model container
         await registry.register(WebSearchTool())
 

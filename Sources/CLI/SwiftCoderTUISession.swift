@@ -218,6 +218,12 @@ public func runSwiftCoderTUISession(
     var approvalSuggestionMode = false
     var approvalStashedInput = ""
 
+    // Clarifying-questions "Other" free-text entry state (ask_user_question
+    // tool). Mirrors approvalSuggestionMode/approvalStashedInput above: while
+    // the user is typing a custom answer, the input box is reused for text
+    // entry and its previous content is stashed/restored around it.
+    var clarifyingStashedInput = ""
+
     // /login wizard state. While non-.idle, free-text input is captured by the
     // wizard and never forwarded to AgentLoop.
     var loginWizardStep: LoginWizardStep = .idle
@@ -402,6 +408,101 @@ public func runSwiftCoderTUISession(
             default:
                 break
             }
+            continue
+        }
+
+        // Clarifying-questions intercept — the model called `ask_user_question`
+        // and is waiting on one or more multiple-choice answers.
+        if frontend.hasPendingClarifyingQuestions {
+            pendingTypedFlushTask?.cancel()
+            pendingTypedFlushTask = nil
+            pendingTypedChunk.removeAll(keepingCapacity: true)
+
+            // Escape always cancels the whole batch, even mid "Other" text
+            // entry — matches approval/optionSelect's Esc-cancels convention.
+            if case .escape = key {
+                if await renderer.getClarifyingIsEnteringOtherText() {
+                    await renderer.setInputBuffer(clarifyingStashedInput)
+                    clarifyingStashedInput = ""
+                }
+                frontend.resolveClarifyingQuestions(nil)
+                await renderer.renderFooter()
+                continue
+            }
+
+            if await renderer.getClarifyingIsEnteringOtherText() {
+                switch key {
+                case .character(let ch):
+                    await renderer.appendChar(ch)
+                    await renderer.renderFooter()
+                case .backspace, .delete:
+                    await renderer.deleteChar()
+                    await renderer.renderFooter()
+                case .arrowLeft:
+                    await renderer.moveCursorLeft()
+                    await renderer.renderFooter()
+                case .arrowRight:
+                    await renderer.moveCursorRight()
+                    await renderer.renderFooter()
+                case .paste(let pasted):
+                    await renderer.insertText(pasted)
+                    await renderer.renderFooter()
+                case .enter:
+                    let text = await renderer.getInputBuffer().trimmingCharacters(in: .whitespacesAndNewlines)
+                    await renderer.setInputBuffer(clarifyingStashedInput)
+                    clarifyingStashedInput = ""
+                    let completed = await renderer.finishClarifyingOtherText(text)
+                    if completed {
+                        let answers = await renderer.getClarifyingAnswers().map { ClarifyingAnswer(selectedLabels: $0) }
+                        frontend.resolveClarifyingQuestions(answers)
+                    }
+                    await renderer.renderFooter()
+                default:
+                    break
+                }
+                continue
+            }
+
+            let optionCount = await renderer.getClarifyingOptionCount()
+            let isMultiSelect = await renderer.getClarifyingIsMultiSelect()
+            let isOtherRowSelected = await renderer.getClarifyingIsOtherRowSelected()
+
+            switch key {
+            case .character(" "):
+                await renderer.toggleClarifyingCursorOption()
+            case .character(let ch):
+                if let digit = Int(String(ch)), (1...optionCount).contains(digit) {
+                    if isMultiSelect {
+                        await renderer.toggleClarifyingOption(at: digit - 1)
+                    } else {
+                        let completed = await renderer.selectClarifyingDigitAndSubmit(digit)
+                        if completed {
+                            let answers = await renderer.getClarifyingAnswers().map { ClarifyingAnswer(selectedLabels: $0) }
+                            frontend.resolveClarifyingQuestions(answers)
+                        }
+                        await renderer.renderFooter()
+                    }
+                }
+            case .enter:
+                if isOtherRowSelected {
+                    clarifyingStashedInput = await renderer.getInputBuffer()
+                    await renderer.setInputBuffer("")
+                    await renderer.beginClarifyingOtherEntry()
+                } else {
+                    let completed = await renderer.submitClarifyingCurrentQuestion()
+                    if completed {
+                        let answers = await renderer.getClarifyingAnswers().map { ClarifyingAnswer(selectedLabels: $0) }
+                        frontend.resolveClarifyingQuestions(answers)
+                    }
+                }
+            case .arrowUp:
+                await renderer.moveClarifyingCursor(offset: -1)
+            case .arrowDown:
+                await renderer.moveClarifyingCursor(offset: 1)
+            default:
+                break
+            }
+            await renderer.renderFooter()
             continue
         }
 

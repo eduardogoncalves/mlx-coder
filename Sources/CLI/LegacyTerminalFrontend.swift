@@ -283,6 +283,74 @@ public final class LegacyTerminalFrontend: AgentFrontend, @unchecked Sendable {
                 placeholder: req.placeholder
             )
             return .textInput(text)
+
+        case .clarifyingQuestions(let req):
+            return .clarifyingQuestions(await handleClarifyingQuestions(req))
+        }
+    }
+
+    /// Raw-terminal fallback for the `ask_user_question` tool. The TUI gets a
+    /// dedicated multi-question/multi-select picker (`Renderer`'s clarifying-
+    /// questions state); here we just chain the existing single-select
+    /// `InteractiveInput.selectOption` prompt per question, with a simple
+    /// checkbox-toggle loop standing in for multi-select. Escape at any point
+    /// cancels the whole batch (matches the TUI's Escape-cancels-everything
+    /// behavior) rather than trying to salvage partial answers.
+    private func handleClarifyingQuestions(_ req: ClarifyingQuestionsRequest) async -> [ClarifyingAnswer]? {
+        var answers: [ClarifyingAnswer] = []
+        for (i, question) in req.questions.enumerated() {
+            renderer.printStatus("[\(i + 1)/\(req.questions.count)] \(question.header)")
+            let answer: ClarifyingAnswer?
+            if question.multiSelect {
+                answer = await selectMultipleOptions(for: question)
+            } else {
+                answer = await selectSingleOption(for: question)
+            }
+            guard let answer else { return nil }
+            answers.append(answer)
+        }
+        return answers
+    }
+
+    private func selectSingleOption(for question: ClarifyingQuestion) async -> ClarifyingAnswer? {
+        var options = question.options.map(\.label)
+        options.append("Other (type a custom answer)")
+        guard let idx = await interactiveInput.selectOption(prompt: question.question, options: options) else {
+            return nil
+        }
+        if idx == question.options.count {
+            guard let text = await interactiveInput.promptForText(prompt: "Your answer") else { return nil }
+            return ClarifyingAnswer(selectedLabels: [text])
+        }
+        return ClarifyingAnswer(selectedLabels: [question.options[idx].label])
+    }
+
+    private func selectMultipleOptions(for question: ClarifyingQuestion) async -> ClarifyingAnswer? {
+        var checked = Set<Int>()
+        let otherIndex = question.options.count
+        let doneIndex = question.options.count + 1
+        while true {
+            var options = question.options.enumerated().map { i, opt in
+                "\(checked.contains(i) ? "[x]" : "[ ]") \(opt.label)"
+            }
+            options.append("Other (type a custom answer)")
+            options.append(checked.isEmpty ? "Done (pick at least one option first)" : "Done — submit \(checked.count) selected")
+            guard let idx = await interactiveInput.selectOption(prompt: question.question, options: options) else {
+                return nil
+            }
+            switch idx {
+            case ..<otherIndex:
+                if checked.contains(idx) { checked.remove(idx) } else { checked.insert(idx) }
+            case otherIndex:
+                guard let text = await interactiveInput.promptForText(prompt: "Your answer") else { return nil }
+                var labels = checked.sorted().map { question.options[$0].label }
+                labels.append(text)
+                return ClarifyingAnswer(selectedLabels: labels)
+            case doneIndex where !checked.isEmpty:
+                return ClarifyingAnswer(selectedLabels: checked.sorted().map { question.options[$0].label })
+            default:
+                continue
+            }
         }
     }
 

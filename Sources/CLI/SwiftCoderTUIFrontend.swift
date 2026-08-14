@@ -31,6 +31,9 @@ public final class SwiftCoderTUIFrontend: AgentFrontend, @unchecked Sendable {
     private var pendingApproval: CheckedContinuation<ApprovalDecision, Never>?
     // Option-select bridging — only one outstanding picker at a time.
     private var pendingOptionSelect: CheckedContinuation<Int?, Never>?
+    // Clarifying-questions bridging (ask_user_question tool) — only one
+    // outstanding multi-question picker at a time.
+    private var pendingClarifyingQuestions: CheckedContinuation<[ClarifyingAnswer]?, Never>?
     private let lock = NSLock()
 
     // Spinner ticker — one task at a time, rendering 100ms ticks while a
@@ -152,6 +155,31 @@ public final class SwiftCoderTUIFrontend: AgentFrontend, @unchecked Sendable {
         case .textInput(let req):
             await renderer.printScrollLine("? \(req.prompt)")
             return .textInput(nil)
+
+        case .clarifyingQuestions(let req):
+            guard !req.questions.isEmpty else { return .clarifyingQuestions(nil) }
+            let answers: [ClarifyingAnswer]? = await withTaskCancellationHandler(operation: {
+                await withCheckedContinuation { cont in
+                    guard registerPendingClarifyingQuestions(cont) else {
+                        cont.resume(returning: nil)
+                        return
+                    }
+                    Task {
+                        await renderer.requestClarifyingQuestions(req.questions.map { q in
+                            (
+                                header: q.header,
+                                question: q.question,
+                                options: q.options.map { (label: $0.label, description: $0.description) },
+                                multiSelect: q.multiSelect
+                            )
+                        })
+                    }
+                }
+            }, onCancel: { [weak self] in
+                self?.cancelPendingClarifyingQuestions()
+            })
+            await renderer.clearClarifyingQuestions()
+            return .clarifyingQuestions(answers)
         }
     }
 
@@ -184,6 +212,21 @@ public final class SwiftCoderTUIFrontend: AgentFrontend, @unchecked Sendable {
         return pendingOptionSelect != nil
     }
 
+    /// Called by the session loop once every clarifying question has been
+    /// answered (or the user cancelled). Resolves the outstanding continuation.
+    public func resolveClarifyingQuestions(_ answers: [ClarifyingAnswer]?) {
+        lock.lock()
+        let cont = pendingClarifyingQuestions
+        pendingClarifyingQuestions = nil
+        lock.unlock()
+        cont?.resume(returning: answers)
+    }
+
+    public var hasPendingClarifyingQuestions: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return pendingClarifyingQuestions != nil
+    }
+
     private func registerPendingApproval(_ cont: CheckedContinuation<ApprovalDecision, Never>) -> Bool {
         lock.lock()
         defer { lock.unlock() }
@@ -197,6 +240,14 @@ public final class SwiftCoderTUIFrontend: AgentFrontend, @unchecked Sendable {
         defer { lock.unlock() }
         guard pendingOptionSelect == nil, !Task.isCancelled else { return false }
         pendingOptionSelect = cont
+        return true
+    }
+
+    private func registerPendingClarifyingQuestions(_ cont: CheckedContinuation<[ClarifyingAnswer]?, Never>) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard pendingClarifyingQuestions == nil, !Task.isCancelled else { return false }
+        pendingClarifyingQuestions = cont
         return true
     }
 
@@ -216,6 +267,15 @@ public final class SwiftCoderTUIFrontend: AgentFrontend, @unchecked Sendable {
         lock.unlock()
         cont?.resume(returning: nil)
         Task { await renderer.clearOptionSelect() }
+    }
+
+    private func cancelPendingClarifyingQuestions() {
+        lock.lock()
+        let cont = pendingClarifyingQuestions
+        pendingClarifyingQuestions = nil
+        lock.unlock()
+        cont?.resume(returning: nil)
+        Task { await renderer.clearClarifyingQuestions() }
     }
 
     // MARK: Event rendering

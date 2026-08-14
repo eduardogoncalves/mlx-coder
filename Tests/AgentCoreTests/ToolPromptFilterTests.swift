@@ -10,7 +10,7 @@ import XCTest
 final class ToolPromptFilterTests: XCTestCase {
     func testOrchestratorFilterOnlyExposesOrchestrationTools() {
         let filter = AgentLoop.orchestratorToolPromptFilter(mode: .agent)
-        XCTAssertEqual(filter.selectedToolNames, ["task", "todo", "plan_file", "log_knowledge", "search_knowledge", "task_output", "read_tool_output"])
+        XCTAssertEqual(filter.selectedToolNames, ["task", "todo", "plan_file", "log_knowledge", "search_knowledge", "task_output", "read_tool_output", "ask_user_question"])
         XCTAssertEqual(filter.taskTypeHint, "orchestration")
         XCTAssertFalse(filter.includeMCPTools)
     }
@@ -38,6 +38,6 @@ final class ToolPromptFilterTests: XCTestCase {
             AgentLoop.orchestratorAllowedToolNames,
             Set(AgentLoop.orchestratorAllowedToolNamesOrdered)
         )
-        XCTAssertEqual(AgentLoop.orchestratorAllowedToolNamesOrdered, ["task", "todo", "plan_file", "log_knowledge", "search_knowledge", "task_output", "read_tool_output"])
+        XCTAssertEqual(AgentLoop.orchestratorAllowedToolNamesOrdered, ["task", "todo", "plan_file", "log_knowledge", "search_knowledge", "task_output", "read_tool_output", "ask_user_question"])
     }
 }

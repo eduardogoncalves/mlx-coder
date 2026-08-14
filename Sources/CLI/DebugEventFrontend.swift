@@ -128,6 +128,9 @@ public final class DebugEventFrontend: AgentFrontend, @unchecked Sendable {
         case .textInput(let r):
             log("[\(ts)] request.textInput: \(r.prompt)")
             return .textInput(nil)
+        case .clarifyingQuestions(let r):
+            log("[\(ts)] request.clarifyingQuestions: \(r.questions.count) question(s)")
+            return .clarifyingQuestions(nil)
         }
     }
 
