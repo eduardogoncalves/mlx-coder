@@ -182,6 +182,19 @@ public enum SessionStore {
         list(cwd: cwd).first
     }
 
+    /// Deletes a persisted session file. Returns `true` if a file was removed.
+    @discardableResult
+    public static func delete(id: String) -> Bool {
+        let fileURL = url(for: id)
+        guard FileManager.default.fileExists(atPath: fileURL.path) else { return false }
+        do {
+            try FileManager.default.removeItem(at: fileURL)
+            return true
+        } catch {
+            return false
+        }
+    }
+
     /// Derive a one-line title from the first human message.
     static func title(from messages: [Message]) -> String {
         let first = messages.first(where: { $0.role == .user && $0.origin == .human })?.content ?? ""

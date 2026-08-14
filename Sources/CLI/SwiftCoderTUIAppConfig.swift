@@ -77,6 +77,7 @@ public enum SwiftCoderTUIAppConfigBuilder {
                 AppConfig.CommandConfig(name: "/save-history-json", description: "Save chat history as JSON"),
                 AppConfig.CommandConfig(name: "/load-history-json", description: "Load chat history from JSON"),
                 AppConfig.CommandConfig(name: "/resume", description: "Resume a saved session (opens a picker)"),
+                AppConfig.CommandConfig(name: "/resume remove", description: "Remove a saved session (interactive picker)"),
                 AppConfig.CommandConfig(name: "/undo",    description: "Undo the last turn"),
                 AppConfig.CommandConfig(name: "/revert",  description: "Revert to a previous turn"),
                 AppConfig.CommandConfig(name: "/plan",    description: "Toggle planning mode"),

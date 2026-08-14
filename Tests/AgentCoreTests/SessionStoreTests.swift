@@ -83,6 +83,18 @@ final class SessionStoreTests: XCTestCase {
         XCTAssertGreaterThan(second.updatedAt, second.createdAt)
     }
 
+    func testDeleteRemovesSessionFile() throws {
+        _ = SessionStore.save(id: "to-delete", cwd: "/w", model: "m", messages: [msg(.user, "hi")])
+        XCTAssertNotNil(try? SessionStore.load(id: "to-delete"))
+
+        XCTAssertTrue(SessionStore.delete(id: "to-delete"))
+        XCTAssertThrowsError(try SessionStore.load(id: "to-delete"))
+    }
+
+    func testDeleteIsFalseWhenSessionMissing() {
+        XCTAssertFalse(SessionStore.delete(id: "does-not-exist"))
+    }
+
     func testRestoreConversationKeepsCurrentSystemPrompt() {
         var history = ConversationHistory(systemPrompt: "FRESH SYSTEM")
         history.addUser("stale should be gone")

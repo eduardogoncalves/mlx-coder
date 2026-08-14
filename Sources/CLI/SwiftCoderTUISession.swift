@@ -93,7 +93,7 @@ public func runSwiftCoderTUISession(
 
     let caffeinateManager = CaffeinateManager()
 
-    let dynamicCommandNames: Set<String> = ["/model", "/effort", "/caffeinate", "/memory", "/login", "/logout"]
+    let dynamicCommandNames: Set<String> = ["/model", "/effort", "/caffeinate", "/memory", "/login", "/logout", "/resume"]
     let staticItems = frontend.appConfig.commands
         .filter { !dynamicCommandNames.contains($0.name) }
         .map { command -> AutocompleteItem in
@@ -131,6 +131,7 @@ public func runSwiftCoderTUISession(
                 TUIMemorySlashCommand(),
                 TUILoginSlashCommand(),
                 TUILogoutSlashCommand(),
+                TUIResumeSlashCommand(),
             ],
             staticCommands: staticItems
         )
@@ -971,6 +972,33 @@ public func runSwiftCoderTUISession(
                     continue
                 }
                 let arg = String(commandInput.dropFirst("/resume".count)).trimmingCharacters(in: .whitespacesAndNewlines)
+                if arg.lowercased() == "remove" {
+                    // No id given: open a picker of recent sessions for this
+                    // workspace, same as the bare-`/resume` picker below. Each
+                    // entry submits `/resume remove <id>` on selection.
+                    let sessions = SessionStore.list(cwd: workspaceRoot)
+                        .filter { $0.id != currentSessionId }
+                    if sessions.isEmpty {
+                        await renderer.printScrollLine("\(DesignSystem.dim)No saved sessions to remove in this directory.\(DesignSystem.reset)")
+                        continue
+                    }
+                    let items = sessions.prefix(20).map { session -> (name: String, desc: String) in
+                        (name: "/resume remove \(session.id)", desc: "\(relativeTimeDescription(session.updatedAt)) · \(session.title)")
+                    }
+                    await renderer.openCommandPalette(commands: Array(items))
+                    await renderer.renderFooter()
+                    continue
+                }
+                if arg.lowercased().hasPrefix("remove ") {
+                    let id = String(arg.dropFirst("remove ".count)).trimmingCharacters(in: .whitespacesAndNewlines)
+                    if SessionStore.delete(id: id) {
+                        await renderer.printScrollLine("  \(DesignSystem.dim)✓ Session removed.\(DesignSystem.reset)")
+                    } else {
+                        await renderer.printScrollLine("\(DesignSystem.brightRed)✗ Remove failed.\(DesignSystem.reset)")
+                    }
+                    await renderer.renderFooter()
+                    continue
+                }
                 if arg.isEmpty {
                     // No id given: open a picker of recent sessions for this
                     // workspace. Each entry submits `/resume <id>` on selection.
@@ -1672,6 +1700,7 @@ private func helpLines() -> [String] {
         "  /save-history-json [path] save session transcript as json",
         "  /load-history-json [path] load prior session transcript",
         "  /resume [id] resume a saved session (no id opens a picker)",
+        "  /resume remove  remove a saved session (interactive picker)",
         "  /retry   re-run the last user prompt",
         "  /undo    undo the last conversation turn",
         "  /plan    toggle plan mode on/off",
