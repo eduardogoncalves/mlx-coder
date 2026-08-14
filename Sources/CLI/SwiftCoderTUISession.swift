@@ -92,6 +92,19 @@ public func runSwiftCoderTUISession(
     let renderer = frontend.renderer
 
     let caffeinateManager = CaffeinateManager()
+    // Tracks whether the user explicitly pinned caffeinate on/off via
+    // `/caffeinate`. When pinned, the orchestrator's automatic per-turn
+    // keep-awake (below) leaves the manual setting alone; otherwise it turns
+    // caffeinate on for the duration of each turn and back off once it ends.
+    var caffeinateManuallyPinned = false
+    func beginOrchestratorCaffeinate() async {
+        guard !caffeinateManuallyPinned else { return }
+        await caffeinateManager.enable(mode: .on)
+    }
+    func endOrchestratorCaffeinate() {
+        guard !caffeinateManuallyPinned else { return }
+        Task { await caffeinateManager.disable() }
+    }
 
     let dynamicCommandNames: Set<String> = ["/model", "/effort", "/caffeinate", "/memory", "/login", "/logout", "/resume"]
     let staticItems = frontend.appConfig.commands
@@ -1043,7 +1056,11 @@ public func runSwiftCoderTUISession(
                 let userEntry = SessionEntry(role: .user, content: retryPrompt)
                 await renderer.printScrollLine(userEntry.render())
                 activeStreamTask = Task { @MainActor in
-                    defer { activeStreamTask = nil }
+                    defer {
+                        activeStreamTask = nil
+                        endOrchestratorCaffeinate()
+                    }
+                    await beginOrchestratorCaffeinate()
                     do {
                         try await agentLoop.processUserMessage(retryPrompt)
                     } catch is CancellationError {
@@ -1262,7 +1279,11 @@ public func runSwiftCoderTUISession(
                 await renderer.printScrollLine(askUserEntry.render())
                 await renderer.printScrollLine("\(DesignSystem.dim)[ask] Side question (main context will be restored after).\(DesignSystem.reset)")
                 activeStreamTask = Task { @MainActor in
-                    defer { activeStreamTask = nil }
+                    defer {
+                        activeStreamTask = nil
+                        endOrchestratorCaffeinate()
+                    }
+                    await beginOrchestratorCaffeinate()
                     do {
                         try await agentLoop.processEphemeralMessage(question)
                         await renderer.printScrollLine("\(DesignSystem.dim)[ask] Side question answered. Main context restored.\(DesignSystem.reset)")
@@ -1286,7 +1307,11 @@ public func runSwiftCoderTUISession(
                 await renderer.printScrollLine(shortcutUserEntry.render())
                 await renderer.printScrollLine("\(DesignSystem.dim)[\(shortcut.profile)] Direct sub-agent dispatch (bypassing orchestrator reasoning).\(DesignSystem.reset)")
                 activeStreamTask = Task { @MainActor in
-                    defer { activeStreamTask = nil }
+                    defer {
+                        activeStreamTask = nil
+                        endOrchestratorCaffeinate()
+                    }
+                    await beginOrchestratorCaffeinate()
                     let result = await agentLoop.dispatchTaskShortcut(profile: shortcut.profile, message: shortcut.message)
                     if result.isError {
                         await renderer.printScrollLine("\(DesignSystem.brightRed)[\(shortcut.profile)] Sub-agent failed.\(DesignSystem.reset)")
@@ -1336,7 +1361,8 @@ public func runSwiftCoderTUISession(
                 await handleCaffeinateCommand(
                     input: commandInput,
                     manager: caffeinateManager,
-                    renderer: renderer
+                    renderer: renderer,
+                    manuallyPinned: &caffeinateManuallyPinned
                 )
                 continue
             }
@@ -1383,7 +1409,11 @@ public func runSwiftCoderTUISession(
             }
 
             activeStreamTask = Task { @MainActor in
-                defer { activeStreamTask = nil }
+                defer {
+                    activeStreamTask = nil
+                    endOrchestratorCaffeinate()
+                }
+                await beginOrchestratorCaffeinate()
                 do {
                     let parsed = ImageAttachmentParser.parse(prompt: effectivePrompt)
                     if !parsed.imageURLs.isEmpty {
@@ -2091,7 +2121,8 @@ private func cycleModelShortcut(
 private func handleCaffeinateCommand(
     input: String,
     manager: CaffeinateManager,
-    renderer: Renderer
+    renderer: Renderer,
+    manuallyPinned: inout Bool
 ) async {
     guard let intent = CaffeinateCommandParser.resolve(input: input) else { return }
 
@@ -2101,6 +2132,7 @@ private func handleCaffeinateCommand(
         await renderer.renderFooter()
 
     case .on:
+        manuallyPinned = true
         await manager.enable(mode: .on)
         await renderer.printScrollLine(
             "\(DesignSystem.dim)Caffeinate: \(await manager.statusDescription)\(DesignSystem.reset)"
@@ -2108,6 +2140,7 @@ private func handleCaffeinateCommand(
         await renderer.renderFooter()
 
     case .busy:
+        manuallyPinned = true
         await manager.enable(mode: .busy)
         await renderer.printScrollLine(
             "\(DesignSystem.dim)Caffeinate: \(await manager.statusDescription)\(DesignSystem.reset)"
@@ -2115,6 +2148,7 @@ private func handleCaffeinateCommand(
         await renderer.renderFooter()
 
     case .off:
+        manuallyPinned = false
         await manager.disable()
         await renderer.printScrollLine(
             "\(DesignSystem.dim)Caffeinate: off\(DesignSystem.reset)"
@@ -2122,6 +2156,7 @@ private func handleCaffeinateCommand(
         await renderer.renderFooter()
 
     case .duration(let seconds):
+        manuallyPinned = true
         await manager.enable(mode: .duration(seconds: seconds))
         await renderer.printScrollLine(
             "\(DesignSystem.dim)Caffeinate: \(await manager.statusDescription)\(DesignSystem.reset)"
