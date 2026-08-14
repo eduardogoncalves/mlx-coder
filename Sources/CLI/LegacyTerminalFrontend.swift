@@ -257,6 +257,19 @@ public final class LegacyTerminalFrontend: AgentFrontend, @unchecked Sendable {
                 let suffix = activeSubAgent.map { " [\($0.profile) · \($0.modelPath)]" } ?? ""
                 s.updateMessage(base + suffix)
             }
+
+        case .workflowStep(let step):
+            stopSpinnerImmediately()
+            switch step {
+            case let .started(workflow, name, index, total, profile):
+                renderer.printStatus("▶ [\(workflow)] step \(index)/\(total): \(name) (\(profile))")
+            case let .finished(_, name, status):
+                renderer.printStatus("\(status == "success" ? "✓" : "◐") \(name) — \(status)")
+            case let .skipped(_, name, reason):
+                renderer.printStatus("⤼ skipped \(name): \(reason)")
+            case let .completed(workflow, succeeded, stepsRun):
+                renderer.printStatus("\(succeeded ? "✓" : "✗") [\(workflow)] workflow \(succeeded ? "completed" : "stopped") after \(stepsRun) step(s)")
+            }
         }
     }
 

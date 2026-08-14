@@ -137,6 +137,52 @@ final class TaskToolRoleTests: XCTestCase {
         )
     }
 
+    // MARK: - files_read digest bridging (WorkflowEngine's {{all_files}} source)
+
+    func testDigestOmitsReadFilesLineWhenEmpty() {
+        let digest = TaskTool.makeSubagentDigest(
+            status: "success",
+            profileName: "codebase_research",
+            taskDescription: "find the auth entry point",
+            summary: "It's in Router.swift",
+            archivePath: nil
+        )
+        XCTAssertFalse(digest.contains("files_read:"))
+        XCTAssertEqual(TaskTool.parseReadFiles(fromDigest: digest), [])
+    }
+
+    func testDigestRoundTripsReadFiles() {
+        let digest = TaskTool.makeSubagentDigest(
+            status: "success",
+            profileName: "codebase_research",
+            taskDescription: "find the auth entry point",
+            summary: "It's in Router.swift",
+            archivePath: nil,
+            readFiles: ["Sources/App/Router.swift", "Sources/Auth/Session.swift"]
+        )
+        XCTAssertTrue(digest.contains("files_read:"))
+        XCTAssertEqual(
+            TaskTool.parseReadFiles(fromDigest: digest),
+            ["Sources/App/Router.swift", "Sources/Auth/Session.swift"]
+        )
+    }
+
+    func testDigestExcludesModifiedFilesFromReadFilesLine() {
+        // A file the stage both read and then edited is already covered by
+        // modified_files — repeating it in files_read would just be noise.
+        let digest = TaskTool.makeSubagentDigest(
+            status: "success",
+            profileName: "executor",
+            taskDescription: "add the login button",
+            summary: "Added the button",
+            archivePath: nil,
+            modifiedFiles: ["Sources/UI/Login.swift"],
+            readFiles: ["Sources/UI/Login.swift", "Sources/App/Router.swift"]
+        )
+        XCTAssertEqual(TaskTool.parseModifiedFiles(fromDigest: digest), ["Sources/UI/Login.swift"])
+        XCTAssertEqual(TaskTool.parseReadFiles(fromDigest: digest), ["Sources/App/Router.swift"])
+    }
+
     // MARK: - statusLineSummary
 
     /// Regression test: TaskTool used to embed the full, unbounded (often

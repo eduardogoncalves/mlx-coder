@@ -83,6 +83,21 @@ public enum AgentEvent: Sendable {
     /// are currently generating, since sub-agents share the parent's frontend
     /// and can use a different model than the orchestrator's own.
     case subAgentActivity(SubAgentActivity)
+
+    /// Progress of a deterministic `WorkflowEngine` run. Unlike prompt-steered
+    /// delegation (where the model decides the order), a workflow's stage
+    /// sequence is fixed in code, so the frontend can show exactly which stage
+    /// of which pipeline is running, was skipped, or finished.
+    case workflowStep(WorkflowStepEvent)
+}
+
+/// Lifecycle of a single stage in a deterministic `WorkflowEngine` pipeline.
+/// `index`/`total` are 1-based for display (e.g. "step 2/4").
+public enum WorkflowStepEvent: Sendable, Equatable {
+    case started(workflow: String, step: String, index: Int, total: Int, profile: String)
+    case finished(workflow: String, step: String, status: String)
+    case skipped(workflow: String, step: String, reason: String)
+    case completed(workflow: String, succeeded: Bool, stepsRun: Int)
 }
 
 /// Lifecycle of a `TaskTool`-delegated sub-agent run, carrying enough context

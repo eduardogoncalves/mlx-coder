@@ -172,7 +172,18 @@ public actor AgentLoop {
     /// turn. Read by `TaskTool` after a sub-agent run so the parent orchestrator
     /// can bridge file modifications into its own build-check/git flow.
     public internal(set) var turnModifiedFiles: Set<String> = []
-    
+
+    /// Paths this turn actually loaded full content for via `read_file`/
+    /// `read_many` — deliberately NOT every path any tool call merely scanned
+    /// (a `grep`/`glob`/`code_search` call routinely touches dozens of
+    /// irrelevant files while searching; only an explicit read is a clean,
+    /// unambiguous "this file mattered" signal). Reset at the start of each
+    /// turn. Read by `TaskTool`/`WorkflowEngine` so a downstream pipeline stage
+    /// (e.g. `/fix`'s Fix step) can jump straight to `read_file` on a file a
+    /// prior stage already established as relevant, instead of re-running
+    /// glob/grep/code_search to relocate it.
+    public internal(set) var turnReadFiles: Set<String> = []
+
     var interactiveInput: InteractiveInput?
     
     var currentGenerationConfig: GenerationEngine.Config
@@ -493,6 +504,11 @@ public actor AgentLoop {
         // files this turn touched — see `turnModifiedFiles` in AgentLoop.swift.
         turnModifiedFiles = []
         defer { turnModifiedFiles = modifiedFilePaths }
+        var readFilePaths = Set<String>()
+        // Mirror into the instance-level property the same way — see
+        // `turnReadFiles` in AgentLoop.swift.
+        turnReadFiles = []
+        defer { turnReadFiles = readFilePaths }
         var lastReadFileSignature: String?
         var sameReadFileStreak = 0
         var readLoopSteeredPaths = Set<String>()
@@ -977,7 +993,8 @@ public actor AgentLoop {
                         sameReadOnlyToolStreak: &sameReadOnlyToolStreak,
                         readOnlyLoopSteeredSignatures: &readOnlyLoopSteeredSignatures,
                         fileModificationToolsExecuted: &fileModificationToolsExecuted,
-                        modifiedFilePaths: &modifiedFilePaths
+                        modifiedFilePaths: &modifiedFilePaths,
+                        readFilePaths: &readFilePaths
                     )
 
                     let userGoal = history.latestUserMessage ?? ""
@@ -1770,7 +1787,8 @@ public actor AgentLoop {
         sameReadOnlyToolStreak: inout Int,
         readOnlyLoopSteeredSignatures: inout Set<String>,
         fileModificationToolsExecuted: inout Bool,
-        modifiedFilePaths: inout Set<String>
+        modifiedFilePaths: inout Set<String>,
+        readFilePaths: inout Set<String>
     ) async -> ToolResult {
         frontend.emit(.toolCallStarted(ToolCallSnapshot(name: call.name, arguments: stringifyArgs(call.arguments))))
 
@@ -2097,6 +2115,17 @@ public actor AgentLoop {
                 } catch {
                     // Git operations are non-fatal
                 }
+            }
+        }
+
+        // Track files this call actually loaded full content for — deliberately
+        // just read_file/read_many, not every path a grep/glob/code_search call
+        // happened to scan. See `turnReadFiles` for why that distinction matters.
+        if !result.isError && approval.approved {
+            if call.name == "read_file", let filepath = (call.arguments["path"] as? String) ?? (call.arguments["file_path"] as? String) {
+                readFilePaths.insert(filepath)
+            } else if call.name == "read_many", let filepaths = call.arguments["paths"] as? [String] {
+                for filepath in filepaths { readFilePaths.insert(filepath) }
             }
         }
 

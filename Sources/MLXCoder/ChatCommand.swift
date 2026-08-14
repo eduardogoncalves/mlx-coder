@@ -9,6 +9,20 @@ import SwiftCoderTUI
 import Speech
 #endif
 
+/// Which deterministic workflow command to reach for, shown in each
+/// command's own usage error (no description given). `/feature` and
+/// `/discovery` run the identical research→plan→execute→review pipeline —
+/// the only difference is whether it pauses before the mutating stages —
+/// so the real decision is "how settled is this request", not which
+/// pipeline is "better". Mirrored in SwiftCoderTUISession.swift for the TUI
+/// front-end (same three commands, same reasoning, duplicated rather than
+/// shared since the two front-ends don't share a commands module).
+private let workflowCommandUsageHints: [String: String] = [
+    "/discovery": "Requirements still unclear or open-ended? Use this — it researches, plans, then pauses for your OK before touching any files.",
+    "/feature": "Already know exactly what to build? Use this — runs research→plan→execute→review straight through, no pause. Reach for /discovery instead if you're not yet sure what the change should look like.",
+    "/fix": "For a known, reproducible bug — the bug report itself defines the scope, so this skips straight to diagnose→fix→verify (no separate planning stage).",
+]
+
 struct ChatCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "chat",
@@ -765,19 +779,56 @@ struct ChatCommand: AsyncParsableCommand {
                 continue
             }
 
-            if TUIFeatureDevCommand.matches(trimmed) {
-                let args = TUIFeatureDevCommand.arguments(from: trimmed)
-                let featurePrompt = TUIFeatureDevCommand.buildPrompt(arguments: args)
-                renderer.printStatus(TUIFeatureDevCommand.statusLine(arguments: args))
+            if let (workflow, command) = ["/discovery": Workflow.discovery, "/feature": Workflow.feature, "/fix": Workflow.fix]
+                .first(where: { trimmed == $0.key || trimmed.hasPrefix($0.key + " ") })
+                .map({ ($0.value, $0.key) }) {
+                let input = String(trimmed.dropFirst(command.count)).trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !input.isEmpty else {
+                    renderer.printError("Usage: \(command) <description> — runs the deterministic '\(workflow.name)' pipeline. \(workflowCommandUsageHints[command] ?? "")")
+                    continue
+                }
+                renderer.printStatus("⚙ \(command) — running '\(workflow.name)' pipeline for: \(input)")
                 renderer.printStatus("[Key mode] Generation active. Press Esc to cancel.")
-                let task = Task {
-                    try await agentLoop.processUserMessage(featurePrompt)
+                let task = Task<WorkflowRunResult, Error> {
+                    await agentLoop.runWorkflow(workflow, input: input)
                 }
                 await CancelController.shared.setTask(task)
                 do {
-                    try await task.value
+                    let result = try await task.value
+                    renderer.printStatus(result.summary)
                 } catch is CancellationError {
-                    renderer.printError("[feature-dev] Generation cancelled.")
+                    renderer.printError("[\(command)] Cancelled.")
+                } catch {
+                    renderer.printError(error.localizedDescription)
+                }
+                await CancelController.shared.setTask(nil)
+                continue
+            }
+
+            if trimmed == "/workflow" || trimmed.hasPrefix("/workflow ") {
+                let rest = String(trimmed.dropFirst("/workflow".count)).trimmingCharacters(in: .whitespacesAndNewlines)
+                let parts = rest.split(separator: " ", maxSplits: 1)
+                guard let name = parts.first, let workflow = Workflow.builtin(named: String(name)) else {
+                    let known = Workflow.builtins.map(\.name).joined(separator: ", ")
+                    renderer.printError("Usage: /workflow <name> <description> — known workflows: \(known). Prefer /discovery, /feature, or /fix directly.")
+                    continue
+                }
+                let input = parts.count > 1 ? String(parts[1]) : ""
+                guard !input.isEmpty else {
+                    renderer.printError("Usage: /workflow \(name) <description>")
+                    continue
+                }
+                renderer.printStatus("⚙ /workflow — running '\(workflow.name)' pipeline for: \(input)")
+                renderer.printStatus("[Key mode] Generation active. Press Esc to cancel.")
+                let task = Task<WorkflowRunResult, Error> {
+                    await agentLoop.runWorkflow(workflow, input: input)
+                }
+                await CancelController.shared.setTask(task)
+                do {
+                    let result = try await task.value
+                    renderer.printStatus(result.summary)
+                } catch is CancellationError {
+                    renderer.printError("[workflow] Cancelled.")
                 } catch {
                     renderer.printError(error.localizedDescription)
                 }
@@ -969,7 +1020,10 @@ func printREPLHelp() {
       \u{001B}[32m/steer [msg]\u{001B}[0m   Queue a steering message injected between agent turns (no arg = list queue)
       \u{001B}[32m/followup [msg]\u{001B}[0m Queue a follow-up run after the current task (no arg = list queue)
       \u{001B}[32m/ask <question>\u{001B}[0m Ask a quick side question without affecting the main conversation
-      \u{001B}[32m/feature-dev [desc]\u{001B}[0m Guided 7-phase feature-development workflow (discovery → review)
+      \u{001B}[32m/discovery <desc>\u{001B}[0m Requirements still unclear — research→plan, then asks before implementing
+      \u{001B}[32m/feature <desc>\u{001B}[0m Requirements already settled — research→plan→execute→review, no pause
+      \u{001B}[32m/fix <desc>\u{001B}[0m Known bug — deterministic diagnose→fix→verify pipeline
+      \u{001B}[32m/workflow <name> <desc>\u{001B}[0m Run any built-in workflow by name
       \u{001B}[32m/merge-approval\u{001B}[0m Trigger the "Awaiting approval before merge" flow
       \u{001B}[32m/gittree\u{001B}[0m       List git worktrees and switch workspace/branch to one
       \u{001B}[32m/sandbox\u{001B}[0m       Toggle macOS Seatbelt sandbox for shell commands

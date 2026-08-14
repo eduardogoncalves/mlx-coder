@@ -28,6 +28,21 @@ struct TUIShellCommandParseResult: Equatable {
     let suppressHistory: Bool
 }
 
+/// Which deterministic workflow command to reach for, shown in each
+/// command's own usage error (no description given) so the choice is
+/// explained right where it matters, not just buried in /help. `/feature`
+/// and `/discovery` run the identical research→plan→execute→review
+/// pipeline — the only difference is whether it pauses before the mutating
+/// stages — so the real decision is "how settled is this request", not
+/// which pipeline is "better". Mirrored in ChatCommand.swift for the
+/// non-TUI REPL (same three commands, same reasoning, duplicated rather
+/// than shared since the two front-ends don't share a commands module).
+private let workflowCommandUsageHints: [String: String] = [
+    "/discovery": "Requirements still unclear or open-ended? Use this — it researches, plans, then pauses for your OK before touching any files.",
+    "/feature": "Already know exactly what to build? Use this — runs research→plan→execute→review straight through, no pause. Reach for /discovery instead if you're not yet sure what the change should look like.",
+    "/fix": "For a known, reproducible bug — the bug report itself defines the scope, so this skips straight to diagnose→fix→verify (no separate planning stage).",
+]
+
 enum TUIShellCommandParser {
     static func parse(_ input: String) -> TUIShellCommandParseResult {
         if input == "!!" {
@@ -1139,25 +1154,62 @@ public func runSwiftCoderTUISession(
                 }
                 continue
             }
-            if TUIFeatureDevCommand.matches(commandInput) {
+            if let (workflow, command) = ["/discovery": Workflow.discovery, "/feature": Workflow.feature, "/fix": Workflow.fix]
+                .first(where: { commandInput == $0.key || commandInputLower.hasPrefix($0.key + " ") })
+                .map({ ($0.value, $0.key) }) {
                 if activeStreamTask != nil {
-                    await renderer.printScrollLine("\(DesignSystem.brightRed)✗ /feature-dev unavailable while a turn is in progress. Press Esc first.\(DesignSystem.reset)")
+                    await renderer.printScrollLine("\(DesignSystem.brightRed)✗ \(command) unavailable while a turn is in progress. Press Esc first.\(DesignSystem.reset)")
                     continue
                 }
-                let args = TUIFeatureDevCommand.arguments(from: commandInput)
-                let featurePrompt = TUIFeatureDevCommand.buildPrompt(arguments: args)
-                await renderer.printScrollLine("\(DesignSystem.dim)\(TUIFeatureDevCommand.statusLine(arguments: args))\(DesignSystem.reset)")
-                lastUserPrompt = featurePrompt
+                let input = String(commandInput.dropFirst(command.count)).trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !input.isEmpty else {
+                    await renderer.printScrollLine("\(DesignSystem.brightRed)✗ Usage: \(command) <description> — runs the deterministic '\(workflow.name)' pipeline (stage order is fixed in code, not chosen by the model). \(workflowCommandUsageHints[command] ?? "")\(DesignSystem.reset)")
+                    continue
+                }
+                await renderer.printScrollLine("\(DesignSystem.dim)⚙ \(command) — running '\(workflow.name)' pipeline for: \(input)\(DesignSystem.reset)")
+                lastUserPrompt = input
                 activeStreamTask = Task { @MainActor in
-                    defer { activeStreamTask = nil }
-                    do {
-                        try await agentLoop.processUserMessage(featurePrompt)
-                    } catch is CancellationError {
-                        // abortGeneration() already printed "· Aborted" and cleaned up the UI.
-                    } catch {
-                        await renderer.printScrollLine("\(DesignSystem.brightRed)✗ \(error.localizedDescription)\(DesignSystem.reset)")
+                    defer {
+                        activeStreamTask = nil
+                        endOrchestratorCaffeinate()
                     }
+                    await beginOrchestratorCaffeinate()
+                    let result = await agentLoop.runWorkflow(workflow, input: input)
                     await renderer.flushStreamLine()
+                    await renderer.printScrollLine(result.summary)
+                    await renderer.setPendingCount(0)
+                    await renderer.renderFooter()
+                }
+                continue
+            }
+            if commandInput == "/workflow" || commandInputLower.hasPrefix("/workflow ") {
+                if activeStreamTask != nil {
+                    await renderer.printScrollLine("\(DesignSystem.brightRed)✗ /workflow unavailable while a turn is in progress. Press Esc first.\(DesignSystem.reset)")
+                    continue
+                }
+                let rest = String(commandInput.dropFirst("/workflow".count)).trimmingCharacters(in: .whitespacesAndNewlines)
+                let parts = rest.split(separator: " ", maxSplits: 1)
+                guard let name = parts.first, let workflow = Workflow.builtin(named: String(name)) else {
+                    let known = Workflow.builtins.map(\.name).joined(separator: ", ")
+                    await renderer.printScrollLine("\(DesignSystem.brightRed)✗ Usage: /workflow <name> <description> — known workflows: \(known). Prefer /discovery, /feature, or /fix directly.\(DesignSystem.reset)")
+                    continue
+                }
+                let input = parts.count > 1 ? String(parts[1]) : ""
+                guard !input.isEmpty else {
+                    await renderer.printScrollLine("\(DesignSystem.brightRed)✗ Usage: /workflow \(name) <description>\(DesignSystem.reset)")
+                    continue
+                }
+                await renderer.printScrollLine("\(DesignSystem.dim)⚙ /workflow — running '\(workflow.name)' pipeline for: \(input)\(DesignSystem.reset)")
+                lastUserPrompt = input
+                activeStreamTask = Task { @MainActor in
+                    defer {
+                        activeStreamTask = nil
+                        endOrchestratorCaffeinate()
+                    }
+                    await beginOrchestratorCaffeinate()
+                    let result = await agentLoop.runWorkflow(workflow, input: input)
+                    await renderer.flushStreamLine()
+                    await renderer.printScrollLine(result.summary)
                     await renderer.setPendingCount(0)
                     await renderer.renderFooter()
                 }
@@ -1628,7 +1680,10 @@ private func helpLines() -> [String] {
         "  /steer [msg] queue/list steering messages",
         "  /followup [msg] queue/list follow-ups",
         "  /ask [question] ask a quick side question without changing main context",
-        "  /feature-dev [description] guided 7-phase feature-development workflow",
+        "  /discovery <description> requirements still unclear — research→plan, then asks before implementing",
+        "  /feature <description> requirements already settled — research→plan→execute→review, no pause",
+        "  /fix <description> known bug — deterministic diagnose→fix→verify pipeline",
+        "  /workflow <name> <description> run any built-in workflow by name",
         "  /merge-approval run merge approval flow",
         "  /gittree run git tree flow",
         "  /quit    exit the TUI",

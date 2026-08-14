@@ -178,11 +178,11 @@ public struct TaskTool: Tool {
         case .planner:
             return "You are the PLANNER. Research the codebase, then produce a concrete, actionable implementation plan and persist it with `plan_file`. Your plan MUST name the exact files/symbols to change (with `file:line`), the chosen approach, and a step-by-step build order. You have `web_search`/`web_fetch` for external docs or URLs the user gave you. You MUST NOT edit files, write full implementations into your answer, or run destructive/build commands — planning only; implementation is the EXECUTOR's job. \(outputRules)"
         case .executor:
-            return "You are the EXECUTOR. Implement the requested change end-to-end: read enough surrounding code to understand it, then write/edit/patch the files and run any shell commands required. MATCH the existing code's conventions and structure — do not invent new patterns. After editing, verify your own work (build or targeted tests) when the tools allow, and fix what you broke. Change ONLY what the task requires; do not refactor unrelated code. \(outputRules)"
+            return "You are the EXECUTOR. Implement the requested change end-to-end: read enough surrounding code to understand it, then write/edit/patch the files and run any shell commands required. MATCH the existing code's conventions and structure — do not invent new patterns. If the plan given to you looks incomplete or truncated, call `plan_file` with action 'read' to fetch the full, authoritative plan — never guess a file path under `.native-agent/` for it. After editing, search for and run any existing test that actually exercises the changed code — a clean build only proves it compiles, not that it works; if no relevant test exists or you can't run one, say so explicitly instead of reporting the change as verified. Fix what you broke. Change ONLY what the task requires; do not refactor unrelated code. \(outputRules)"
         case .reviewer:
             return "You are the REVIEWER. Inspect the CURRENT state of the code — read files, run `build_check` if available — but NEVER edit anything. Check correctness (logic errors, null/edge cases, race conditions, resource leaks) and project-convention compliance. Only report a finding you are \u{2265}80% confident is a real problem after double-checking; skip stylistic nitpicks. Format each finding as `file:line — issue — suggested fix`. If the change looks correct, say so explicitly instead of inventing concerns. \(outputRules)"
         case .filesystem:
-            return "You are the FILESYSTEM AGENT. Perform ONLY the requested file reads/writes/edits, exactly as described. Do NOT run shell commands and do NOT make changes the task did not ask for. \(outputRules)"
+            return "You are the FILESYSTEM AGENT. Perform ONLY the requested file reads/writes/edits, exactly as described. Do NOT run shell commands and do NOT make changes the task did not ask for. You have no shell access to build or test what you changed, so report only that the edit was applied as requested — never that it builds, passes tests, or otherwise works. \(outputRules)"
         case .terminal:
             return "You are the TERMINAL AGENT. Run ONLY the requested shell command(s) and report their output. Do NOT edit files and do NOT run extra commands beyond what the task asks. \(outputRules)"
         }
@@ -209,7 +209,7 @@ public struct TaskTool: Tool {
         case .planner:
             return ["read_file", "read_many", "list_dir", "glob", "grep", "code_search", "web_search", "web_fetch", "search_knowledge", "plan_file"]
         case .executor:
-            return ["read_file", "read_many", "list_dir", "glob", "grep", "write_file", "edit_file", "append_file", "patch", "bash", "code_search", "lsp_diagnostics"]
+            return ["read_file", "read_many", "list_dir", "glob", "grep", "write_file", "edit_file", "append_file", "patch", "bash", "code_search", "lsp_diagnostics", "plan_file"]
         case .reviewer:
             return ["read_file", "read_many", "list_dir", "glob", "grep", "code_search", "lsp_diagnostics", "lsp_references", "build_check"]
         case .filesystem:
@@ -714,6 +714,14 @@ public struct TaskTool: Tool {
     /// sub-agent's edits into its own build-check/git flow.
     static let modifiedFilesLinePrefix = "modified_files: "
 
+    /// Prefix identifying the read-files line in a digest, parsed back out by
+    /// `WorkflowEngine` so a downstream pipeline stage (e.g. `/fix`'s Fix step)
+    /// can be handed the exact set of files a prior stage established as
+    /// relevant — see `AgentLoop.turnReadFiles` for why this is scoped to
+    /// actual `read_file`/`read_many` calls rather than every path a search
+    /// tool happened to scan.
+    static let readFilesLinePrefix = "files_read: "
+
     /// Prefix identifying the spooled-output pointer line in a digest.
     static let toolOutputLinePrefix = "tool_output: "
 
@@ -724,6 +732,7 @@ public struct TaskTool: Tool {
         summary: String,
         archivePath: String?,
         modifiedFiles: [String] = [],
+        readFiles: [String] = [],
         summaryTruncated: Bool = false,
         summaryBytes: Int = 0,
         toolCalls: Int = 0,
@@ -762,6 +771,13 @@ public struct TaskTool: Tool {
 
         if !modifiedFiles.isEmpty {
             lines.append("\(modifiedFilesLinePrefix)\(modifiedFiles.sorted().joined(separator: ", "))")
+        }
+
+        // Only worth a line when it adds information beyond modified_files —
+        // a file this stage both read and then edited is already covered there.
+        let readOnlyFiles = Set(readFiles).subtracting(modifiedFiles)
+        if !readOnlyFiles.isEmpty {
+            lines.append("\(readFilesLinePrefix)\(readOnlyFiles.sorted().joined(separator: ", "))")
         }
 
         if let contractLine {
@@ -828,16 +844,71 @@ public struct TaskTool: Tool {
 
     /// Parses the `modified_files:` line out of a digest (if present).
     static func parseModifiedFiles(fromDigest digest: String) -> [String] {
+        parseCommaSeparatedLine(fromDigest: digest, prefix: modifiedFilesLinePrefix)
+    }
+
+    /// Parses the `files_read:` line out of a digest (if present) — the files
+    /// a workflow stage actually loaded content for, excluding any it also
+    /// modified (those are already in `parseModifiedFiles`).
+    static func parseReadFiles(fromDigest digest: String) -> [String] {
+        parseCommaSeparatedLine(fromDigest: digest, prefix: readFilesLinePrefix)
+    }
+
+    private static func parseCommaSeparatedLine(fromDigest digest: String, prefix: String) -> [String] {
         for line in digest.split(separator: "\n", omittingEmptySubsequences: false) {
             let lineString = String(line)
-            guard lineString.hasPrefix(modifiedFilesLinePrefix) else { continue }
-            let list = lineString.dropFirst(modifiedFilesLinePrefix.count)
+            guard lineString.hasPrefix(prefix) else { continue }
+            let list = lineString.dropFirst(prefix.count)
             return list
                 .split(separator: ",")
                 .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
                 .filter { !$0.isEmpty }
         }
         return []
+    }
+
+    /// Prefix identifying the status line in a digest (see `makeSubagentDigest`).
+    static let statusLinePrefix = "status: "
+
+    /// Parses the `status:` line out of a digest (`"success"`/`"partial"`).
+    /// Returns `nil` when the digest has no status line (e.g. a hard-error
+    /// `ToolResult` that never reached `makeSubagentDigest`). The workflow
+    /// engine uses this to apply its per-step failure policy.
+    static func parseStatus(fromDigest digest: String) -> String? {
+        for line in digest.split(separator: "\n", omittingEmptySubsequences: false) {
+            let lineString = String(line)
+            guard lineString.hasPrefix(statusLinePrefix) else { continue }
+            return String(lineString.dropFirst(statusLinePrefix.count))
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return nil
+    }
+
+    /// Bare marker line `makeSubagentDigest` emits right before the summary
+    /// body (see `lines.append("summary:")` there).
+    static let summaryFieldMarker = "summary:"
+
+    /// Extracts the LAST non-empty line of a digest's `summary:` body —
+    /// deliberately never the whole digest. A caller checking for a specific
+    /// sentinel (e.g. `WorkflowStep.requiredSuccessMarker`) that instead
+    /// scanned the full digest text could be fooled two ways: the truncated
+    /// `task:` echo repeats the first ~160 characters of the task
+    /// description, which — for a step whose own instructions ask the
+    /// sub-agent to end with that exact sentinel — can itself contain the
+    /// marker text; and the sub-agent's own prose can mention/quote the
+    /// marker in passing without it being the actual verdict. Scoping to
+    /// just the summary's last line avoids both.
+    static func lastSummaryLine(fromDigest digest: String) -> String? {
+        let allLines = digest.components(separatedBy: "\n")
+        guard let summaryStart = allLines.firstIndex(of: summaryFieldMarker) else {
+            return nil
+        }
+        // `makeSubagentDigest` always appends "stdout_truncated: " immediately
+        // after the summary body — that's the fixed boundary.
+        let body = allLines[(summaryStart + 1)...].prefix { !$0.hasPrefix("stdout_truncated: ") }
+        return body
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .last { !$0.isEmpty }
     }
 
     public let name = "task"
@@ -944,7 +1015,20 @@ public struct TaskTool: Tool {
         case .failure(.message(let message)):
             return .error(message)
         }
+        return await run(validatedArguments)
+    }
 
+    /// Spawn, run, and digest a sub-agent for the given already-validated
+    /// arguments, returning the sub-agent digest (or an error) as a
+    /// `ToolResult`. This is the single sub-agent execution code path: the
+    /// `task` tool reaches it via `execute` above, and the deterministic
+    /// workflow engine (`WorkflowEngine`) calls it directly with a synthesized
+    /// `ValidatedArguments` so both share identical role-model resolution,
+    /// local-model release/reacquire, archiving, teardown, and digest shaping.
+    /// The digest is the structured contract callers read back — status via
+    /// `TaskTool.parseStatus(fromDigest:)`, edited files via
+    /// `TaskTool.parseModifiedFiles(fromDigest:)`.
+    func run(_ validatedArguments: TaskTool.ValidatedArguments) async -> ToolResult {
         let sanitizedDescription = validatedArguments.description
         // Per-call contracts stay with the follow-up call; profile/tools/mode/
         // isolation may be overridden below when resuming a prior run.
@@ -1260,6 +1344,9 @@ public struct TaskTool: Tool {
             // here (not just at digest time) so the no-summary fallback can lead
             // with the concrete "what changed" list instead of only raw output.
             let subAgentModifiedFiles = isolatedRoot != nil ? [] : Array(await subAgent.turnModifiedFiles)
+            // Same scoping as modifiedFiles above (only meaningful in the shared
+            // workspace) — see `AgentLoop.turnReadFiles`.
+            let subAgentReadFiles = isolatedRoot != nil ? [] : Array(await subAgent.turnReadFiles)
 
             // If even the forced follow-up didn't produce text (model ignored the
             // instruction, or the follow-up call itself errored), synthesize a
@@ -1377,6 +1464,7 @@ public struct TaskTool: Tool {
                 summary: digestBody,
                 archivePath: archivePath,
                 modifiedFiles: subAgentModifiedFiles,
+                readFiles: subAgentReadFiles,
                 summaryTruncated: bodyTruncated,
                 summaryBytes: summaryBytes,
                 toolCalls: toolCallCount,

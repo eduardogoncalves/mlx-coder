@@ -630,6 +630,24 @@ public final class SwiftCoderTUIFrontend: AgentFrontend, @unchecked Sendable {
                 await renderer.setThinking(spinnerLabel())
                 await renderer.renderFooter()
             }
+
+        case .workflowStep(let step):
+            switch step {
+            case let .started(workflow, name, index, total, profile):
+                await renderer.printScrollLine(
+                    "\(DesignSystem.cyan)▶ [\(workflow)] step \(index)/\(total): \(name) (\(profile))\(DesignSystem.reset)"
+                )
+            case let .finished(_, name, status):
+                let mark = status == "success" ? "\(DesignSystem.green)✓" : "\(DesignSystem.yellow)◐"
+                await renderer.printScrollLine("\(mark) \(name) — \(status)\(DesignSystem.reset)")
+            case let .skipped(_, name, reason):
+                await renderer.printScrollLine("\(DesignSystem.dim)⤼ skipped \(name): \(reason)\(DesignSystem.reset)")
+            case let .completed(workflow, succeeded, stepsRun):
+                let mark = succeeded ? "\(DesignSystem.green)✓" : "\(DesignSystem.brightRed)✗"
+                await renderer.printScrollLine(
+                    "\(mark) [\(workflow)] workflow \(succeeded ? "completed" : "stopped") after \(stepsRun) step(s)\(DesignSystem.reset)"
+                )
+            }
         }
     }
 

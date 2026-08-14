@@ -55,4 +55,45 @@ final class SubagentDigestSpoolTests: XCTestCase {
         XCTAssertTrue(digest.contains("response_mode:\"raw\""))
         XCTAssertTrue(digest.contains("task_output"))
     }
+
+    // MARK: - lastSummaryLine (scoped verdict parsing for WorkflowStep.requiredSuccessMarker)
+
+    func testLastSummaryLine_returnsFinalNonEmptyLineOfSummaryBody() {
+        let digest = TaskTool.makeSubagentDigest(
+            status: "success", profileName: "test_engineering",
+            taskDescription: "verify the fix",
+            summary: "Ran `swift test --filter FooTests`.\nAll tests passed.\n\nVERIFICATION: PASS",
+            archivePath: nil
+        )
+        XCTAssertEqual(TaskTool.lastSummaryLine(fromDigest: digest), "VERIFICATION: PASS")
+    }
+
+    func testLastSummaryLine_ignoresTaskEchoEntirely() {
+        // The task echo can itself contain marker-shaped text (e.g. the
+        // step's own instructions asking for it) — lastSummaryLine must
+        // never reach back into the `task:` line to find it.
+        let digest = TaskTool.makeSubagentDigest(
+            status: "success", profileName: "test_engineering",
+            taskDescription: "End with VERIFICATION: PASS or VERIFICATION: FAIL, verbatim.",
+            summary: "3 of 5 tests still fail.\nVERIFICATION: FAIL",
+            archivePath: nil
+        )
+        XCTAssertEqual(TaskTool.lastSummaryLine(fromDigest: digest), "VERIFICATION: FAIL")
+    }
+
+    func testLastSummaryLine_stopsAtStdoutTruncatedBoundary() {
+        // Confirms the extraction doesn't accidentally swallow fields that
+        // come after the summary body (stdout_truncated / summary_bytes /
+        // tool_calls / archive / modified_files).
+        let digest = TaskTool.makeSubagentDigest(
+            status: "success", profileName: "executor",
+            taskDescription: "task", summary: "Done.\nmodified_files: not/a/real/field/this/is/summary/text",
+            archivePath: "some/archive/path", modifiedFiles: ["Foo.swift"]
+        )
+        XCTAssertEqual(TaskTool.lastSummaryLine(fromDigest: digest), "modified_files: not/a/real/field/this/is/summary/text")
+    }
+
+    func testLastSummaryLine_returnsNilWhenNoSummaryMarker() {
+        XCTAssertNil(TaskTool.lastSummaryLine(fromDigest: "not a real digest at all"))
+    }
 }
