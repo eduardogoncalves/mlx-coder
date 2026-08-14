@@ -188,16 +188,16 @@ func memoryDoctorCheck() async -> DoctorCheck {
 // MARK: - Code Graph Doctor Check
 
 /// Reports the health of the auto-recorded code graph (`Sources/CodeGraph/`).
-/// When disabled (the default), this is a pass-through — the feature ships
-/// off until opted in via `codeGraph.enabled` in config.json. When `rebuild`
-/// is set, forces a full drop + re-scan (synchronous — waits for the result)
-/// before reporting stats, mirroring `doctor --rebuild-graph`.
+/// Enabled by default; if `codeGraph.enabled:false` is set in config.json
+/// this is a pass-through. When `rebuild` is set, forces a full drop +
+/// re-scan (synchronous — waits for the result) before reporting stats,
+/// mirroring `doctor --rebuild-graph`.
 func codeGraphDoctorCheck(
     workspaceRoot: String,
     runtimeConfig: RuntimeConfig,
     rebuild: Bool
 ) async -> DoctorCheck {
-    let config = runtimeConfig.codeGraph ?? .disabled
+    let config = runtimeConfig.codeGraph ?? CodeGraphConfig()
     guard config.enabled else {
         if rebuild {
             return DoctorCheck(name: "code-graph", status: .warn, message: "codeGraph.enabled=false — nothing to rebuild. Set it in ~/.mlx-coder/config.json to use the code graph.")

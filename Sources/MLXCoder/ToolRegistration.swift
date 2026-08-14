@@ -32,7 +32,7 @@ func registerAllTools(
     // Search tools
     await registry.register(GlobTool(permissions: permissions))
     await registry.register(GrepTool(permissions: permissions))
-    await registry.register(CodeSearchTool(permissions: permissions))
+    await registry.register(CodeSearchTool(permissions: permissions, codeGraphIndexer: codeGraphIndexer))
 
     // Shell
     await registry.register(BashTool(permissions: permissions, useSandbox: useSandbox))
@@ -56,7 +56,8 @@ func registerAllTools(
         frontend: frontend,
         roleModels: AgentRoleRegistry.current(workspaceRoot: permissions.workspaceRoot).roleModelMap,
         parentAgentLoop: nil,
-        toolOutputSpool: toolOutputSpool
+        toolOutputSpool: toolOutputSpool,
+        codeGraphIndexer: codeGraphIndexer
     ))
     if let modelContainer {
         await registry.register(ProjectExpertLoRATool(
@@ -96,9 +97,10 @@ func registerAllTools(
     await registry.register(LogKnowledgeTool(workspaceRoot: permissions.workspaceRoot))
     await registry.register(SearchKnowledgeTool(workspaceRoot: permissions.workspaceRoot))
 
-    // Code graph (optional — only registered when `codeGraph.enabled` in
-    // config.json produced a live indexer; ships off by default so the tool
-    // isn't advertised/prompt-token-costed until opted in).
+    // Code graph — on by default; only skipped if `codeGraph.enabled:false`
+    // in config.json suppressed indexer construction (see RunCommand/
+    // ChatCommand), so the tool isn't advertised/prompt-token-costed when
+    // explicitly opted out.
     if let codeGraphIndexer {
         await registry.register(CodeGraphExploreTool(indexer: codeGraphIndexer))
     }

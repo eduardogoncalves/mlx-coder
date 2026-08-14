@@ -6,8 +6,8 @@
 import Foundation
 
 public struct CodeGraphConfig: Sendable, Equatable, Codable {
-    /// Master switch. Ships **off** — zero behavior change until opted in
-    /// (plan §6, §11).
+    /// Master switch. On by default (M1–M5 validated live); set
+    /// `enabled:false` in config.json to opt back out.
     public var enabled: Bool
     /// Files larger than this are skipped (never read/extracted).
     public var maxFileBytes: Int
@@ -19,8 +19,8 @@ public struct CodeGraphConfig: Sendable, Equatable, Codable {
     public var exploreDepth: Int
     /// M5a (plan §13.4): enable the tree-sitter base tier
     /// (`LanguageServerRegistry`/`TreeSitterExtractor`) for languages with a
-    /// vendored tier-1 grammar. Off by default — until opted in, extraction
-    /// is byte-for-byte the M1–M4 Swift-only lexical path.
+    /// vendored tier-1 grammar. On by default alongside `enabled`; set
+    /// `treeSitter:false` to fall back to the M1–M4 Swift-only lexical path.
     public var treeSitter: Bool
     /// M5b (plan §13.4): enable async LSP call-hierarchy enrichment
     /// (`SemanticEdgeEnricher`), run off the critical path by the indexer.
@@ -40,11 +40,11 @@ public struct CodeGraphConfig: Sendable, Equatable, Codable {
     public var grammarDownload: String
 
     public init(
-        enabled: Bool = false,
+        enabled: Bool = true,
         maxFileBytes: Int = 1_000_000,
         indexOnMutation: Bool = true,
         exploreDepth: Int = 1,
-        treeSitter: Bool = false,
+        treeSitter: Bool = true,
         callEnrichment: Bool = false,
         grammarDownload: String = "ask"
     ) {
@@ -60,7 +60,9 @@ public struct CodeGraphConfig: Sendable, Equatable, Codable {
         }
     }
 
-    /// The disabled default — used everywhere the feature isn't explicitly on.
+    /// Explicit opt-out — pass when `enabled:false` (or no config at all and
+    /// the caller wants the pre-M6 off behavior) rather than relying on
+    /// `CodeGraphConfig()`'s now-on default.
     public static let disabled = CodeGraphConfig(enabled: false)
 
     private enum CodingKeys: String, CodingKey {

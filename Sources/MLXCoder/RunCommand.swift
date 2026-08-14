@@ -190,11 +190,11 @@ struct RunCommand: AsyncParsableCommand {
         )
         warnIfUnsafeCommandExecution(renderer: renderer, sandboxEnabled: effectiveSandbox, permissions: permissions)
 
-        // Code graph (optional — ships disabled; see `codeGraph.enabled` in
-        // config.json). Bootstrapping + the initial workspace scan run
+        // Code graph (on by default — see `codeGraph.enabled` in config.json
+        // to opt out). Bootstrapping + the initial workspace scan run
         // detached/low-priority so they never block startup — the tool's own
         // staleness banner covers the window until the scan catches up.
-        let codeGraphConfig = runtimeConfig.codeGraph ?? .disabled
+        let codeGraphConfig = runtimeConfig.codeGraph ?? CodeGraphConfig()
         let codeGraphStore = CodeGraphStore()
         let codeGraphIndexer = CodeGraphIndexer(store: codeGraphStore, permissions: permissions, config: codeGraphConfig)
         if codeGraphConfig.enabled {

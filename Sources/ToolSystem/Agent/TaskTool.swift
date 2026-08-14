@@ -905,6 +905,10 @@ public struct TaskTool: Tool {
     /// sub-agent hands back an oversized digest body as a spool pointer + line
     /// range (so the orchestrator can page it / delegate it) rather than inline.
     private let toolOutputSpool: ToolOutputSpoolConfig
+    /// Threaded through to a sub-agent's own `code_search`, so it gets the
+    /// same deterministic graph-lookup fast path as the top-level agent
+    /// instead of silently falling back to regex-only search.
+    private let codeGraphIndexer: CodeGraphIndexer?
 
     public init(
         modelContainer: ModelContainer?,
@@ -916,7 +920,8 @@ public struct TaskTool: Tool {
         frontend: any AgentFrontend,
         roleModels: [String: String] = [:],
         parentAgentLoop: AgentLoop? = nil,
-        toolOutputSpool: ToolOutputSpoolConfig = .enabledDefault
+        toolOutputSpool: ToolOutputSpoolConfig = .enabledDefault,
+        codeGraphIndexer: CodeGraphIndexer? = nil
     ) {
         self.modelContainer = modelContainer
         self.permissions = permissions
@@ -928,6 +933,7 @@ public struct TaskTool: Tool {
         self.roleModels = roleModels
         self.parentAgentLoop = parentAgentLoop
         self.toolOutputSpool = toolOutputSpool
+        self.codeGraphIndexer = codeGraphIndexer
     }
 
     public func execute(arguments: [String: Any]) async throws -> ToolResult {
@@ -1498,7 +1504,7 @@ public struct TaskTool: Tool {
         case "grep":
             await registry.register(GrepTool(permissions: permissions))
         case "code_search":
-            await registry.register(CodeSearchTool(permissions: permissions))
+            await registry.register(CodeSearchTool(permissions: permissions, codeGraphIndexer: codeGraphIndexer))
         case "bash":
             await registry.register(BashTool(permissions: permissions, useSandbox: useSandbox, backgroundJobs: backgroundJobs))
         case "build_check":

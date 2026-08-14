@@ -18,9 +18,11 @@ public struct CodeSearchTool: Tool {
     )
 
     private let permissions: PermissionEngine
+    private let codeGraphIndexer: CodeGraphIndexer?
 
-    public init(permissions: PermissionEngine) {
+    public init(permissions: PermissionEngine, codeGraphIndexer: CodeGraphIndexer? = nil) {
         self.permissions = permissions
+        self.codeGraphIndexer = codeGraphIndexer
     }
 
     public func execute(arguments: [String: Any]) async throws -> ToolResult {
@@ -36,6 +38,22 @@ public struct CodeSearchTool: Tool {
             resolvedPath = try permissions.validatePath(searchPath)
         } catch {
             return .error(error.localizedDescription)
+        }
+
+        // Prefer the deterministic, tree-sitter/lexically-indexed code graph
+        // when it's live: exact symbol-table lookups beat the regex
+        // heuristics below (no per-language pattern guessing, no false
+        // positives from comments/strings) and cover every indexed language,
+        // not just the four hardcoded under `symbolPatterns`. Falls straight
+        // through to the grep path below on a miss (graph not populated yet,
+        // symbol not indexed, disabled, etc.) so behavior never regresses.
+        if let codeGraphIndexer,
+           let graphResults = try? await graphMatches(for: query, in: resolvedPath, indexer: codeGraphIndexer, language: language),
+           !graphResults.isEmpty {
+            let truncated = Array(graphResults.prefix(50))
+            let omitted = graphResults.count > 50 ? graphResults.count - 50 : 0
+            let marker = omitted > 0 ? "[... \(omitted) more results omitted ...]" : nil
+            return ToolResult(content: truncated.joined(separator: "\n"), truncationMarker: marker)
         }
 
         // Build patterns for common code definitions
@@ -142,6 +160,37 @@ public struct CodeSearchTool: Tool {
             return []
         }
         return ["--include", "*.\(ext)"]
+    }
+
+    /// Exact-name lookup, falling back to an FTS prefix search, against the
+    /// auto-recorded code graph (`Sources/CodeGraph/`). Returns grep-shaped
+    /// `path:line: kind name — signature` lines so callers can't tell the
+    /// difference from the regex path below.
+    private func graphMatches(for query: String, in resolvedPath: String, indexer: CodeGraphIndexer, language: String?) async throws -> [String] {
+        guard await indexer.status().enabled else { return [] }
+
+        var matches = try await indexer.store.findSymbols(named: query, limit: 25)
+        if matches.isEmpty {
+            matches = try await indexer.store.searchSymbols(query: query, limit: 25)
+        }
+        guard !matches.isEmpty else { return [] }
+
+        let scopePrefix = relativizePath(resolvedPath)
+        let extFilter = language.flatMap(languageExtension(_:))
+
+        return matches
+            .filter { match in
+                if let extFilter, !match.path.hasSuffix(".\(extFilter)") { return false }
+                if scopePrefix != "." && !(match.path == scopePrefix || match.path.hasPrefix(scopePrefix + "/")) { return false }
+                return !permissions.isPathIgnored(match.path) && !BuildOutputFilter.isBuildOutput(path: match.path)
+            }
+            .map { match in
+                var line = "\(match.path):\(match.startLine): \(match.kind) \(match.symbolKey)"
+                if let signature = match.signature, !signature.isEmpty {
+                    line += " — \(signature)"
+                }
+                return line
+            }
     }
 
     private func pathMatches(for query: String, in resolvedPath: String, language: String?) async -> [String] {

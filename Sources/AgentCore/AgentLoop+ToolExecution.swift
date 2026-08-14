@@ -22,7 +22,7 @@ extension AgentLoop {
         // Search tools
         await registry.register(GlobTool(permissions: permissions))
         await registry.register(GrepTool(permissions: permissions))
-        await registry.register(CodeSearchTool(permissions: permissions))
+        await registry.register(CodeSearchTool(permissions: permissions, codeGraphIndexer: codeGraphIndexer))
 
         // Shell
         await registry.register(BashTool(permissions: permissions, useSandbox: useSandbox))
@@ -74,7 +74,8 @@ extension AgentLoop {
             frontend: frontend,
             roleModels: AgentRoleRegistry.current(workspaceRoot: permissions.workspaceRoot).roleModelMap,
             parentAgentLoop: self,
-            toolOutputSpool: toolOutputSpoolConfig
+            toolOutputSpool: toolOutputSpoolConfig,
+            codeGraphIndexer: codeGraphIndexer
         ))
         if let modelContainer {
             await registry.register(ProjectExpertLoRATool(modelContainer: modelContainer, workspaceRoot: permissions.workspaceRoot, modelPath: modelPath, frontend: frontend))

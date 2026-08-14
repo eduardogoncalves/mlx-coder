@@ -77,6 +77,48 @@ final class CodeSearchToolTests: XCTestCase {
         XCTAssertFalse(result.content.contains(".build/GhostContact.swift"))
     }
 
+    func testGraphAwareSearchPrefersIndexedSymbolOverRegexHeuristics() async throws {
+        let workspace = try makeWorkspace()
+        defer { try? FileManager.default.removeItem(at: workspace) }
+
+        let file = workspace.appendingPathComponent("Widget.swift")
+        try "struct Widget {\n    func render() {}\n}\n".write(to: file, atomically: true, encoding: .utf8)
+
+        let permissions = PermissionEngine(workspaceRoot: workspace.path)
+        let store = CodeGraphStore(dbPath: workspace.appendingPathComponent("codegraph.db").path)
+        let indexer = CodeGraphIndexer(store: store, permissions: permissions, config: CodeGraphConfig(enabled: true))
+        await indexer.bootstrap()
+        await indexer.indexAndWait(paths: ["Widget.swift"])
+
+        let tool = CodeSearchTool(permissions: permissions, codeGraphIndexer: indexer)
+        let result = try await tool.execute(arguments: ["query": "Widget"])
+
+        XCTAssertFalse(result.isError)
+        XCTAssertTrue(result.content.contains("Widget.swift:1:"))
+        XCTAssertTrue(result.content.contains("struct"))
+    }
+
+    func testGraphMissFallsBackToGrep() async throws {
+        let workspace = try makeWorkspace()
+        defer { try? FileManager.default.removeItem(at: workspace) }
+
+        let file = workspace.appendingPathComponent("Legacy.swift")
+        try "let notIndexedYet = 1\n".write(to: file, atomically: true, encoding: .utf8)
+
+        let permissions = PermissionEngine(workspaceRoot: workspace.path)
+        let store = CodeGraphStore(dbPath: workspace.appendingPathComponent("codegraph.db").path)
+        let indexer = CodeGraphIndexer(store: store, permissions: permissions, config: CodeGraphConfig(enabled: true))
+        await indexer.bootstrap()
+        // Deliberately never indexed — graph lookup should miss and the
+        // regex/grep path below should still find it, unregressed.
+
+        let tool = CodeSearchTool(permissions: permissions, codeGraphIndexer: indexer)
+        let result = try await tool.execute(arguments: ["query": "notIndexedYet", "language": "swift"])
+
+        XCTAssertFalse(result.isError)
+        XCTAssertTrue(result.content.contains("Legacy.swift"))
+    }
+
     private func makeWorkspace() throws -> URL {
         let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
             .appendingPathComponent(".build", isDirectory: true)

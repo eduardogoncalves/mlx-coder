@@ -42,7 +42,7 @@ struct RuntimeConfig: Sendable, Codable {
     /// `toolOutputSpool`; callers substitute the enabled default.
     let toolOutputSpool: ToolOutputSpoolConfig?
     /// Auto-recorded code graph settings. Nil when the config omits
-    /// `codeGraph`; callers substitute `.disabled`.
+    /// `codeGraph`; callers substitute `CodeGraphConfig()` (enabled default).
     let codeGraph: CodeGraphConfig?
 
     init(
