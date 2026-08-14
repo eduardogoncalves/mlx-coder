@@ -206,7 +206,17 @@ extension AgentLoop {
                         return .user(content, images: userImages)
                     }
                 }
-                let userInput = UserInput(chat: chatMessages)
+                // Bound attachment resolution before it reaches the vision encoder.
+                // Some processors (e.g. Qwen3VL) ignore Processing.maxPixels and read
+                // pixel budgets straight from the checkpoint's preprocessor config,
+                // which can be tens of megapixels — a single Retina/5K screenshot can
+                // then blow past the Metal buffer size limit during the forward pass.
+                // `resize` is honored generically by MediaProcessing.apply for every
+                // VLM processor, so it's the one lever guaranteed to cap this here.
+                let userInput = UserInput(
+                    chat: chatMessages,
+                    processing: UserInput.Processing(resize: CGSize(width: 1568, height: 1568))
+                )
                 do {
                     let prepared = try await context.processor.prepare(input: userInput)
                     if prepared.text.tokens.size > 0 {
