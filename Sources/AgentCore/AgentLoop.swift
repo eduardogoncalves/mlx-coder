@@ -469,6 +469,19 @@ public actor AgentLoop {
         let turnPreservedEditTmpFilesSnapshot = preservedEditTmpFiles
 
         var iterations = 0
+        // `iterations` only counts CONSECUTIVE failing rounds — any round with no
+        // tool failure resets it to 0 (see the reset below), by design, so a long
+        // turn of genuinely successful steps never hits the cap. That leaves total
+        // turn length literally unbounded whenever failures are interleaved with
+        // successes: e.g. a failing edit_file followed by a successful diagnostic
+        // read resets `iterations` to 0 before the failure streak can ever reach
+        // `maxToolIterations`, so the model can thrash forever as long as it keeps
+        // running *something* that succeeds between failed attempts. `totalRounds`
+        // is the unconditional counterpart — it increments every round no matter
+        // what and is checked against its own, more generous cap, so a turn always
+        // terminates even when it never fails three times in a row.
+        var totalRounds = 0
+        let absoluteMaxRounds = maxToolIterations * 3
         var fileModificationToolsExecuted = false
         var turnTotalPromptTokens = 0
         var turnTotalCompletionTokens = 0
@@ -508,7 +521,7 @@ public actor AgentLoop {
         // forcing a full re-emit that small models keep failing the same way.
         var pendingNameSlotFill: PendingNameSlotFill?
 
-        while iterations < maxToolIterations {
+        while iterations < maxToolIterations && totalRounds < absoluteMaxRounds {
             await applyDeterministicContextCompactionIfNeeded(reason: "before_generation")
             await applyContextWatchdogIfNeeded()
 
@@ -570,6 +583,18 @@ public actor AgentLoop {
                 preservedEditTmpFiles = turnPreservedEditTmpFilesSnapshot
                 return
             }
+
+            // A generation succeeded, so the turn is making forward progress again.
+            // `hasRetriedFailedTurn` guards against retrying the SAME stuck failure
+            // forever, not against ever retrying again this turn — without this reset
+            // it latches true after the first failure anywhere in a long, multi-iteration
+            // turn (e.g. a top-level orchestrator running many `task()` rounds), so any
+            // later, unrelated, first-occurrence failure (like a fresh context-overflow
+            // once history has grown further) skips straight to the fatal
+            // "Generation failed again" path with no compaction-and-retry attempt at
+            // all. Resetting here scopes the one-shot retry to "since the last
+            // successful generation" instead of "ever, this whole turn".
+            hasRetriedFailedTurn = false
 
             var response = generationResult.text
             let writer = generationResult.writer
@@ -992,6 +1017,7 @@ public actor AgentLoop {
             // message + all tool responses) as transient. The model still sees them
             // during the current turn for recovery context, but purgeTransient() will
             // remove them when the turn completes so only the successful path persists.
+            totalRounds += 1
             if iterationAnyToolFailed {
                 history.markTransient(from: iterationStartIndex)
                 iterations += 1
@@ -1001,6 +1027,22 @@ public actor AgentLoop {
                 lastFailedCallSignature = nil
                 sameFailedCallStreak = 0
                 consecutiveMalformedStreak = 0
+                // The model recovered from a prior failed iteration (or malformed
+                // reply) — its rejected attempt no longer needs to stay in history
+                // for recovery, so purge it now instead of waiting for full turn
+                // completion. Both `applyContextWatchdogIfNeeded` and the
+                // per-iteration `applyDeterministicContextCompactionIfNeeded` skip
+                // entirely whenever ANY transient message is present (see
+                // AgentLoop+ContextManagement.swift) — without this purge, a single
+                // early, already-resolved failure silently disables proactive
+                // compaction for the rest of a long, multi-iteration turn (e.g. a
+                // top-level orchestrator running many `task()` rounds), letting
+                // context climb uninterrupted right up to the server's hard limit
+                // instead of being trimmed well before it.
+                let hadTransient = history.purgeTransient()
+                if hadTransient {
+                    promptCache.invalidate(reason: "transient turn artifacts purged — recovered mid-turn")
+                }
             }
 
             // The model has re-emitted the same failing call too many times in a
@@ -1026,7 +1068,11 @@ public actor AgentLoop {
         if hadTransientAtCap {
             promptCache.invalidate(reason: "transient turn artifacts purged — history diverged")
         }
-        frontend.harnessInterventionError("stopping the turn — it exceeded the \(maxToolIterations)-iteration tool budget without finishing.")
+        if totalRounds >= absoluteMaxRounds {
+            frontend.harnessInterventionError("stopping the turn — it ran \(totalRounds) rounds without finishing (alternating failures with just enough successes to dodge the \(maxToolIterations)-consecutive-failure cap). Try rephrasing your request or narrowing its scope.")
+        } else {
+            frontend.harnessInterventionError("stopping the turn — it exceeded the \(maxToolIterations)-iteration tool budget without finishing.")
+        }
     }
 
     // MARK: - Private Helpers (used only by processUserMessage)
@@ -1689,7 +1735,23 @@ public actor AgentLoop {
             return (nil, false)
         }
 
-        var message = "You have called '\(name)' with the same arguments \(state.nextStreak) times and it failed identically every time. STOP repeating this exact call. Re-read the error above, then either emit a corrected call in the required \(ToolCallPattern.toolCallOpen){\"name\": \"<tool>\", \"arguments\": {…}}\(ToolCallPattern.toolCallClose) format, or take a different action."
+        var message: String
+        if name == "edit_file" {
+            // edit_file's failure signature is keyed on path alone (see
+            // LoopDetectionService.failedCallSignature), not the raw
+            // arguments, because a model re-guessing old_text after a failed
+            // match changes it on nearly every retry — so unlike every other
+            // tool here, "the same arguments" would be false. The steer text
+            // must say what's actually true (same file, still failing) and,
+            // borrowing the diagnose-before-retrying + tool-escalation
+            // pattern from other coding CLIs' prompts, give a concrete next
+            // step instead of just "try again" — rewording old_text blindly
+            // is exactly the failure mode that produced this streak.
+            let path = (arguments["path"] as? String) ?? "the target file"
+            message = "edit_file has failed against '\(path)' \(state.nextStreak) times in a row. Even though old_text keeps changing between attempts, that's still the same failure — the problem is almost never the wording. STOP guessing new old_text from memory. Call read_file on '\(path)' again and copy old_text verbatim from its actual output. If it still fails after that, the mismatch is likely something invisible in the diff (line endings, tabs vs. spaces, or curly quotes/en-dashes vs. plain ASCII) — narrow old_text to the shortest single line you can and retry, or inspect the file with bash to see the exact bytes. If a targeted edit keeps failing after that, use write_file to replace the whole file instead of continuing to guess."
+        } else {
+            message = "You have called '\(name)' with the same arguments \(state.nextStreak) times and it failed identically every time. STOP repeating this exact call. Re-read the error above, then either emit a corrected call in the required \(ToolCallPattern.toolCallOpen){\"name\": \"<tool>\", \"arguments\": {…}}\(ToolCallPattern.toolCallClose) format, or take a different action."
+        }
         // A tool name that is itself a JSON object is the classic "double-wrapped"
         // mistake — point the model straight at it.
         if name.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("{") {

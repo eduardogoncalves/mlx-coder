@@ -22,7 +22,8 @@ enum LoopDetectionService {
         "read_many",
         "code_search",
         "web_fetch",
-        "web_search"
+        "web_search",
+        "todo"
     ]
 
     static func evaluateReadFileLoop(
@@ -62,7 +63,7 @@ enum LoopDetectionService {
             return (nil, 0, false, nil)
         }
 
-        let normalizedArgs = normalizedReadOnlyLoopArguments(arguments)
+        let normalizedArgs = normalizedReadOnlyLoopArguments(callName: callName, arguments)
         let argsSignature = stableArgumentsSignature(normalizedArgs)
         let currentSignature = "\(callName)|\(argsSignature)"
         let nextStreak = (currentSignature == previousSignature) ? (previousStreak + 1) : 1
@@ -93,7 +94,19 @@ enum LoopDetectionService {
     }
 
     static func failedCallSignature(callName: String, arguments: [String: Any]) -> String {
-        "\(callName)|\(stableArgumentsSignature(arguments))"
+        // edit_file's failure signature is keyed on path alone, not the full
+        // arguments. A model re-guessing old_text after a failed match changes
+        // old_text/new_text on essentially every retry — keying on the raw
+        // arguments (as every other tool does) means the signature almost never
+        // repeats identically, so a model that thrashes indefinitely against the
+        // same file never trips the identical-failure steer/abort thresholds.
+        // Two edit_file calls that both failed against the same file are the
+        // same failure for loop-detection purposes regardless of what old_text
+        // they guessed.
+        if callName == "edit_file", let path = arguments["path"] as? String {
+            return "\(callName)|path:\(path.trimmingCharacters(in: .whitespacesAndNewlines))"
+        }
+        return "\(callName)|\(stableArgumentsSignature(arguments))"
     }
 
     static func missingRequiredArgumentNames(required: [String]?, arguments: [String: Any]) -> [String] {
@@ -155,7 +168,14 @@ enum LoopDetectionService {
         }
     }
 
-    private static func normalizedReadOnlyLoopArguments(_ arguments: [String: Any]) -> [String: Any] {
+    private static func normalizedReadOnlyLoopArguments(callName: String, _ arguments: [String: Any]) -> [String: Any] {
+        // `todo read` ignores `item`/`item_text` entirely — a model that keeps
+        // incrementing `item` on every read still gets the same list back, so
+        // those fields must be dropped for the loop signature to catch it.
+        if callName == "todo", (arguments["action"] as? String) == "read" {
+            return ["action": "read"]
+        }
+
         var normalized = arguments
         let pathKeys = ["path", "file_path"]
         for key in pathKeys {

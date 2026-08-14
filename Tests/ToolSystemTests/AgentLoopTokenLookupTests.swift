@@ -208,6 +208,29 @@ final class AgentLoopTokenLookupTests: XCTestCase {
         XCTAssertEqual(second.nextStreak, 1)
     }
 
+    func testEvaluateReadOnlyToolLoopBlocksTodoReadDespiteChangingItemArgument() {
+        // A small model can keep incrementing an irrelevant `item` on every
+        // `todo read` call — the read ignores `item` entirely, so the tool
+        // output never changes even though the raw arguments do.
+        let first = AgentLoop.evaluateReadOnlyToolLoop(
+            callName: "todo",
+            arguments: ["action": "read", "item": 1, "item_text": "list the todo itens"],
+            previousSignature: nil,
+            previousStreak: 0
+        )
+
+        let second = AgentLoop.evaluateReadOnlyToolLoop(
+            callName: "todo",
+            arguments: ["action": "read", "item": 2, "item_text": "list the todo itens"],
+            previousSignature: first.nextSignature,
+            previousStreak: first.nextStreak
+        )
+
+        XCTAssertFalse(first.shouldBlock)
+        XCTAssertTrue(second.shouldBlock)
+        XCTAssertEqual(second.nextStreak, 2)
+    }
+
     func testEvaluateReadOnlyToolLoopIgnoresNonReadOnlyTools() {
         let state = AgentLoop.evaluateReadOnlyToolLoop(
             callName: "write_file",
