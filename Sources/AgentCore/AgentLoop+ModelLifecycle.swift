@@ -149,7 +149,7 @@ extension AgentLoop {
             return ""
         }
         let apiKey = RemoteProviderRegistry.apiKey(for: providerID)
-        let client = OpenRouterClient(apiKey: apiKey ?? "", baseURL: base, providerName: provider.name)
+        let client = RemoteAPIClient(apiKey: apiKey ?? "", baseURL: base, providerName: provider.name)
         guard let status = await client.remoteModelLoadStatus(modelID: modelID), status != "loaded" else {
             return ""
         }

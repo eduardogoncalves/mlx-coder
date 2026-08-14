@@ -211,6 +211,39 @@ public actor AgentLoop {
     /// `probeRemoteContextWindowIfNeeded`.
     var remoteContextWindowBackendKey: String?
 
+    /// The llama.cpp slot id currently pinned for the active remote backend,
+    /// captured from `RemoteAPIStreamEvent.slotAssigned` on the first response
+    /// of a run (or restored from a persisted session — see
+    /// `primeRemoteSlotRestore` in `AgentLoop+Session.swift`). Once known, every
+    /// subsequent remote request pins `id_slot` to it so llama.cpp keeps
+    /// growing the same slot's KV cache instead of re-selecting one heuristically.
+    var remoteSlotId: Int?
+    /// The `<providerId>:<modelId>` key `remoteSlotId` (and the two flags below)
+    /// were captured for — mirrors `remoteContextWindowBackendKey`, reset
+    /// whenever the active remote backend changes so a slot id that belongs to
+    /// a different server/model is never reused.
+    var remoteSlotBackendKey: String?
+    /// Set after a `saveSlot` call fails once for the current backend (most
+    /// commonly: the server wasn't started with `--slot-save-path`), so later
+    /// turns skip the round trip instead of re-attempting a call that will just
+    /// fail again.
+    var remoteSlotSaveUnsupported: Bool = false
+    /// Set once a `saveSlot` call has actually succeeded for the current
+    /// backend — gates `remoteSlotSnapshot` so a session is only persisted with
+    /// slot info once there's a real file on disk for it to point at.
+    var remoteSlotHasSavedCache: Bool = false
+    /// A restore queued by `primeRemoteSlotRestore` (typically on `/resume`),
+    /// consumed by the next remote generation in `generateResponseViaRemote`.
+    var pendingRemoteSlotRestore: (idSlot: Int, filename: String)?
+    /// Stable id used to name this conversation's on-disk remote slot-cache
+    /// file. Starts equal to `sessionId` but — unlike `sessionId` — can be
+    /// rebound (see `rebindKVCachePersistenceId`) so a `/resume`d conversation
+    /// reuses its original slot-cache filename instead of minting a fresh one
+    /// under the new process's random session id.
+    lazy var kvCachePersistenceId: String = sessionId
+    /// Filename the current conversation's remote slot cache is saved under.
+    var kvCacheSlotFilename: String { "mlx-coder-\(kvCachePersistenceId).bin" }
+
     /// Fraction of a remote model's real context window that mlx-coder aims to
     /// stay within when it can only count tokens with the `chars/4` estimate (no
     /// local tokenizer on the remote path). The ~25% margin absorbs the
@@ -500,8 +533,8 @@ public actor AgentLoop {
                     // oversized request (remote) cannot recur.
                     let isLocalContextOverflow = (error as NSError).domain == "AgentLoop"
                         && (error as NSError).code == 9
-                    let remoteOverflowError = (error as? OpenRouterError)?.isContextOverflow == true
-                        ? (error as? OpenRouterError)
+                    let remoteOverflowError = (error as? RemoteAPIError)?.isContextOverflow == true
+                        ? (error as? RemoteAPIError)
                         : nil
                     if isLocalContextOverflow || remoteOverflowError != nil {
                         frontend.harnessIntervention(

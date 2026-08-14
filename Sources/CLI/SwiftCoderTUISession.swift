@@ -163,11 +163,14 @@ public func runSwiftCoderTUISession(
     func saveCurrentSession() async {
         let messages = await agentLoop.persistableConversation
         let model = await agentLoop.activeModelPath
+        let slotSnapshot = await agentLoop.remoteSlotSnapshot
         SessionStore.save(
             id: currentSessionId,
             cwd: workspaceRoot,
             model: model,
-            messages: messages
+            messages: messages,
+            remoteSlotId: slotSnapshot?.idSlot,
+            remoteSlotFilename: slotSnapshot?.filename
         )
     }
 
@@ -183,6 +186,10 @@ public func runSwiftCoderTUISession(
         }
         await agentLoop.restoreConversation(session.messages)
         currentSessionId = session.id
+        await agentLoop.rebindKVCachePersistenceId(session.id)
+        if let slotId = session.remoteSlotId, let filename = session.remoteSlotFilename {
+            await agentLoop.primeRemoteSlotRestore(sessionModelPath: session.model, idSlot: slotId, filename: filename)
+        }
         // Replay the human/assistant/tool turns so the user sees the context they
         // are resuming. Automated steering messages stay out of the transcript.
         for message in session.messages {

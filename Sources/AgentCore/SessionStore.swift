@@ -32,6 +32,13 @@ public struct PersistedSession: Codable, Sendable {
     public var model: String
     public var title: String
     public var messages: [Message]
+    /// llama.cpp slot id + filename of a saved remote KV cache for this
+    /// session's `model`, when the active backend was remote and the server
+    /// supports slot persistence (`--slot-save-path`). Both nil otherwise —
+    /// including for sessions saved before this field existed, since
+    /// `Codable` treats a missing key as `nil` for an `Optional`.
+    public var remoteSlotId: Int?
+    public var remoteSlotFilename: String?
 
     public init(
         version: Int = 1,
@@ -41,7 +48,9 @@ public struct PersistedSession: Codable, Sendable {
         cwd: String,
         model: String,
         title: String,
-        messages: [Message]
+        messages: [Message],
+        remoteSlotId: Int? = nil,
+        remoteSlotFilename: String? = nil
     ) {
         self.version = version
         self.id = id
@@ -51,6 +60,8 @@ public struct PersistedSession: Codable, Sendable {
         self.model = model
         self.title = title
         self.messages = messages
+        self.remoteSlotId = remoteSlotId
+        self.remoteSlotFilename = remoteSlotFilename
     }
 }
 
@@ -85,7 +96,9 @@ public enum SessionStore {
         id: String,
         cwd: String,
         model: String,
-        messages: [Message]
+        messages: [Message],
+        remoteSlotId: Int? = nil,
+        remoteSlotFilename: String? = nil
     ) -> URL? {
         let body = messages.filter { $0.role != .system }
         guard body.contains(where: { $0.role == .user && $0.origin == .human }) else {
@@ -105,7 +118,9 @@ public enum SessionStore {
             cwd: cwd,
             model: model,
             title: title(from: body),
-            messages: body
+            messages: body,
+            remoteSlotId: remoteSlotId,
+            remoteSlotFilename: remoteSlotFilename
         )
 
         let encoder = JSONEncoder()

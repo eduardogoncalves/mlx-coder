@@ -14,7 +14,7 @@
 // to the outer tool loop (mirrors the existing `finishReason == "length"`
 // handling there).
 //
-// Local-only: this has no bearing on `AgentLoop+OpenRouterGeneration.swift`.
+// Local-only: this has no bearing on `AgentLoop+RemoteGeneration.swift`.
 // The remote path never tracks `isThinking` (it hardcodes
 // `startedThinking: false` and pipes text deltas straight through), so there
 // is nothing here to enforce against — a remote model's thinking tokens

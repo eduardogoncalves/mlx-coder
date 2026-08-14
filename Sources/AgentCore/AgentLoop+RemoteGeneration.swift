@@ -1,4 +1,4 @@
-// Sources/AgentCore/AgentLoop+OpenRouterGeneration.swift
+// Sources/AgentCore/AgentLoop+RemoteGeneration.swift
 // Remote (OpenAI-compatible) generation path — works with any configured
 // RemoteProvider (OpenRouter, LM Studio, vLLM, mlx-lm.server). Mirrors the return shape of
 // AgentLoop+Generation.swift's local MLX path so the rest of the agent loop
@@ -21,7 +21,7 @@ extension AgentLoop {
             throw NSError(
                 domain: "AgentLoop",
                 code: 100,
-                userInfo: [NSLocalizedDescriptionKey: "OpenRouter generation requested but backend is not OpenRouter."]
+                userInfo: [NSLocalizedDescriptionKey: "Remote generation requested but backend is not remote."]
             )
         }
 
@@ -34,6 +34,27 @@ extension AgentLoop {
         }
 
         let apiKey = RemoteProviderRegistry.apiKey(for: providerID)
+
+        // Slot save/restore is orchestrator-only: `role` is nil only for the
+        // top-level loop (see its doc comment on `AgentLoop`), and only that
+        // loop's conversation is ever persisted/resumed via SessionStore.
+        // TaskTool-constructed sub-agents are ephemeral, often run several at
+        // once, and have no session to restore into later — pinning/saving a
+        // slot for each would just add per-turn latency (and slot contention
+        // between concurrent sub-agents) for a cache nothing will ever reuse.
+        let isOrchestrator = role == nil
+
+        // Reset slot-cache tracking whenever the active remote backend changes —
+        // a slot id (or a queued restore) captured for a different server/model
+        // must never be reused against this one.
+        let slotBackendKey = "\(providerID):\(modelID)"
+        if isOrchestrator && remoteSlotBackendKey != slotBackendKey {
+            remoteSlotBackendKey = slotBackendKey
+            remoteSlotId = nil
+            remoteSlotSaveUnsupported = false
+            remoteSlotHasSavedCache = false
+            pendingRemoteSlotRestore = nil
+        }
 
         // Discover the model's real context window up front (once per backend) so
         // both compaction paths can size themselves to the server's limit before
@@ -51,10 +72,19 @@ extension AgentLoop {
                 await hooks.emit(.contextTransformApplied(transformIndex: index, messagesBefore: before, messagesAfter: after))
             }
         }
-        pendingImages = []   // OpenRouter image support is out of scope for v1
+        let imageURLs = pendingImages
+        pendingImages = []
 
-        let chatMessages = transformedMessages.map { msg -> OpenRouterMessage in
-            let role: OpenRouterMessage.Role
+        // Best-effort base64 data-URL encoding — a file that vanished or
+        // failed to decode is dropped rather than failing the whole turn.
+        let imageDataURLs: [String] = imageURLs.compactMap { try? ImageDataURLEncoder.dataURL(for: $0) }
+        if imageDataURLs.count < imageURLs.count {
+            frontend.emitStatus("[Warning] Could not encode \(imageURLs.count - imageDataURLs.count) attached image(s) for the remote model; sending the rest.")
+        }
+        let lastUserIndex = transformedMessages.indices.last(where: { transformedMessages[$0].role == .user })
+
+        let chatMessages = transformedMessages.enumerated().map { index, msg -> RemoteAPIMessage in
+            let role: RemoteAPIMessage.Role
             switch msg.role {
             case .system:    role = .system
             case .user:      role = .user
@@ -63,20 +93,49 @@ extension AgentLoop {
             }
             // Automated (agent-injected) steering rides the user role wrapped in a
             // <system-reminder> marker — same treatment as the local ChatML path.
-            return OpenRouterMessage(role: role, content: msg.wireContent, toolCallId: msg.toolCallId)
+            return RemoteAPIMessage(
+                role: role,
+                content: msg.wireContent,
+                toolCallId: msg.toolCallId,
+                imageDataURLs: index == lastUserIndex ? imageDataURLs : []
+            )
         }
 
-        let tools: [OpenRouterToolSpec]
+        let tools: [RemoteAPIToolSpec]
         if let toolDefsData = try? await registry.generateOpenAIToolDefinitionsJSON(filter: currentToolPromptFilter()),
            let decoded = (try? JSONSerialization.jsonObject(with: toolDefsData)) as? [[String: Any]] {
-            tools = decoded.map { OpenRouterToolSpec(json: $0) }
+            tools = decoded.map { RemoteAPIToolSpec(json: $0) }
         } else {
             tools = []
         }
 
         let base = provider.baseURLValue ?? URL(string: "https://openrouter.ai/api/v1")!
-        let client = OpenRouterClient(apiKey: apiKey ?? "", baseURL: base, providerName: provider.name)
-        let stream = client.stream(model: modelID, messages: chatMessages, tools: tools, sessionId: sessionId)
+        let client = RemoteAPIClient(apiKey: apiKey ?? "", baseURL: base, providerName: provider.name)
+
+        // A resumed session that previously saved a slot cache for this exact
+        // backend gets one restore attempt before its first generation. Best
+        // effort: a missing file or a server without `--slot-save-path` just
+        // means this turn re-prefills the full prompt like normal.
+        if isOrchestrator, let restore = pendingRemoteSlotRestore {
+            pendingRemoteSlotRestore = nil
+            do {
+                _ = try await client.restoreSlot(idSlot: restore.idSlot, filename: restore.filename)
+                remoteSlotId = restore.idSlot
+                remoteSlotHasSavedCache = true
+                frontend.emitStatus("[KV cache] Restored \(provider.name) slot \(restore.idSlot) from \(restore.filename).")
+            } catch {
+                frontend.emitStatus("[KV cache] Could not restore \(provider.name) slot cache — continuing without it.")
+            }
+        }
+
+        let stream = client.stream(
+            model: modelID,
+            messages: chatMessages,
+            tools: tools,
+            reasoningEffort: thinkingLevel.reasoningEffort,
+            sessionId: sessionId,
+            idSlot: isOrchestrator ? remoteSlotId : nil
+        )
 
         // Lifecycle events — mirror the activity emissions of the local path so
         // the TUI spinner labels are consistent.
@@ -125,10 +184,34 @@ extension AgentLoop {
                 case .usage(let prompt, let completion):
                     usagePrompt = prompt
                     usageCompletion = completion
+                case .slotAssigned(let idSlot):
+                    if isOrchestrator { remoteSlotId = idSlot }
                 }
             }
         } catch {
             throw error
+        }
+
+        // Best-effort: persist the slot's KV cache to disk so a later `/resume`
+        // (or a server-side eviction) can restore it instead of re-prefilling
+        // the whole conversation. Skipped once a prior attempt has shown the
+        // server doesn't support it (`--slot-save-path` not configured) so
+        // every turn doesn't keep re-hitting a call that will just fail again.
+        if isOrchestrator, let slotId = remoteSlotId, !remoteSlotSaveUnsupported {
+            let hadSavedBefore = remoteSlotHasSavedCache
+            do {
+                _ = try await client.saveSlot(idSlot: slotId, filename: kvCacheSlotFilename)
+                remoteSlotHasSavedCache = true
+                // Only announce the first successful save per backend — every
+                // turn re-saves silently after that, same as prompt-cache reuse
+                // isn't re-announced every turn on the local path.
+                if !hadSavedBefore {
+                    frontend.emitStatus("[KV cache] Saved \(provider.name) slot \(slotId) to \(kvCacheSlotFilename) — will restore automatically on /resume.")
+                }
+            } catch {
+                remoteSlotSaveUnsupported = true
+                frontend.emitStatus("[KV cache] \(provider.name) does not support slot persistence (start it with --slot-save-path to enable); continuing without it.")
+            }
         }
 
         // Capture stats to return to the caller for turn-level accumulation.
@@ -207,7 +290,7 @@ extension AgentLoop {
         learnedRemoteContextWindow = nil
 
         let base = provider.baseURLValue ?? URL(string: "https://openrouter.ai/api/v1")!
-        let client = OpenRouterClient(
+        let client = RemoteAPIClient(
             apiKey: RemoteProviderRegistry.apiKey(for: provider.id) ?? "",
             baseURL: base,
             providerName: provider.name

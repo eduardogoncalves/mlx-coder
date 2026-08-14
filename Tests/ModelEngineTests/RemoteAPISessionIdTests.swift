@@ -1,27 +1,27 @@
 import XCTest
 @testable import MLXCoder
 
-/// Verifies that `session_id`, when provided, is serialized into the OpenRouter
+/// Verifies that `session_id`, when provided, is serialized into the
 /// chat/completions request body so all generations in one conversation are
 /// grouped into a single session — and that it is omitted otherwise.
-final class OpenRouterSessionIdTests: XCTestCase {
+final class RemoteAPISessionIdTests: XCTestCase {
 
     override func tearDown() {
         RequestCapture.reset()
         super.tearDown()
     }
 
-    private func makeClient() -> OpenRouterClient {
+    private func makeClient() -> RemoteAPIClient {
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [RequestCapturingProtocol.self]
         let session = URLSession(configuration: config)
-        return OpenRouterClient(apiKey: "test-key", session: session)
+        return RemoteAPIClient(apiKey: "test-key", session: session)
     }
 
-    private func drain(_ client: OpenRouterClient, sessionId: String?) async {
+    private func drain(_ client: RemoteAPIClient, sessionId: String?) async {
         let stream = client.stream(
             model: "openai/gpt-4o",
-            messages: [OpenRouterMessage(role: .user, content: "Hello")],
+            messages: [RemoteAPIMessage(role: .user, content: "Hello")],
             sessionId: sessionId
         )
         // The mock returns `data: [DONE]` immediately; consume the stream so the

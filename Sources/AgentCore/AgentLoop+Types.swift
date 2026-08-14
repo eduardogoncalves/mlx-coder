@@ -43,6 +43,22 @@ extension AgentLoop {
             case .high:    return "high (~\(budgetTokens) tokens)"
             }
         }
+
+        /// Value sent as the OpenAI-compatible `reasoning_effort` request field
+        /// on the remote path (see
+        /// https://developers.openai.com/api/docs/guides/reasoning#reasoning-effort).
+        /// `nil` for `.fast` — that level means "no thinking," which has no
+        /// direct equivalent, so the field is omitted and the server's own
+        /// default applies rather than guessing an effort level.
+        public var reasoningEffort: String? {
+            switch self {
+            case .fast:    return nil
+            case .minimal: return "minimal"
+            case .low:     return "low"
+            case .medium:  return "medium"
+            case .high:    return "high"
+            }
+        }
     }
 
     public enum TaskType: String, Codable, Sendable {

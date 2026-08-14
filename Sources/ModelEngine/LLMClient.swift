@@ -9,7 +9,7 @@
 //                 GenerationEngine.Config forces `kvBits: nil` (a quantized KV
 //                 cache + a direct `cache.update()` is a `fatalError`) and no
 //                 TurboQuant, and uses a small `maxTokens` / low temperature.
-//   * `.remote` → accumulate `OpenRouterClient.stream(...).text` events (with an
+//   * `.remote` → accumulate `RemoteAPIClient.stream(...).text` events (with an
 //                 empty `tools` list) until `.done`.
 //
 // This is deliberately best-effort and self-contained: callers use it for cheap
@@ -175,7 +175,7 @@ public struct LLMClient: Sendable {
     // MARK: - Remote one-shot
 
     /// Accumulate `.text` events from a tool-less streaming completion until the
-    /// stream ends. Mirrors the wiring in `AgentLoop+OpenRouterGeneration.swift`.
+    /// stream ends. Mirrors the wiring in `AgentLoop+RemoteGeneration.swift`.
     private func runRemoteOneShot(
         providerID: String,
         modelID: String,
@@ -192,9 +192,9 @@ public struct LLMClient: Sendable {
         }
         let apiKey = RemoteProviderRegistry.apiKey(for: providerID)
         let base = provider.baseURLValue ?? URL(string: "https://openrouter.ai/api/v1")!
-        let client = OpenRouterClient(apiKey: apiKey ?? "", baseURL: base, providerName: provider.name)
+        let client = RemoteAPIClient(apiKey: apiKey ?? "", baseURL: base, providerName: provider.name)
 
-        let messages = [OpenRouterMessage(role: .user, content: prompt)]
+        let messages = [RemoteAPIMessage(role: .user, content: prompt)]
         let stream = client.stream(
             model: modelID,
             messages: messages,
@@ -214,7 +214,7 @@ public struct LLMClient: Sendable {
                 // Keep consuming until the stream terminates ([DONE]); a mid-run
                 // per-choice finish_reason arrives as its own `.done`.
                 break
-            case .toolCallDelta, .usage:
+            case .toolCallDelta, .usage, .slotAssigned:
                 break
             }
         }

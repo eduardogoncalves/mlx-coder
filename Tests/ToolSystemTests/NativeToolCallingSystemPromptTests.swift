@@ -2,7 +2,7 @@ import XCTest
 @testable import MLXCoder
 
 /// Remote/online backends receive tool schemas via the request's native `tools`
-/// API field (see AgentLoop+OpenRouterGeneration.swift), so the system prompt
+/// API field (see AgentLoop+RemoteGeneration.swift), so the system prompt
 /// must not also inline the same JSON schemas as text, nor instruct the model
 /// to emit text-based <tool_call> tags — both would double token cost and
 /// contradict the provider's own native tool-calling mechanism.

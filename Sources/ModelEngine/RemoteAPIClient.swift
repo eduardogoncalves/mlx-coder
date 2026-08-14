@@ -1,12 +1,11 @@
-// Sources/ModelEngine/OpenRouterClient.swift
-// Streaming client for OpenAI-compatible Chat Completions APIs. Despite the name
-// (kept for source compatibility), this now serves ANY OpenAI-compatible
-// endpoint — OpenRouter, LM Studio, vLLM, mlx-lm.server, etc. — driven by the
-// `baseURL` init param. The `Authorization` header is only sent when an API key
-// is provided, so keyless local servers work out of the box.
+// Sources/ModelEngine/RemoteAPIClient.swift
+// Streaming client for ANY OpenAI-compatible Chat Completions API — OpenRouter,
+// LM Studio, vLLM, mlx-lm.server, llama.cpp, etc. — driven by the `baseURL` init
+// param. The `Authorization` header is only sent when an API key is provided,
+// so keyless local servers work out of the box.
 //
 // Usage:
-//     let client = OpenRouterClient(apiKey: "...")
+//     let client = RemoteAPIClient(apiKey: "...")
 //     for try await event in client.stream(model: "anthropic/claude-sonnet-4",
 //                                          messages: ..., tools: ...) {
 //         switch event { ... }
@@ -19,7 +18,7 @@
 
 import Foundation
 
-public enum OpenRouterError: Error, LocalizedError, Sendable {
+public enum RemoteAPIError: Error, LocalizedError, Sendable {
     case notConfigured
     case http(provider: String, status: Int, body: String)
     case decoding(provider: String, detail: String)
@@ -85,7 +84,7 @@ public enum OpenRouterError: Error, LocalizedError, Sendable {
     }
 }
 
-public enum OpenRouterStreamEvent: Sendable {
+public enum RemoteAPIStreamEvent: Sendable {
     /// Incremental assistant text.
     case text(String)
     /// Incremental tool-call data. `index` identifies the call across deltas.
@@ -95,9 +94,14 @@ public enum OpenRouterStreamEvent: Sendable {
     case done(finishReason: String?)
     /// Token usage reported in the final stream frame (requires stream_options.include_usage).
     case usage(promptTokens: Int, completionTokens: Int)
+    /// The llama.cpp slot id that served this request, echoed back at the top
+    /// level of a stream frame. Servers that don't run llama.cpp (or run it
+    /// without slots) never emit this, so callers must treat its absence as
+    /// "unknown" rather than an error — see `RemoteAPIClient.saveSlot`.
+    case slotAssigned(Int)
 }
 
-public struct OpenRouterMessage: Sendable {
+public struct RemoteAPIMessage: Sendable {
     public enum Role: String, Sendable {
         case system, user, assistant, tool
     }
@@ -105,32 +109,38 @@ public struct OpenRouterMessage: Sendable {
     public let content: String
     /// Only set for `.tool` role.
     public let toolCallId: String?
+    /// Pre-encoded `data:<mime>;base64,...` image URLs (see `ImageDataURLEncoder`).
+    /// Non-empty only on the user message an attachment was sent with; turns
+    /// `content` into an OpenAI-style multi-part array when encoded.
+    public let imageDataURLs: [String]
 
-    public init(role: Role, content: String, toolCallId: String? = nil) {
+    public init(role: Role, content: String, toolCallId: String? = nil, imageDataURLs: [String] = []) {
         self.role = role
         self.content = content
         self.toolCallId = toolCallId
+        self.imageDataURLs = imageDataURLs
     }
 }
 
 /// One tool spec in OpenAI/OpenRouter format. The dictionary follows the shape
 /// `{ "type": "function", "function": { "name", "description", "parameters" } }`
 /// already produced by `ToolRegistry.generateToolsBlock`.
-public struct OpenRouterToolSpec: @unchecked Sendable {
+public struct RemoteAPIToolSpec: @unchecked Sendable {
     public let json: [String: Any]
     public init(json: [String: Any]) { self.json = json }
 }
 
-public struct OpenRouterClient: Sendable {
+public struct RemoteAPIClient: Sendable {
     public let apiKey: String
     public let baseURL: URL
     public let referrer: String?
     public let appTitle: String?
     public let session: URLSession
-    /// Display name used in error messages (e.g. "LM Studio", "llama.cpp"). Defaults
-    /// to "OpenRouter" for source-compat with callers that don't specify a provider —
-    /// but any real remote-provider callsite should pass the configured `RemoteProvider.name`
-    /// so errors don't misattribute failures on other providers to OpenRouter.
+    /// Display name used in error messages (e.g. "LM Studio", "llama.cpp",
+    /// "OpenRouter"). Any real remote-provider callsite should pass the
+    /// configured `RemoteProvider.name` so errors attribute failures to the
+    /// right provider; this generic default only backs callers (tests) that
+    /// don't care which provider is named.
     public let providerName: String
 
     public init(
@@ -139,7 +149,7 @@ public struct OpenRouterClient: Sendable {
         referrer: String? = "https://github.com/eduardogoncalves/mlx-coder",
         appTitle: String? = "mlx-coder",
         session: URLSession = .shared,
-        providerName: String = "OpenRouter"
+        providerName: String = "remote provider"
     ) {
         self.apiKey = apiKey
         self.baseURL = baseURL
@@ -206,14 +216,97 @@ public struct OpenRouterClient: Sendable {
         (any as? Int) ?? (any as? NSNumber)?.intValue
     }
 
+    // MARK: - Slot (KV cache) persistence
+
+    /// Result of a successful `saveSlot`/`restoreSlot` call.
+    public struct SlotOperationResult: Sendable {
+        public let idSlot: Int
+        public let filename: String
+    }
+
+    /// Saves slot `idSlot`'s KV cache to `filename` inside the server's
+    /// `--slot-save-path` directory (llama.cpp: `POST /slots/{id}?action=save`).
+    /// Requires the server to have been started with that flag — a server that
+    /// wasn't responds with a 500, which surfaces here as a thrown
+    /// `RemoteAPIError.http`; callers should treat any failure as "this server
+    /// doesn't support slot persistence" rather than retrying.
+    public func saveSlot(idSlot: Int, filename: String) async throws -> SlotOperationResult {
+        try await performSlotAction(idSlot: idSlot, action: "save", filename: filename)
+    }
+
+    /// Restores slot `idSlot`'s KV cache from `filename`, previously written by
+    /// `saveSlot` (llama.cpp: `POST /slots/{id}?action=restore`). Throws when the
+    /// file doesn't exist, the server doesn't support slot persistence, or the
+    /// cache was saved by an incompatible model/build.
+    public func restoreSlot(idSlot: Int, filename: String) async throws -> SlotOperationResult {
+        try await performSlotAction(idSlot: idSlot, action: "restore", filename: filename)
+    }
+
+    private func performSlotAction(idSlot: Int, action: String, filename: String) async throws -> SlotOperationResult {
+        var lastError: Error = RemoteAPIError.transport(provider: providerName, detail: "No reachable /slots endpoint")
+        for url in Self.slotActionURLs(baseURL: baseURL, idSlot: idSlot, action: action) {
+            var request = URLRequest(url: url)
+            request.httpMethod = "POST"
+            request.timeoutInterval = 30
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            if !apiKey.isEmpty {
+                request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+            }
+            request.httpBody = try? JSONSerialization.data(withJSONObject: ["filename": filename])
+
+            let data: Data
+            let response: URLResponse
+            do {
+                (data, response) = try await session.data(for: request)
+            } catch {
+                lastError = RemoteAPIError.transport(provider: providerName, detail: error.localizedDescription)
+                continue
+            }
+            guard let http = response as? HTTPURLResponse else {
+                lastError = RemoteAPIError.transport(provider: providerName, detail: "Non-HTTP response from \(providerName)")
+                continue
+            }
+            guard (200..<300).contains(http.statusCode) else {
+                lastError = RemoteAPIError.http(provider: providerName, status: http.statusCode, body: String(data: data, encoding: .utf8) ?? "")
+                continue
+            }
+            return SlotOperationResult(idSlot: idSlot, filename: filename)
+        }
+        throw lastError
+    }
+
+    /// Candidate `/slots/{id}?action=...` URLs — under the configured base, and
+    /// — when the base ends in a version segment like `/v1` — at the server
+    /// root, mirroring `propsProbeURLs`: llama.cpp serves `/slots` from the
+    /// root rather than the OpenAI path prefix.
+    static func slotActionURLs(baseURL: URL, idSlot: Int, action: String) -> [URL] {
+        let path = "slots/\(idSlot)"
+        var urls = [appendingAction(baseURL.appendingPathComponent(path), action: action)]
+        let last = baseURL.lastPathComponent.lowercased()
+        let isVersionSegment = last == "v1"
+            || (last.hasPrefix("v") && last.count > 1 && last.dropFirst().allSatisfy(\.isNumber))
+        if isVersionSegment {
+            urls.append(appendingAction(baseURL.deletingLastPathComponent().appendingPathComponent(path), action: action))
+        }
+        return urls
+    }
+
+    private static func appendingAction(_ url: URL, action: String) -> URL {
+        var components = URLComponents(url: url, resolvingAgainstBaseURL: false)!
+        components.queryItems = [URLQueryItem(name: "action", value: action)]
+        return components.url ?? url
+    }
+
     public func stream(
         model: String,
-        messages: [OpenRouterMessage],
-        tools: [OpenRouterToolSpec] = [],
+        messages: [RemoteAPIMessage],
+        tools: [RemoteAPIToolSpec] = [],
         temperature: Double? = nil,
         maxTokens: Int? = nil,
-        sessionId: String? = nil
-    ) -> AsyncThrowingStream<OpenRouterStreamEvent, Error> {
+        reasoningEffort: String? = nil,
+        sessionId: String? = nil,
+        idSlot: Int? = nil
+    ) -> AsyncThrowingStream<RemoteAPIStreamEvent, Error> {
         AsyncThrowingStream { continuation in
             let task = Task {
                 do {
@@ -223,7 +316,9 @@ public struct OpenRouterClient: Sendable {
                         tools: tools,
                         temperature: temperature,
                         maxTokens: maxTokens,
+                        reasoningEffort: reasoningEffort,
                         sessionId: sessionId,
+                        idSlot: idSlot,
                         continuation: continuation
                     )
                     continuation.finish()
@@ -237,12 +332,14 @@ public struct OpenRouterClient: Sendable {
 
     private func runStream(
         model: String,
-        messages: [OpenRouterMessage],
-        tools: [OpenRouterToolSpec],
+        messages: [RemoteAPIMessage],
+        tools: [RemoteAPIToolSpec],
         temperature: Double?,
         maxTokens: Int?,
+        reasoningEffort: String?,
         sessionId: String?,
-        continuation: AsyncThrowingStream<OpenRouterStreamEvent, Error>.Continuation
+        idSlot: Int?,
+        continuation: AsyncThrowingStream<RemoteAPIStreamEvent, Error>.Continuation
     ) async throws {
         var request = URLRequest(url: baseURL.appendingPathComponent("chat/completions"))
         request.httpMethod = "POST"
@@ -266,9 +363,20 @@ public struct OpenRouterClient: Sendable {
         }
         if let temperature { body["temperature"] = temperature }
         if let maxTokens { body["max_tokens"] = maxTokens }
+        // OpenAI-compatible reasoning-effort control (see
+        // https://developers.openai.com/api/docs/guides/reasoning#reasoning-effort).
+        // Omitted entirely rather than sent as e.g. "off" when the caller has no
+        // opinion (thinking disabled) — servers/models that don't support the
+        // field ignore an absent key, whereas an unrecognized value could 400.
+        if let reasoningEffort { body["reasoning_effort"] = reasoningEffort }
         // Groups all generations from one conversation under a single OpenRouter
         // session so multi-step agent runs can be followed and debugged together.
         if let sessionId, !sessionId.isEmpty { body["session_id"] = sessionId }
+        // Pins this request to a specific llama.cpp slot so its KV cache keeps
+        // accumulating on the same slot instead of the server's automatic
+        // (heuristic) slot selection possibly landing on a colder one. Ignored
+        // by servers that don't run llama.cpp or don't understand the field.
+        if let idSlot { body["id_slot"] = idSlot }
         // Request usage counts in the final stream frame (OpenAI spec; supported by
         // OpenRouter, LM Studio, vLLM). Ignored silently by providers that don't support it.
         body["stream_options"] = ["include_usage": true]
@@ -279,11 +387,11 @@ public struct OpenRouterClient: Sendable {
         do {
             (bytes, response) = try await session.bytes(for: request)
         } catch {
-            throw OpenRouterError.transport(provider: providerName, detail: error.localizedDescription)
+            throw RemoteAPIError.transport(provider: providerName, detail: error.localizedDescription)
         }
 
         guard let httpResponse = response as? HTTPURLResponse else {
-            throw OpenRouterError.transport(provider: providerName, detail: "Non-HTTP response from \(providerName)")
+            throw RemoteAPIError.transport(provider: providerName, detail: "Non-HTTP response from \(providerName)")
         }
 
         guard (200..<300).contains(httpResponse.statusCode) else {
@@ -293,7 +401,7 @@ public struct OpenRouterClient: Sendable {
                 body.append("\n")
                 if body.count > 4096 { break }
             }
-            throw OpenRouterError.http(provider: providerName, status: httpResponse.statusCode, body: body)
+            throw RemoteAPIError.http(provider: providerName, status: httpResponse.statusCode, body: body)
         }
 
         // Tracks whether we ever observed an explicit end-of-stream signal
@@ -335,7 +443,7 @@ public struct OpenRouterClient: Sendable {
         // connection: surface it as an error rather than letting the caller
         // believe the completion finished normally.
         if !sawTerminalSignal {
-            throw OpenRouterError.transport(
+            throw RemoteAPIError.transport(
                 provider: providerName,
                 detail: "Connection closed before the response finished (no completion signal received). The server may have canceled the request."
             )
@@ -351,7 +459,7 @@ public struct OpenRouterClient: Sendable {
     @discardableResult
     private static func dispatchFrame(
         data: Data,
-        continuation: AsyncThrowingStream<OpenRouterStreamEvent, Error>.Continuation
+        continuation: AsyncThrowingStream<RemoteAPIStreamEvent, Error>.Continuation
     ) throws -> Bool {
         let obj: Any
         do {
@@ -363,6 +471,13 @@ public struct OpenRouterClient: Sendable {
             return false
         }
         guard let dict = obj as? [String: Any] else { return false }
+
+        // llama.cpp echoes the slot that served the request at the top level of
+        // (most) frames. Yield it whenever present so the caller can pin
+        // subsequent requests — and slot save/restore calls — to the same slot.
+        if let idSlot = (dict["id_slot"] as? Int) ?? (dict["id_slot"] as? NSNumber)?.intValue {
+            continuation.yield(.slotAssigned(idSlot))
+        }
 
         // Usage appears in its own frame (choices may be empty or absent).
         if let usage = dict["usage"] as? [String: Any] {
@@ -467,21 +582,21 @@ public struct OpenRouterClient: Sendable {
         do {
             (data, response) = try await session.data(for: request)
         } catch {
-            throw OpenRouterError.transport(provider: providerName, detail: error.localizedDescription)
+            throw RemoteAPIError.transport(provider: providerName, detail: error.localizedDescription)
         }
 
         guard let httpResponse = response as? HTTPURLResponse else {
-            throw OpenRouterError.transport(provider: providerName, detail: "Non-HTTP response from \(providerName)")
+            throw RemoteAPIError.transport(provider: providerName, detail: "Non-HTTP response from \(providerName)")
         }
         guard (200..<300).contains(httpResponse.statusCode) else {
             let body = String(data: data, encoding: .utf8) ?? ""
-            throw OpenRouterError.http(provider: providerName, status: httpResponse.statusCode, body: body)
+            throw RemoteAPIError.http(provider: providerName, status: httpResponse.statusCode, body: body)
         }
 
         guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
               let entries = root["data"] as? [[String: Any]]
         else {
-            throw OpenRouterError.decoding(provider: providerName, detail: "Missing `data` array in /models response")
+            throw RemoteAPIError.decoding(provider: providerName, detail: "Missing `data` array in /models response")
         }
 
         var models: [ModelInfo] = []
@@ -549,11 +664,18 @@ public struct OpenRouterClient: Sendable {
 
     // MARK: - Encoding
 
-    private static func encodeMessage(_ message: OpenRouterMessage) -> [String: Any] {
-        var dict: [String: Any] = [
-            "role": message.role.rawValue,
-            "content": message.content
-        ]
+    private static func encodeMessage(_ message: RemoteAPIMessage) -> [String: Any] {
+        var dict: [String: Any] = [:]
+        dict["role"] = message.role.rawValue
+        if message.imageDataURLs.isEmpty {
+            dict["content"] = message.content
+        } else {
+            var parts: [[String: Any]] = [["type": "text", "text": message.content]]
+            parts.append(contentsOf: message.imageDataURLs.map { url in
+                ["type": "image_url", "image_url": ["url": url]]
+            })
+            dict["content"] = parts
+        }
         if message.role == .tool, let id = message.toolCallId {
             dict["tool_call_id"] = id
         }

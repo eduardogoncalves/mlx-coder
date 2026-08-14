@@ -1,7 +1,7 @@
 import XCTest
 @testable import MLXCoder
 
-/// Verifies `OpenRouterClient.remoteModelLoadStatus` — the best-effort check
+/// Verifies `RemoteAPIClient.remoteModelLoadStatus` — the best-effort check
 /// used when switching to a remote model so router-mode servers (llama.cpp
 /// `--models-dir`/`--models-preset`, llama-swap) can report that a model is
 /// "unloaded"/"sleeping"/"loading" and will be autoloaded lazily on first
@@ -14,11 +14,11 @@ final class RemoteModelLoadStatusTests: XCTestCase {
         super.tearDown()
     }
 
-    private func makeClient() -> OpenRouterClient {
+    private func makeClient() -> RemoteAPIClient {
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [StatusStubbingProtocol.self]
         let session = URLSession(configuration: config)
-        return OpenRouterClient(apiKey: "", session: session)
+        return RemoteAPIClient(apiKey: "", session: session)
     }
 
     func testReturnsStatusValueForMatchingModel() async {

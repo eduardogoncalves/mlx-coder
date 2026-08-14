@@ -1,11 +1,9 @@
-// Sources/MLXCoder/OpenRouterModelCache.swift
+// Sources/MLXCoder/RemoteModelCache.swift
 // Persists a remote provider's `/models` response under ~/.mlx-coder so the
 // picker has entries on launch without hitting the network. Refreshed lazily
 // when stale and eagerly on demand via `/model remote <provider> refresh`.
 //
 // The cache is keyed per provider under ~/.mlx-coder/remote-models/<id>.json.
-// `OpenRouterModelCache` is kept as a thin back-compat wrapper over
-// `RemoteModelCache` (providerID "openrouter") for existing callsites.
 
 import Foundation
 
@@ -21,7 +19,7 @@ enum RemoteModelCache {
 
     struct CacheFile: Codable {
         let fetchedAt: Date
-        let models: [OpenRouterClient.ModelInfo]
+        let models: [RemoteAPIClient.ModelInfo]
     }
 
     static func load(providerID: String) -> CacheFile? {
@@ -29,7 +27,7 @@ enum RemoteModelCache {
         return try? JSONDecoder.iso8601().decode(CacheFile.self, from: data)
     }
 
-    static func cachedModels(providerID: String) -> [OpenRouterClient.ModelInfo] {
+    static func cachedModels(providerID: String) -> [RemoteAPIClient.ModelInfo] {
         load(providerID: providerID)?.models ?? []
     }
 
@@ -38,7 +36,7 @@ enum RemoteModelCache {
         return Date().timeIntervalSince(cache.fetchedAt) > staleAfter
     }
 
-    static func save(_ models: [OpenRouterClient.ModelInfo], providerID: String) throws {
+    static func save(_ models: [RemoteAPIClient.ModelInfo], providerID: String) throws {
         let path = filePath(providerID: providerID)
         let dir = (path as NSString).deletingLastPathComponent
         try FileManager.default.createDirectory(
@@ -54,7 +52,7 @@ enum RemoteModelCache {
     /// Fetch live and persist. Returns the new list. Throws on network error or
     /// if the provider is unknown.
     @discardableResult
-    static func refresh(providerID: String) async throws -> [OpenRouterClient.ModelInfo] {
+    static func refresh(providerID: String) async throws -> [RemoteAPIClient.ModelInfo] {
         guard let provider = RemoteProviderRegistry.provider(id: providerID) else {
             throw NSError(
                 domain: "RemoteModelCache",
@@ -66,27 +64,10 @@ enum RemoteModelCache {
         // configured key when present so authenticated gateways work too.
         let base = provider.baseURLValue ?? URL(string: "https://openrouter.ai/api/v1")!
         let key = RemoteProviderRegistry.apiKey(for: providerID) ?? ""
-        let client = OpenRouterClient(apiKey: key, baseURL: base, providerName: provider.name)
+        let client = RemoteAPIClient(apiKey: key, baseURL: base, providerName: provider.name)
         let models = try await client.listToolCapableModels()
         try save(models, providerID: providerID)
         return models
-    }
-}
-
-/// Back-compat wrapper for existing callsites that still assume OpenRouter.
-/// The /model menu UI task will migrate these to `RemoteModelCache` directly.
-enum OpenRouterModelCache {
-    static func cachedModels() -> [OpenRouterClient.ModelInfo] {
-        RemoteModelCache.cachedModels(providerID: "openrouter")
-    }
-
-    static func isStale() -> Bool {
-        RemoteModelCache.isStale(providerID: "openrouter")
-    }
-
-    @discardableResult
-    static func refresh() async throws -> [OpenRouterClient.ModelInfo] {
-        try await RemoteModelCache.refresh(providerID: "openrouter")
     }
 }
 

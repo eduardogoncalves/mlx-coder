@@ -3,18 +3,18 @@ import XCTest
 
 /// Verifies that when the underlying HTTP connection is dropped/canceled
 /// server-side mid-stream — closing the response body without ever sending
-/// `data: [DONE]` or a `finish_reason` — `OpenRouterClient.stream` surfaces a
+/// `data: [DONE]` or a `finish_reason` — `RemoteAPIClient.stream` surfaces a
 /// thrown error instead of finishing "successfully" with a silently
 /// truncated (or empty) completion. Without this, callers (and thus the TUI)
 /// have no signal that the turn never actually completed.
-final class OpenRouterAbruptStreamTests: XCTestCase {
+final class RemoteAPIAbruptStreamTests: XCTestCase {
 
-    private func makeClient(response: Data) -> OpenRouterClient {
+    private func makeClient(response: Data) -> RemoteAPIClient {
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [AbruptEndingProtocol.self]
         AbruptEndingProtocol.responseBody = response
         let session = URLSession(configuration: config)
-        return OpenRouterClient(apiKey: "test-key", session: session)
+        return RemoteAPIClient(apiKey: "test-key", session: session)
     }
 
     func testStreamThrowsWhenConnectionEndsWithoutDoneSentinel() async throws {
@@ -28,7 +28,7 @@ final class OpenRouterAbruptStreamTests: XCTestCase {
         let client = makeClient(response: body)
         let stream = client.stream(
             model: "openai/gpt-4o",
-            messages: [OpenRouterMessage(role: .user, content: "Hi")]
+            messages: [RemoteAPIMessage(role: .user, content: "Hi")]
         )
 
         var receivedText = false
@@ -43,8 +43,8 @@ final class OpenRouterAbruptStreamTests: XCTestCase {
 
         XCTAssertTrue(receivedText, "the partial text delta should still have been yielded")
         let error = try XCTUnwrap(thrownError, "an abruptly-closed stream (no [DONE]/finish_reason) must throw")
-        guard case OpenRouterError.transport = error else {
-            return XCTFail("expected OpenRouterError.transport, got \(error)")
+        guard case RemoteAPIError.transport = error else {
+            return XCTFail("expected RemoteAPIError.transport, got \(error)")
         }
     }
 
@@ -59,7 +59,7 @@ final class OpenRouterAbruptStreamTests: XCTestCase {
         let client = makeClient(response: body)
         let stream = client.stream(
             model: "openai/gpt-4o",
-            messages: [OpenRouterMessage(role: .user, content: "Hi")]
+            messages: [RemoteAPIMessage(role: .user, content: "Hi")]
         )
 
         var sawDone = false
@@ -79,7 +79,7 @@ final class OpenRouterAbruptStreamTests: XCTestCase {
         let client = makeClient(response: body)
         let stream = client.stream(
             model: "openai/gpt-4o",
-            messages: [OpenRouterMessage(role: .user, content: "Hi")]
+            messages: [RemoteAPIMessage(role: .user, content: "Hi")]
         )
 
         var sawDone = false
