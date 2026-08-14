@@ -103,6 +103,30 @@ extension AgentLoop {
         pendingReload = false
     }
 
+    /// Adopts a finished sub-agent's live approval state (command allowlist and
+    /// autopilot) back onto this (parent/orchestrator) loop.
+    ///
+    /// Approval decisions made from inside a `TaskTool` sub-agent's own prompt
+    /// (see `askForToolApproval`) only mutate that sub-agent's own `AgentLoop`
+    /// instance, which is discarded once the sub-agent's turn ends. But
+    /// sub-agents share the parent's frontend/event pipeline, so the
+    /// sub-agent's own (non-silent) `setMode` call still emits a
+    /// `.modeChanged` event that updates the shared TUI footer. Without this,
+    /// the footer can end up showing "autopilot" (from the sub-agent's own
+    /// mode change) while the parent's own `autoApproveAllTools` stays false —
+    /// so the very next tool call the parent itself asks about re-prompts,
+    /// despite the footer already claiming autopilot is on. `TaskTool` calls
+    /// this after a sub-agent finishes so the parent's real state catches up
+    /// with what the footer already shows.
+    public func adoptApprovalState(
+        autoApproveAllTools subAgentAutoApprove: Bool,
+        sessionApprovedToolCommands subAgentApprovedCommands: Set<String>
+    ) async {
+        sessionApprovedToolCommands.formUnion(subAgentApprovedCommands)
+        guard subAgentAutoApprove, !autoApproveAllTools else { return }
+        await setMode(.agent, taskType: .general)
+    }
+
     /// Sets the working mode (agent/plan) and refreshes the system prompt.
     public func setMode(_ mode: WorkingMode, taskType: TaskType? = nil, silent: Bool = false) async {
         self.mode = mode

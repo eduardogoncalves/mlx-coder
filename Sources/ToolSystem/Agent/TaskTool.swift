@@ -1486,6 +1486,8 @@ public struct TaskTool: Tool {
                 try? await parentAgentLoop?.reacquireLocalModelAfterSubagent()
             }
 
+            await propagateApprovalStateToParent(subAgent: subAgent)
+
             return .success(digest)
         } catch {
             // Same teardown on the failure path — a crash mid-run must not leak
@@ -1501,8 +1503,23 @@ public struct TaskTool: Tool {
                 try? await parentAgentLoop?.reacquireLocalModelAfterSubagent()
             }
 
+            await propagateApprovalStateToParent(subAgent: subAgent)
+
             return .error("Sub-agent failed: \(error.localizedDescription)")
         }
+    }
+
+    /// Carries a finished sub-agent's own approval decisions (autopilot,
+    /// per-command allowlist) back onto the parent orchestrator loop — see
+    /// `AgentLoop.adoptApprovalState`.
+    private func propagateApprovalStateToParent(subAgent: AgentLoop) async {
+        guard let parentAgentLoop else { return }
+        let subAgentAutoApprove = await subAgent.autoApproveAllTools
+        let subAgentApprovedCommands = await subAgent.sessionApprovedToolCommands
+        await parentAgentLoop.adoptApprovalState(
+            autoApproveAllTools: subAgentAutoApprove,
+            sessionApprovedToolCommands: subAgentApprovedCommands
+        )
     }
 
     private func archiveSubagentRun(
