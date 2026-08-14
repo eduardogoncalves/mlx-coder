@@ -444,6 +444,9 @@ public actor AgentLoop {
         if let contextBlock = await retrieveContextBlockIfEnabled(userRequest: message) {
             messageForHistory += "\n\n" + contextBlock
         }
+        if let skillsHint = relevantSkillsHint(userRequest: message) {
+            messageForHistory += "\n\n" + skillsHint
+        }
         history.addUser(messageForHistory)
         await applyDeterministicContextCompactionIfNeeded(reason: "after_user_message")
         
@@ -1067,6 +1070,35 @@ public actor AgentLoop {
             graphStore: codeGraphIndexer?.store
         )
         return await retriever.retrieve(userRequest: userRequest)
+    }
+
+    /// Surfaces only the skills that look relevant to THIS message, injected
+    /// alongside the user turn (never the static system prompt — same
+    /// KV-cache-prefix reasoning as `retrieveContextBlockIfEnabled`). Without
+    /// this, the alternative is dumping every discovered skill's metadata
+    /// into every single turn regardless of relevance, which dilutes
+    /// attention on small models for no benefit on turns that have nothing
+    /// to do with any of them. `read_skill` itself is unaffected — a skill
+    /// that doesn't surface here is still loadable by name if the model (or
+    /// user) already knows it, and `/skills` always lists everything.
+    /// Top-level only: sub-agents get no skills metadata in their prompt at
+    /// all today (see `TaskTool.baseInstructions`), so there is nothing to
+    /// scope down for them yet.
+    private func relevantSkillsHint(userRequest: String) -> String? {
+        guard role == nil, !skillsMetadata.isEmpty else { return nil }
+        let matches = SkillsRegistry.relevantSkills(skillsMetadata, to: userRequest)
+        guard !matches.isEmpty else { return nil }
+
+        let lines = matches
+            .map { "- \($0.name): \($0.description) (\($0.filePath))" }
+            .joined(separator: "\n")
+        return """
+        <relevant_skills>
+        These skills may help with this request. Load full instructions with \
+        read_skill (arguments: {"name": "<skill-name>"}) before acting on one:
+        \(lines)
+        </relevant_skills>
+        """
     }
 
     /// Drains queued steering messages into history, emitting a harness

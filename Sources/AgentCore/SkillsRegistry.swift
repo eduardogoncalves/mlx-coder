@@ -200,3 +200,57 @@ public actor SkillsRegistry {
         return path
     }
 }
+
+extension SkillsRegistry {
+    /// Ranks `skills` by lexical overlap with `query` (a tag match counts
+    /// more than a name match, which counts more than a description-word
+    /// match) and returns the top `limit` with a nonzero score, highest
+    /// first. Deliberately a cheap, deterministic keyword filter — no model
+    /// call — since this is meant to run on every user turn.
+    ///
+    /// Exists so a workspace with many skills doesn't have to choose between
+    /// dumping every skill's metadata into the model's context on every turn
+    /// (diluting attention on small models — see `PromptComposer`) or hiding
+    /// skills entirely. Callers inject the result per-turn, alongside the
+    /// user's message (see `AgentLoop.processUserMessage`), never into the
+    /// static system prompt — mirrors `ContextRetriever`'s per-turn
+    /// injection, which exists for the same KV-cache-prefix reason.
+    public static func relevantSkills(_ skills: [SkillMetadata], to query: String, limit: Int = 3) -> [SkillMetadata] {
+        let queryTokens = tokenize(query)
+        guard !queryTokens.isEmpty else { return [] }
+
+        func score(_ skill: SkillMetadata) -> Int {
+            let tagTokens = Set(skill.tags.flatMap(tokenize))
+            let nameTokens = tokenize(skill.name)
+            let descriptionTokens = tokenize(skill.description)
+            var total = 0
+            for token in queryTokens {
+                if tagTokens.contains(token) { total += 3 }
+                if nameTokens.contains(token) { total += 2 }
+                if descriptionTokens.contains(token) { total += 1 }
+            }
+            return total
+        }
+
+        return skills
+            .map { ($0, score($0)) }
+            .filter { $0.1 > 0 }
+            .sorted { $0.1 > $1.1 }
+            .prefix(limit)
+            .map(\.0)
+    }
+
+    private static let stopwords: Set<String> = [
+        "the", "a", "an", "and", "or", "for", "to", "of", "in", "on", "with",
+        "this", "that", "is", "are", "how", "what", "do", "does", "use", "using",
+        "can", "you", "please", "need", "want", "add", "make", "get", "set",
+    ]
+
+    private static func tokenize(_ text: String) -> Set<String> {
+        Set(
+            text.lowercased()
+                .components(separatedBy: CharacterSet.alphanumerics.inverted)
+                .filter { $0.count >= 3 && !stopwords.contains($0) }
+        )
+    }
+}

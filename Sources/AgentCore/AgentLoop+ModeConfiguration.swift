@@ -25,7 +25,13 @@ extension AgentLoop {
             baseInstructions: subAgentBaseInstructions,
             memorySection: memoryPromptSection,
             customizationSection: customizationPromptSection,
-            skillsMetadata: skillsMetadata,
+            // The static system prompt never gets skills' metadata anymore —
+            // see `relevantSkillsHint` in AgentLoop.swift, which surfaces
+            // only per-turn-relevant skills alongside the user message
+            // instead (keeps the prompt's KV-cache prefix stable and avoids
+            // showing every discovered skill on every turn regardless of
+            // relevance). `self.skillsMetadata` is retained for that lookup.
+            skillsMetadata: [],
             dialect: toolCallDialect,
             usesNativeToolCalling: backend.isOnline,
             toolPromptFilterOverride: currentToolPromptFilter(),
@@ -123,7 +129,13 @@ extension AgentLoop {
             baseInstructions: subAgentBaseInstructions,
             memorySection: memoryPromptSection,
             customizationSection: customizationPromptSection,
-            skillsMetadata: skillsMetadata,
+            // The static system prompt never gets skills' metadata anymore —
+            // see `relevantSkillsHint` in AgentLoop.swift, which surfaces
+            // only per-turn-relevant skills alongside the user message
+            // instead (keeps the prompt's KV-cache prefix stable and avoids
+            // showing every discovered skill on every turn regardless of
+            // relevance). `self.skillsMetadata` is retained for that lookup.
+            skillsMetadata: [],
             dialect: toolCallDialect,
             usesNativeToolCalling: backend.isOnline,
             toolPromptFilterOverride: currentToolPromptFilter(),
@@ -162,7 +174,13 @@ extension AgentLoop {
             baseInstructions: subAgentBaseInstructions,
             memorySection: memoryPromptSection,
             customizationSection: customizationPromptSection,
-            skillsMetadata: skillsMetadata,
+            // The static system prompt never gets skills' metadata anymore —
+            // see `relevantSkillsHint` in AgentLoop.swift, which surfaces
+            // only per-turn-relevant skills alongside the user message
+            // instead (keeps the prompt's KV-cache prefix stable and avoids
+            // showing every discovered skill on every turn regardless of
+            // relevance). `self.skillsMetadata` is retained for that lookup.
+            skillsMetadata: [],
             dialect: toolCallDialect,
             usesNativeToolCalling: backend.isOnline,
             toolPromptFilterOverride: currentToolPromptFilter(),
@@ -234,7 +252,13 @@ extension AgentLoop {
             baseInstructions: subAgentBaseInstructions,
             memorySection: memoryPromptSection,
             customizationSection: customizationPromptSection,
-            skillsMetadata: skillsMetadata,
+            // The static system prompt never gets skills' metadata anymore —
+            // see `relevantSkillsHint` in AgentLoop.swift, which surfaces
+            // only per-turn-relevant skills alongside the user message
+            // instead (keeps the prompt's KV-cache prefix stable and avoids
+            // showing every discovered skill on every turn regardless of
+            // relevance). `self.skillsMetadata` is retained for that lookup.
+            skillsMetadata: [],
             dialect: toolCallDialect,
             usesNativeToolCalling: backend.isOnline,
             toolPromptFilterOverride: currentToolPromptFilter(),

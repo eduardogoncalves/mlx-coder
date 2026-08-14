@@ -236,7 +236,10 @@ struct ChatCommand: AsyncParsableCommand {
             taskType: .general,
             workspaceRoot: absWorkspace,
             memorySection: memorySection,
-            skillsMetadata: skillMetadata,
+            // Kept out of the static prompt — AgentLoop surfaces only
+            // per-turn-relevant skills instead (relevantSkillsHint). The
+            // full skillMetadata still flows into AgentLoop's init below.
+            skillsMetadata: [],
             dialect: ToolCallDialect.detect(modelPath: selectedModel),
             usesNativeToolCalling: InferenceBackend(modelPath: selectedModel).isOnline,
             toolPromptFilterOverride: AgentLoop.orchestratorToolPromptFilter(mode: .plan),

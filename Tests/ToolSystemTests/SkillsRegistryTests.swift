@@ -38,4 +38,46 @@ final class SkillsRegistryTests: XCTestCase {
         try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         return url.path()
     }
+
+    // MARK: - relevantSkills (per-turn keyword filter)
+
+    private let dotnetSkill = SkillMetadata(
+        name: "dotnet-lsp", description: "Configure the .NET language server for C# projects",
+        filePath: ".claude/skills/dotnet-lsp/SKILL.md", tags: ["dotnet", "csharp", "lsp"]
+    )
+    private let reviewerSkill = SkillMetadata(
+        name: "reviewer", description: "Review and risk triage",
+        filePath: ".github/skills/reviewer/SKILL.md", tags: ["review", "safety"]
+    )
+
+    func testRelevantSkillsMatchesOnTag() {
+        let matches = SkillsRegistry.relevantSkills([dotnetSkill, reviewerSkill], to: "help me set up the dotnet language server")
+        XCTAssertEqual(matches.map(\.name), ["dotnet-lsp"])
+    }
+
+    func testRelevantSkillsMatchesOnDescriptionWord() {
+        let matches = SkillsRegistry.relevantSkills([dotnetSkill, reviewerSkill], to: "can you triage this for safety issues")
+        XCTAssertEqual(matches.map(\.name), ["reviewer"])
+    }
+
+    func testRelevantSkillsReturnsEmptyWhenNothingMatches() {
+        let matches = SkillsRegistry.relevantSkills([dotnetSkill, reviewerSkill], to: "what's the weather like today")
+        XCTAssertTrue(matches.isEmpty)
+    }
+
+    func testRelevantSkillsRanksTagMatchAboveDescriptionOnlyMatch() {
+        // "review" appears in reviewerSkill's tags (weight 3) and nowhere in
+        // dotnetSkill; "csharp" appears in dotnetSkill's tags too, so both
+        // score, but reviewer's tag hit should still surface it first.
+        let matches = SkillsRegistry.relevantSkills([dotnetSkill, reviewerSkill], to: "review this csharp change")
+        XCTAssertEqual(matches.first?.name, "reviewer")
+    }
+
+    func testRelevantSkillsRespectsLimit() {
+        let many = (0..<5).map {
+            SkillMetadata(name: "skill-\($0)", description: "handles widget work", filePath: "skills/skill-\($0)/SKILL.md", tags: ["widget"])
+        }
+        let matches = SkillsRegistry.relevantSkills(many, to: "widget widget widget", limit: 2)
+        XCTAssertEqual(matches.count, 2)
+    }
 }
