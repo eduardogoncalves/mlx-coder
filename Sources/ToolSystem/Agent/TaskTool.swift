@@ -168,7 +168,7 @@ public struct TaskTool: Tool {
         case .general:
             return "You are a general-purpose sub-agent — a focused single-task worker, not a conversation partner. Read only what you need, do exactly what the task asks (find the answer, or make the change), then stop. Do NOT expand scope beyond the task or refactor unrelated code. \(outputRules)"
         case .codebaseResearch:
-            return "You are the CODEBASE_RESEARCH agent. Your job is to LOCATE and prove, not to summarize vaguely. Use glob/grep/code_search and read_file to find the exact files, symbols, and call sites the task is about. ALWAYS back claims with concrete `file:line` references and short quoted snippets — never a hand-wavy overview. Do NOT edit files or run build/test commands. If something is not found, say so plainly instead of guessing. \(outputRules)"
+            return "You are the CODEBASE_RESEARCH agent. Your job is to LOCATE and prove, not to summarize vaguely. For \"where/by what is X used or called\", prefer `code_graph_explore` — its blast-radius section lists actual callers/referencers by name. For \"where is X defined\", prefer `code_search` — it returns symbol definitions only, not call sites. Both are exact code-graph lookups, faster and more precise than text search when they hit; fall back to `glob`/`grep` when they miss or the target isn't a named symbol. Use `read_file` to confirm context. ALWAYS back claims with concrete `file:line` references and short quoted snippets — never a hand-wavy overview. Do NOT edit files or run build/test commands. If something is not found, say so plainly instead of guessing. \(outputRules)"
         case .testEngineering:
             return "You are the TEST_ENGINEERING agent. Run the NARROWEST tests that cover the change, then interpret the results. You MUST report the exact command you ran and the pass/fail outcome. If a test fails, quote the failing assertion or stack line and propose the smallest fix — do not rewrite unrelated code. Prefer running existing tests over writing new ones unless the task explicitly asks for new tests. \(outputRules)"
         case .securityReview:
@@ -199,7 +199,7 @@ public struct TaskTool: Tool {
         case .general:
             return ["read_file", "read_many", "list_dir", "glob", "grep", "code_search", "write_file", "edit_file", "bash", "todo"]
         case .codebaseResearch:
-            return ["read_file", "read_many", "list_dir", "glob", "grep", "code_search", "search_knowledge"]
+            return ["read_file", "read_many", "list_dir", "glob", "grep", "code_search", "code_graph_explore", "search_knowledge"]
         case .testEngineering:
             return ["read_file", "read_many", "list_dir", "glob", "grep", "bash", "build_check"]
         case .securityReview:
@@ -1655,6 +1655,10 @@ public struct TaskTool: Tool {
             await registry.register(GrepTool(permissions: permissions))
         case "code_search":
             await registry.register(CodeSearchTool(permissions: permissions, codeGraphIndexer: codeGraphIndexer))
+        case "code_graph_explore":
+            if let codeGraphIndexer {
+                await registry.register(CodeGraphExploreTool(indexer: codeGraphIndexer))
+            }
         case "bash":
             await registry.register(BashTool(permissions: permissions, useSandbox: useSandbox, backgroundJobs: backgroundJobs))
         case "build_check":
