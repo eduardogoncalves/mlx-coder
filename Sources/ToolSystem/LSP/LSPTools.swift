@@ -80,7 +80,7 @@ public struct LSPDiagnosticsTool: Tool {
 
 public struct LSPHoverTool: Tool {
     public let name = "lsp_hover"
-    public let description = "Get type info and documentation for a symbol at a given position."
+    public let description = "(C#/.NET workspaces only) Get type info and documentation for a symbol at a given position."
     public let parameters = JSONSchema(
         type: "object",
         properties: [
@@ -126,7 +126,7 @@ public struct LSPHoverTool: Tool {
 
 public struct LSPReferencesTool: Tool {
     public let name = "lsp_references"
-    public let description = "Find all usages of a symbol across the workspace."
+    public let description = "(C#/.NET workspaces only) Find all usages of a symbol across the workspace."
     public let parameters = JSONSchema(
         type: "object",
         properties: [
@@ -172,7 +172,7 @@ public struct LSPReferencesTool: Tool {
 
 public struct LSPDefinitionTool: Tool {
     public let name = "lsp_definition"
-    public let description = "Go to the definition location(s) for a symbol at a given position."
+    public let description = "(C#/.NET workspaces only) Go to the definition location(s) for a symbol at a given position."
     public let parameters = JSONSchema(
         type: "object",
         properties: [
