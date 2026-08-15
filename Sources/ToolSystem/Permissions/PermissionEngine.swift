@@ -128,7 +128,17 @@ public struct PermissionEngine: Sendable {
         let effectiveRoot = effectiveWorkspaceRoot
         let resolved = expanded.hasPrefix("/") ? expanded : effectiveRoot + "/" + expanded
         let normalizedPath = URL(filePath: resolved).standardized.path()
-        return URL(filePath: normalizedPath).resolvingSymlinksInPath().path()
+        let symlinkResolved = URL(filePath: normalizedPath).resolvingSymlinksInPath().path()
+        // `.resolvingSymlinksInPath()` appends a trailing "/" when the target
+        // is a confirmed existing directory — `workspaceRoot` itself never
+        // goes through this call, so callers comparing a resolved path
+        // against `workspaceRoot` (e.g. `CodeSearchTool.relativizePath`) see
+        // a spurious mismatch for the workspace root itself (e.g. path "."),
+        // silently breaking any exact-equality/prefix check downstream.
+        if symlinkResolved.count > 1 && symlinkResolved.hasSuffix("/") {
+            return String(symlinkResolved.dropLast())
+        }
+        return symlinkResolved
     }
 
     /// Validate that a path is within the workspace root.
