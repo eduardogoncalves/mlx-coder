@@ -193,13 +193,21 @@ struct RunCommand: AsyncParsableCommand {
         // Code graph (on by default — see `codeGraph.enabled` in config.json
         // to opt out). Bootstrapping + the initial workspace scan run
         // detached/low-priority so they never block startup — the tool's own
-        // staleness banner covers the window until the scan catches up.
+        // staleness banner covers the window while the scan is still going.
+        // Unlike `chat` (a long-lived process where the scan naturally gets
+        // to finish in the background over the session's lifetime), `run`
+        // exits right after this one prompt — so its detached scan task is
+        // saved and explicitly awaited before the command returns, below,
+        // instead of being abandoned mid-flight by process exit every single
+        // invocation (which was silently truncating the shared
+        // ~/.mlx-coder/codegraph.db's indexing pass on every `run` call).
         let codeGraphConfig = runtimeConfig.codeGraph ?? CodeGraphConfig()
         let codeGraphStore = CodeGraphStore()
         let codeGraphIndexer = CodeGraphIndexer(store: codeGraphStore, permissions: permissions, config: codeGraphConfig)
+        var codeGraphScanTask: Task<Void, Never>?
         if codeGraphConfig.enabled {
             await codeGraphIndexer.bootstrap()
-            Task.detached(priority: .background) { [codeGraphIndexer] in
+            codeGraphScanTask = Task.detached(priority: .background) { [codeGraphIndexer] in
                 await codeGraphIndexer.scanWorkspace(root: absWorkspace)
             }
         }
@@ -299,9 +307,11 @@ struct RunCommand: AsyncParsableCommand {
         } catch is CancellationError {
             await CancelController.shared.setTask(nil)
             renderer.printError("Generation cancelled by user.")
+            await codeGraphScanTask?.value
             return
         } catch {
             await CancelController.shared.setTask(nil)
+            await codeGraphScanTask?.value
             throw error
         }
 
@@ -312,5 +322,11 @@ struct RunCommand: AsyncParsableCommand {
         if let outputJSON = saveHistoryJSON?.trimmingCharacters(in: .whitespacesAndNewlines), !outputJSON.isEmpty {
             _ = try await agentLoop.exportHistoryJSON(to: outputJSON)
         }
+
+        // Wait for the workspace scan kicked off above so `run` never exits
+        // mid-scan and abandons the code graph's shared, persistent SQLite
+        // writer (~/.mlx-coder/codegraph.db) partway through a transaction —
+        // see the comment at codeGraphScanTask's declaration.
+        await codeGraphScanTask?.value
     }
 }

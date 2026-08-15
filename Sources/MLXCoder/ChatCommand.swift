@@ -198,12 +198,22 @@ struct ChatCommand: AsyncParsableCommand {
         let codeGraphConfig = runtimeConfig.codeGraph ?? CodeGraphConfig()
         let codeGraphStore = CodeGraphStore()
         let codeGraphIndexer = CodeGraphIndexer(store: codeGraphStore, permissions: permissions, config: codeGraphConfig)
+        var codeGraphScanTask: Task<Void, Never>?
         if codeGraphConfig.enabled {
             await codeGraphIndexer.bootstrap()
-            Task.detached(priority: .background) { [codeGraphIndexer] in
+            codeGraphScanTask = Task.detached(priority: .background) { [codeGraphIndexer] in
                 await codeGraphIndexer.scanWorkspace(root: absWorkspace)
             }
         }
+        // This function has several early `return`s below (the plain-text
+        // debug REPL branch, the SwiftCoderTUI branch) in addition to its
+        // normal fall-through end. `defer` can't help here — Swift doesn't
+        // allow `await` in a defer body, and `defer { Task { await ... } }`
+        // only fires another abandoned unstructured task, reproducing the
+        // exact bug this is fixing. So `await codeGraphScanTask?.value` is
+        // threaded in explicitly right before each of those returns instead,
+        // so none of them can exit while the scan above is still abandoned
+        // mid-flight against the shared ~/.mlx-coder/codegraph.db writer.
 
         // Set up tool registry
         let registry = ToolRegistry()
@@ -369,6 +379,7 @@ struct ChatCommand: AsyncParsableCommand {
                 if line == "exit" || line == "quit" { break }
                 try await agentLoop.processUserMessage(line)
             }
+            await codeGraphScanTask?.value
             return
         }
 
@@ -446,6 +457,7 @@ struct ChatCommand: AsyncParsableCommand {
                 initialSandboxEnabled: effectiveSandbox,
                 resumeSessionId: resumeSessionId
             )
+            await codeGraphScanTask?.value
             await DotnetLSPService.shared.shutdown()
             if let resumeInfo {
                 print("\nSession saved. Resume it later with:")
@@ -927,6 +939,7 @@ struct ChatCommand: AsyncParsableCommand {
             }
         }
 
+        await codeGraphScanTask?.value
         await DotnetLSPService.shared.shutdown()
 
         print("\nGoodbye!")
