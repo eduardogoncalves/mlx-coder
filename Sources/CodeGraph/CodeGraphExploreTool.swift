@@ -8,18 +8,23 @@ import Foundation
 /// neighbors, and a blast-radius-by-name count. This collapses the
 /// grep→read→grep loop into one call.
 ///
-/// NB: v1 has no `calls` edges (deferred to M5 — plan §2.1), so this is
-/// deliberately **not** a call graph. The tool's own description says so, to
-/// avoid over-selling it to the model.
+/// Since M5 (plan §13.1), `TreeSitterExtractor` emits syntactic `calls`
+/// edges for tier-1 languages. The outgoing-edge sections above
+/// (hierarchy/imports/references) deliberately still exclude `calls` — but
+/// the blast-radius/incoming-neighbors section does not filter by kind, so
+/// callers of a function/method show up there, each labeled `(calls)`. That
+/// makes this tool usable for "who calls X" / "where is X used" lookups, not
+/// just "where is X defined" — the description below says so explicitly.
 public struct CodeGraphExploreTool: Tool {
     public let name = "code_graph_explore"
     public let description = """
     Look up named code symbols (functions, methods, classes, structs, enums, protocols) in the \
     deterministic code graph. Returns each match's source location, type hierarchy \
     (extends/implements), import and by-name reference neighbors, and a blast-radius count \
-    (how many places reference it by name). This is NOT a call graph — it has no function-call \
-    edges, only structural ones (imports/inheritance/by-name references). Prefer this over \
-    grep+read when you just need "where is X defined and what does it relate to".
+    with the actual callers/referencers by name (including function-call sites, for tier-1 \
+    languages with a tree-sitter grammar: Swift, C#, TypeScript, JavaScript). Prefer this over \
+    grep+read when you need "where is X defined", "what does X relate to", or "where/by what \
+    is X used or called".
     """
     public let parameters = JSONSchema(
         type: "object",
