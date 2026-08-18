@@ -2144,7 +2144,12 @@ public actor AgentLoop {
         // merge-approval flow (which only look at `fileModificationToolsExecuted`
         // / `modifiedFilePaths`) still fire when the actual edits happened one
         // level down instead of via a direct write/edit/patch call here.
-        if call.name == "task" && !result.isError && approval.approved {
+        // Same bridging for `execute_code`: a script's `tools.write_file(...)`
+        // sub-calls happen inside ExecuteCodeTool, one level down from this
+        // loop, exactly like a delegated task() sub-agent's edits — see
+        // ExecuteCodeTool.execute, which embeds the same `modified_files:`
+        // line TaskTool's digest uses.
+        if (call.name == "task" || call.name == "execute_code") && !result.isError && approval.approved {
             let subAgentModifiedFiles = TaskTool.parseModifiedFiles(fromDigest: result.content)
             if !subAgentModifiedFiles.isEmpty {
                 fileModificationToolsExecuted = true

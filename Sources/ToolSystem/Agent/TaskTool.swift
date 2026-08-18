@@ -6,6 +6,14 @@ import MLX
 import MLXLLM
 import MLXLMCommon
 
+/// Bridges `execute_code`'s dispatcher closure to a sub-agent's `AgentLoop`,
+/// which does not exist yet at the point the tool must be registered (its
+/// schema needs to be in the system prompt built before the loop is
+/// constructed) — see the `executeCodeLoopBox` use in `TaskTool.run`.
+private final class ExecuteCodeSubAgentLoopBox: @unchecked Sendable {
+    var loop: AgentLoop?
+}
+
 /// Delegates a subtask to a sub-agent with its own context window.
 public struct TaskTool: Tool {
     static let maxDescriptionCharacters = 4_000
@@ -166,7 +174,7 @@ public struct TaskTool: Tool {
         }
         switch profile {
         case .general:
-            return "You are a general-purpose sub-agent — a focused single-task worker, not a conversation partner. Read only what you need, do exactly what the task asks (find the answer, or make the change), then stop. Do NOT expand scope beyond the task or refactor unrelated code. \(outputRules)"
+            return "You are a general-purpose sub-agent — a focused single-task worker, not a conversation partner. Read only what you need, do exactly what the task asks (find the answer, or make the change), then stop. Do NOT expand scope beyond the task or refactor unrelated code. For multi-step batch work (looping over many files, transforming data between calls), prefer execute_code over repeating individual tool calls. \(outputRules)"
         case .codebaseResearch:
             return "You are the CODEBASE_RESEARCH agent. Your job is to LOCATE and prove, not to summarize vaguely. For \"where/by what is X used or called\", prefer `code_graph_explore` — its blast-radius section lists actual callers/referencers by name. For \"where is X defined\", prefer `code_search` — it returns symbol definitions only, not call sites. Both are exact code-graph lookups, faster and more precise than text search when they hit; fall back to `glob`/`grep` when they miss or the target isn't a named symbol. Use `read_file` to confirm context. ALWAYS back claims with concrete `file:line` references and short quoted snippets — never a hand-wavy overview. Do NOT edit files or run build/test commands. If something is not found, say so plainly instead of guessing. \(outputRules)"
         case .testEngineering:
@@ -178,7 +186,7 @@ public struct TaskTool: Tool {
         case .planner:
             return "You are the PLANNER. Research the codebase, then produce a concrete, actionable implementation plan and persist it with `plan_file`. Use `code_graph_explore` to scope a change accurately — its blast-radius section tells you what else depends on a symbol you're about to touch, before you commit to a plan. Your plan MUST name the exact files/symbols to change (with `file:line`), the chosen approach, and a step-by-step build order. You have `web_search`/`web_fetch` for external docs or URLs the user gave you. You MUST NOT edit files, write full implementations into your answer, or run destructive/build commands — planning only; implementation is the EXECUTOR's job. \(outputRules)"
         case .executor:
-            return "You are the EXECUTOR. Implement the requested change end-to-end: read enough surrounding code to understand it, then write/edit/patch the files and run any shell commands required. Before changing a function/method's signature or behavior, check `code_graph_explore`'s blast-radius section for its callers so you don't silently break one. MATCH the existing code's conventions and structure — do not invent new patterns. If the plan given to you looks incomplete or truncated, call `plan_file` with action 'read' to fetch the full, authoritative plan — never guess a file path under `.native-agent/` for it. After editing, search for and run any existing test that actually exercises the changed code — a clean build only proves it compiles, not that it works; if no relevant test exists or you can't run one, say so explicitly instead of reporting the change as verified. Fix what you broke. Change ONLY what the task requires; do not refactor unrelated code. \(outputRules)"
+            return "You are the EXECUTOR. Implement the requested change end-to-end: read enough surrounding code to understand it, then write/edit/patch the files and run any shell commands required. Before changing a function/method's signature or behavior, check `code_graph_explore`'s blast-radius section for its callers so you don't silently break one. MATCH the existing code's conventions and structure — do not invent new patterns. If the plan given to you looks incomplete or truncated, call `plan_file` with action 'read' to fetch the full, authoritative plan — never guess a file path under `.native-agent/` for it. After editing, search for and run any existing test that actually exercises the changed code — a clean build only proves it compiles, not that it works; if no relevant test exists or you can't run one, say so explicitly instead of reporting the change as verified. Fix what you broke. Change ONLY what the task requires; do not refactor unrelated code. For multi-step batch work (looping over many files, transforming data between calls), prefer execute_code over repeating individual tool calls. \(outputRules)"
         case .reviewer:
             return "You are the REVIEWER. Inspect the CURRENT state of the code — read files, run `build_check` if available — but NEVER edit anything. Use `code_graph_explore` to check a changed symbol's blast radius when judging whether a change is safe — a caller the diff didn't account for is a correctness bug, not a style nitpick. Check correctness (logic errors, null/edge cases, race conditions, resource leaks) and project-convention compliance. Only report a finding you are \u{2265}80% confident is a real problem after double-checking; skip stylistic nitpicks. Format each finding as `file:line — issue — suggested fix`. If the change looks correct, say so explicitly instead of inventing concerns. \(outputRules)"
         case .filesystem:
@@ -197,7 +205,7 @@ public struct TaskTool: Tool {
         }
         switch profile {
         case .general:
-            return ["read_file", "read_many", "list_dir", "glob", "grep", "code_search", "write_file", "edit_file", "bash", "todo"]
+            return ["read_file", "read_many", "list_dir", "glob", "grep", "code_search", "write_file", "edit_file", "bash", "todo", "execute_code"]
         case .codebaseResearch:
             return ["read_file", "read_many", "list_dir", "glob", "grep", "code_search", "code_graph_explore", "search_knowledge"]
         case .testEngineering:
@@ -209,7 +217,7 @@ public struct TaskTool: Tool {
         case .planner:
             return ["read_file", "read_many", "list_dir", "glob", "grep", "code_search", "code_graph_explore", "web_search", "web_fetch", "search_knowledge", "plan_file"]
         case .executor:
-            return ["read_file", "read_many", "list_dir", "glob", "grep", "write_file", "edit_file", "append_file", "patch", "bash", "code_search", "code_graph_explore", "lsp_diagnostics", "plan_file"]
+            return ["read_file", "read_many", "list_dir", "glob", "grep", "write_file", "edit_file", "append_file", "patch", "bash", "code_search", "code_graph_explore", "lsp_diagnostics", "plan_file", "execute_code"]
         case .reviewer:
             return ["read_file", "read_many", "list_dir", "glob", "grep", "code_search", "code_graph_explore", "lsp_diagnostics", "lsp_references", "build_check"]
         case .filesystem:
@@ -284,7 +292,7 @@ public struct TaskTool: Tool {
     /// writing PLAN.MD (directly, or via a delegated `planner`) is already
     /// treated as a safe, expected planning action, not a destructive one —
     /// see the `plan_file` special-casing in `AgentLoop.isDestructiveToolCall`.
-    static let mutatingToolNames: Set<String> = ["write_file", "edit_file", "append_file", "patch", "bash"]
+    static let mutatingToolNames: Set<String> = ["write_file", "edit_file", "append_file", "patch", "bash", "execute_code"]
 
     /// Whether a `task(...)` call, given its arguments, could perform a
     /// mutating action. The orchestrator must be free to delegate research
@@ -1216,6 +1224,39 @@ public struct TaskTool: Tool {
             backgroundJobs: backgroundJobs
         )
 
+        // `execute_code` ("Code Mode") needs to be registered before the
+        // system prompt is built below (so its schema/description are part
+        // of what the sub-agent sees) but its dispatcher closure needs to
+        // call back into `subAgent`, which does not exist yet at this point
+        // — `executeCodeLoopBox` bridges that ordering: the tool is
+        // registered now with a closure that reads the box, and the box is
+        // filled in right after `subAgent` is constructed below, which is
+        // still well before `processUserMessage` ever triggers a dispatch.
+        var executeCodeLoopBox: ExecuteCodeSubAgentLoopBox?
+        if sanitizedTools.contains(where: { $0.lowercased() == "execute_code" }) {
+            let loopBox = ExecuteCodeSubAgentLoopBox()
+            executeCodeLoopBox = loopBox
+            var exposedTools: [ExecuteCodeTool.ExposedTool] = []
+            for toolName in await subRegistry.toolNames where toolName != "execute_code" {
+                guard let tool = await subRegistry.tool(named: toolName) else { continue }
+                exposedTools.append(ExecuteCodeTool.ExposedTool(name: tool.name, description: tool.description, parameters: tool.parameters))
+            }
+            await subRegistry.register(ExecuteCodeTool(
+                exposedTools: exposedTools,
+                permissions: subPermissions,
+                useSandbox: useSandbox,
+                dispatcher: { toolName, toolArguments in
+                    guard let loop = loopBox.loop else {
+                        return .error("execute_code: sub-agent is not initialized yet")
+                    }
+                    // [String: Any] is not Sendable; explicit unsafe snapshot
+                    // before crossing into the sub-agent's own actor.
+                    nonisolated(unsafe) let isolatedArguments = toolArguments
+                    return await loop.executeSubToolCall(name: toolName, arguments: isolatedArguments)
+                }
+            ))
+        }
+
         // Build a specialized system prompt for the sub-agent. Uses
         // subagentToolPromptFilter so the prompt shows exactly the tools this
         // profile was registered with (subRegistry), not a curated subset.
@@ -1248,6 +1289,7 @@ public struct TaskTool: Tool {
             // silently falling back to the generic defaultInstructions.
             subAgentBaseInstructions: baseInstructions
         )
+        executeCodeLoopBox?.loop = subAgent
 
         // Puts the sub-agent in AGENT mode (not the PLAN-mode default, whose
         // "switch to AGENT mode?" framing makes no sense here) while
@@ -1661,6 +1703,14 @@ public struct TaskTool: Tool {
             }
         case "bash":
             await registry.register(BashTool(permissions: permissions, useSandbox: useSandbox, backgroundJobs: backgroundJobs))
+        case "execute_code":
+            // Registration is deferred until after the sub-agent's own
+            // AgentLoop exists (its dispatcher closure needs to call back
+            // into it) — see the `sanitizedTools.contains("execute_code")`
+            // block right after `AgentLoop(...)` is constructed in `run`.
+            // Accepting the name here just lets it pass this loop without
+            // being reported as an unknown tool.
+            break
         case "build_check":
             await registry.register(BuildCheckTool(permissions: permissions))
         case "todo":

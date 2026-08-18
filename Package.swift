@@ -101,6 +101,7 @@ let package = Package(
                 "CTreeSitterCSharp",
                 "CTreeSitterJavaScript",
                 "CTreeSitterTypeScript",
+                "CodeModeWorker",
             ],
             linkerSettings: [
                 .linkedLibrary("sqlite3")
@@ -109,6 +110,19 @@ let package = Package(
         .executableTarget(
             name: "TestGenerable",
             path: "TestSources/TestGenerable"
+        ),
+        // Minimal sibling executable for `execute_code` ("Code Mode"): runs a
+        // model-generated script in JavaScriptCore, isolated in its own
+        // process (no MLX/model loading, so it starts in milliseconds). Tool
+        // calls the script makes are proxied back to the parent MLXCoder
+        // process over a newline-delimited JSON protocol on stdio — see
+        // Sources/ToolSystem/CodeMode/CodeModeSandboxProcess.swift.
+        .executableTarget(
+            name: "CodeModeWorker",
+            path: "Sources/CodeModeWorker",
+            linkerSettings: [
+                .linkedFramework("JavaScriptCore")
+            ]
         ),
         .testTarget(
             name: "ModelEngineTests",

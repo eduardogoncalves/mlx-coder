@@ -627,6 +627,18 @@ Additional delegated input validation:
 - `description` is trimmed, must be non-empty, and is capped to 4000 characters
 - optional arguments are type-checked (`profile` string, `isolate` boolean, `isolation_directory` string)
 
+### Code Mode (`execute_code`)
+
+Sub-agents with the `executor` or `general` profile (or any profile explicitly given `execute_code` in its
+`tools` list) can also call `execute_code` instead of emitting tool calls one at a time. It runs a model-written JavaScript program — with the sub-agent's own other tools exposed as
+`await tools.<name>({...})` — in an isolated `CodeModeWorker` subprocess (no filesystem/network access of
+its own). Every `tools.*` call the script makes is proxied back and dispatched through the exact same
+permission/approval/watchdog/audit pipeline a direct tool call gets, so a script cannot use code mode to
+bypass an approval prompt or a permission denial; a denied or failed call surfaces as a thrown JavaScript
+exception. This is useful for batch/looping work (e.g. "read every file matching X and report which ones
+fail to parse") that would otherwise cost one model round trip per tool call. `execute_code` is never
+available to the top-level orchestrator and can never call itself.
+
 ### Tool Call Dialects
 
 mlx-coder auto-detects the tool call format from the model path:

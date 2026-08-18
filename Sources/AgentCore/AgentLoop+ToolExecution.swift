@@ -583,4 +583,136 @@ extension AgentLoop {
             return .error("Failed to apply change to \(call.path): \(error.localizedDescription)")
         }
     }
+
+    // MARK: - Code Mode sub-call dispatch
+
+    /// Dispatches one tool call with the same policy-check / destructive-
+    /// approval / parameter-correction / watchdog / audit pipeline
+    /// `executeToolCall` applies to a model-issued call. This is the sub-call
+    /// entry point `execute_code` scripts use (see ExecuteCodeTool) — every
+    /// `tools.write_file(...)` a script makes gets exactly the guarantees a
+    /// direct model tool call would get, so code mode cannot be used to skip
+    /// an approval prompt or a permission denial.
+    ///
+    /// Deliberately narrower than `executeToolCall`: it has no opinion on the
+    /// calling turn's read/read-only loop detection, conversation history, or
+    /// git-orchestration hookup — those are the top-level turn's concern, not
+    /// a single sub-call's. A caller that needs modified/read-file tracking
+    /// for files a script touched should parse them back out of the
+    /// `execute_code` call's own `ToolResult`, the same way `task`'s digest
+    /// already is (see the `call.name == "task"` handling in
+    /// `executeToolCall`, mirrored for `execute_code` there too).
+    func executeSubToolCall(name: String, arguments: [String: Any]) async -> ToolResult {
+        guard name != "execute_code" else {
+            return .error("execute_code cannot call itself.")
+        }
+
+        // `[String: Any]` is not Sendable; take an explicit unsafe snapshot
+        // before crossing isolation boundaries below (matches the identical
+        // workaround in executeToolCall's own tool-invocation path).
+        nonisolated(unsafe) let isolatedArguments = arguments
+
+        let call = ToolCallParser.ParsedToolCall(name: name, arguments: arguments)
+
+        let targetPath = extractPolicyTargetPath(from: arguments)
+        let policyDecision = permissions.evaluateToolPolicy(toolName: name, targetPath: targetPath)
+        if case .denied(let denyReason) = policyDecision {
+            let deniedResult = ToolResult.error(denyReason)
+            await auditLogger?.logExecutionResult(
+                toolName: name, arguments: isolatedArguments, approved: false,
+                isError: true, resultPreview: deniedResult.content
+            )
+            return deniedResult
+        }
+
+        guard let tool = await registry.tool(named: name) else {
+            let available = await registry.toolSignaturesForInference(filter: currentToolPromptFilter()).map(\.name)
+            return .error(ToolCallErrorFormatter.unknownToolMessage(attempted: name, available: available))
+        }
+
+        let isDestructive = isDestructiveToolCall(call)
+        let approval: (approved: Bool, suggestion: String?)
+        if isDestructive {
+            await hooks.emit(.permissionRequest(toolName: name, isPlanMode: mode == .plan))
+            approval = await askForToolApproval(name: name, arguments: arguments, isPlanMode: mode == .plan)
+            if approval.approved, mode == .plan {
+                await setMode(.agent, taskType: .coding)
+            }
+        } else {
+            approval = (true, nil)
+        }
+
+        guard approval.approved else {
+            let deniedResult: ToolResult = if let suggestion = approval.suggestion {
+                .error("User denied permission and provided this feedback/suggestion: \(suggestion)")
+            } else {
+                .error("User denied permission to execute this tool.")
+            }
+            if isDestructive {
+                await auditLogger?.logExecutionResult(
+                    toolName: name, arguments: isolatedArguments, approved: false,
+                    isError: true, resultPreview: deniedResult.content
+                )
+            }
+            return deniedResult
+        }
+
+        await hooks.emit(.preToolUse(toolName: name, argumentsPreview: serializedArgumentsPreview(arguments)))
+
+        let correctionResult = await ParameterCorrectionService.correct(
+            toolName: name, arguments: isolatedArguments, workspaceRoot: permissions.effectiveWorkspaceRoot
+        )
+        if correctionResult.wasCorrected {
+            await auditLogger?.logParameterCorrection(
+                toolName: name,
+                originalArgumentsJSON: serializedArgumentsPreview(arguments),
+                correctedArgumentsJSON: serializedArgumentsPreview(correctionResult.correctedArguments),
+                corrections: correctionResult.corrections
+            )
+        }
+
+        let missingRequiredArgs = LoopDetectionService.missingRequiredArgumentNames(
+            required: tool.parameters.required,
+            arguments: correctionResult.correctedArguments
+        )
+
+        var result: ToolResult
+        if !missingRequiredArgs.isEmpty {
+            result = .error(ToolCallErrorFormatter.missingRequiredMessage(
+                toolName: name,
+                missing: missingRequiredArgs,
+                expected: Array(tool.parameters.properties?.keys ?? [String: PropertySchema]().keys),
+                provided: Array(correctionResult.correctedArguments.keys)
+            ))
+        } else if isDestructive && dryRun {
+            result = .success("Dry-run mode: skipped execution of destructive tool '\(name)'. Arguments: \(correctionResult.correctedArguments)")
+        } else {
+            nonisolated(unsafe) let isolatedExecutionArguments = correctionResult.correctedArguments
+            let watchdogSeconds = ToolWatchdogConfig.seconds
+            let invoke: @Sendable () async throws -> ToolResult = {
+                if let progressTool = tool as? ProgressReportingTool {
+                    return try await progressTool.execute(arguments: isolatedExecutionArguments) { _ in }
+                }
+                return try await tool.execute(arguments: isolatedExecutionArguments)
+            }
+            do {
+                result = try await runWithToolWatchdog(seconds: watchdogSeconds, toolName: name, operation: invoke)
+            } catch let timeout as ToolWatchdogTimeout {
+                result = .error("Tool '\(timeout.toolName)' exceeded the \(Int(timeout.seconds))s watchdog and was cancelled.")
+            } catch {
+                result = .error("Tool execution failed: \(error.localizedDescription)")
+            }
+        }
+
+        await hooks.emit(.postToolUse(toolName: name, isError: result.isError, resultPreview: String(result.content.prefix(220))))
+
+        if isDestructive {
+            await auditLogger?.logExecutionResult(
+                toolName: name, arguments: isolatedArguments, approved: true,
+                isError: result.isError, resultPreview: result.content
+            )
+        }
+
+        return result
+    }
 }

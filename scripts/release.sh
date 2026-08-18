@@ -332,6 +332,15 @@ if $BUILD_ONLY; then
       log_warn "Could not find default.metallib in Xcode Release output. MLX may fail at runtime."
     fi
 
+    CODE_MODE_WORKER_SOURCE="${REPO_ROOT}/.build/release/cli/CodeModeWorker"
+    if [[ -f "$CODE_MODE_WORKER_SOURCE" ]]; then
+      run cp "$CODE_MODE_WORKER_SOURCE" "${DEV_BIN_DIR}/CodeModeWorker"
+      run chmod +x "${DEV_BIN_DIR}/CodeModeWorker"
+      log_ok "Colocated CodeModeWorker (execute_code) with the dev binary"
+    else
+      log_warn "Could not find CodeModeWorker in build-and-release.sh output. execute_code will be unavailable."
+    fi
+
     log_info "Smoke-testing binary (--help)…"
     "$BINARY_PATH" --help &>/dev/null || {
       log_error "Binary smoke test failed – check build output."
@@ -442,6 +451,31 @@ else
     log_ok "Colocated Metal libraries with binary (default.metallib and mlx.metallib)"
   else
     log_warn "Could not find default.metallib in Xcode Release output. MLX may fail at runtime."
+  fi
+  # --------------------------------
+
+  # --- CodeModeWorker (execute_code) ---
+  # A dependency-free sibling executable (see Package.swift) — not linked
+  # into MLXCoder, so `-scheme MLXCoder` above never builds it. Built as its
+  # own scheme, reusing the same derived-data dir, and colocated with the
+  # main binary the same way ExecuteCodeTool's runtime lookup expects.
+  log_info "Building CodeModeWorker (execute_code)"
+  run env "${BUILD_ENV[@]}" \
+    xcodebuild \
+      -scheme CodeModeWorker \
+      -configuration Release \
+      -destination 'platform=macOS,arch=arm64' \
+      -derivedDataPath "${XCODE_DERIVED_DATA}" \
+      -skipPackagePluginValidation \
+      -quiet \
+      build
+  CODE_MODE_WORKER_PATH="${XCODE_DERIVED_DATA}/Build/Products/Release/CodeModeWorker"
+  if [[ -f "$CODE_MODE_WORKER_PATH" ]]; then
+    run cp "$CODE_MODE_WORKER_PATH" "${BINARY_DIR}/CodeModeWorker"
+    run chmod +x "${BINARY_DIR}/CodeModeWorker"
+    log_ok "Colocated CodeModeWorker with binary"
+  else
+    log_warn "Could not find CodeModeWorker in Xcode Release output. execute_code will be unavailable."
   fi
   # --------------------------------
 

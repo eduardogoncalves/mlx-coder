@@ -156,6 +156,46 @@ build_arch() {
     BUILT_BINARY_PATH="$built_binary"
 }
 
+# `execute_code`'s CodeModeWorker is a separate, dependency-free executable
+# product (see Package.swift) — `-scheme "$SCHEME_NAME"` above only builds
+# MLXCoder and what it depends on, which does NOT include CodeModeWorker
+# since nothing in MLXCoder declares a target dependency on it (deliberately:
+# it must stay a standalone process, not linked into the main binary). It has
+# to be built and shipped as its own step, colocated with the main binary so
+# ExecuteCodeTool's sibling-of-executable lookup finds it at runtime.
+build_code_mode_worker() {
+    local target_arch="$1"
+    local derived_data="$2"
+
+    log "Building CodeModeWorker for ${target_arch}"
+
+    local toolchain_args=()
+    if [[ -n "${TOOLCHAINS:-}" ]]; then
+        toolchain_args=(-toolchain "$TOOLCHAINS")
+    fi
+    local quiet_flag=()
+    [[ "$CLEAN" != "1" ]] && quiet_flag=(-quiet)
+
+    if ! xcodebuild \
+        ${toolchain_args[@]+"${toolchain_args[@]}"} \
+        -scheme CodeModeWorker \
+        -configuration Release \
+        -destination "platform=macOS,arch=${target_arch}" \
+        -derivedDataPath "$derived_data" \
+        -clonedSourcePackagesDirPath "$PACKAGE_CHECKOUTS_DIR" \
+        -skipPackagePluginValidation \
+        -disableAutomaticPackageResolution \
+        -onlyUsePackageVersionsFromResolvedFile \
+        ${quiet_flag[@]+"${quiet_flag[@]}"} \
+        build >&2; then
+        fail "xcodebuild failed building CodeModeWorker for architecture ${target_arch}"
+    fi
+
+    local built_binary="${derived_data}/Build/Products/Release/CodeModeWorker"
+    [[ -f "$built_binary" ]] || fail "Expected CodeModeWorker binary not found: ${built_binary}"
+    echo "$built_binary"
+}
+
 inject_version() {
     local version_file="Sources/MLXCoder/MLXCoderCLI.swift"
     log "Injecting version ${VERSION} into ${version_file}"
@@ -171,6 +211,17 @@ build_binary() {
     build_arch arm64 "$BUILD_DIR_ARM64"
     local arm_bin="$BUILT_BINARY_PATH"
     cp "$arm_bin" "$output_bin"
+    chmod +x "$output_bin"
+    echo "$output_bin"
+}
+
+build_code_mode_worker_binary() {
+    local output_bin="${WORK_DIR}/CodeModeWorker"
+    # Reuses BUILD_DIR_ARM64 (already resolved by build_arch above) so this
+    # doesn't re-resolve package dependencies from scratch.
+    local worker_bin
+    worker_bin="$(build_code_mode_worker arm64 "$BUILD_DIR_ARM64")"
+    cp "$worker_bin" "$output_bin"
     chmod +x "$output_bin"
     echo "$output_bin"
 }
@@ -194,6 +245,7 @@ copy_shader_bundle() {
 stage_cli_payload() {
     local built_binary="$1"
     local shader_bundle="$2"
+    local code_mode_worker_binary="$3"
 
     log "Staging CLI payload"
     rm -rf "$CLI_STAGING_DIR" "$PKG_ROOT_DIR"
@@ -201,16 +253,18 @@ stage_cli_payload() {
 
     cp "$built_binary" "${CLI_STAGING_DIR}/${CLI_NAME}"
     cp -R "$shader_bundle" "${CLI_STAGING_DIR}/"
+    cp "$code_mode_worker_binary" "${CLI_STAGING_DIR}/CodeModeWorker"
 
     cp "$built_binary" "${PKG_ROOT_DIR}/usr/local/bin/${CLI_NAME}"
     cp -R "$shader_bundle" "${PKG_ROOT_DIR}/usr/local/bin/"
+    cp "$code_mode_worker_binary" "${PKG_ROOT_DIR}/usr/local/bin/CodeModeWorker"
     ok "CLI payload staged"
 }
 
 create_cli_archive() {
     log "Creating CLI tar.gz archive"
     rm -f "$CLI_ARCHIVE"
-    tar -C "$CLI_STAGING_DIR" -czf "$CLI_ARCHIVE" "$CLI_NAME" mlx-swift_Cmlx.bundle
+    tar -C "$CLI_STAGING_DIR" -czf "$CLI_ARCHIVE" "$CLI_NAME" mlx-swift_Cmlx.bundle CodeModeWorker
     ok "Created archive: ${CLI_ARCHIVE}"
 }
 
@@ -259,9 +313,10 @@ generate_checksum_and_notes() {
 
 1. Extract archive:
    tar -xzf ${archive_basename}
-2. Copy files to a PATH directory (keep bundle adjacent to binary):
+2. Copy files to a PATH directory (keep the bundle and CodeModeWorker adjacent to the binary):
    sudo cp ${CLI_NAME} /usr/local/bin/${CLI_NAME}
    sudo cp -R mlx-swift_Cmlx.bundle /usr/local/bin/
+   sudo cp CodeModeWorker /usr/local/bin/CodeModeWorker
 
 ## Verify
 
@@ -280,9 +335,11 @@ verify_artifacts() {
 
     tar -tzf "$CLI_ARCHIVE" | grep -q "^${CLI_NAME}$" || fail "CLI archive missing ${CLI_NAME}"
     tar -tzf "$CLI_ARCHIVE" | grep -q "^mlx-swift_Cmlx.bundle/$" || fail "CLI archive missing mlx-swift_Cmlx.bundle"
+    tar -tzf "$CLI_ARCHIVE" | grep -q "^CodeModeWorker$" || fail "CLI archive missing CodeModeWorker"
 
     pkgutil --payload-files "$PKG_FILE" | grep -q "^\./usr/local/bin/${CLI_NAME}$" || fail "pkg missing ${CLI_NAME} payload"
     pkgutil --payload-files "$PKG_FILE" | grep -qE "^\./usr/local/bin/mlx-swift_Cmlx\.bundle/.*default\.metallib$" || fail "pkg missing MLX shader payload"
+    pkgutil --payload-files "$PKG_FILE" | grep -q "^\./usr/local/bin/CodeModeWorker$" || fail "pkg missing CodeModeWorker payload"
 
     "${CLI_STAGING_DIR}/${CLI_NAME}" --version >/dev/null
     ok "Artifact verification passed"
@@ -296,11 +353,12 @@ main() {
     require_tools
     inject_version
 
-    local output_binary shader_bundle
+    local output_binary shader_bundle code_mode_worker_binary
     output_binary="$(build_binary)" || exit $?
+    code_mode_worker_binary="$(build_code_mode_worker_binary)" || exit $?
     shader_bundle="$(copy_shader_bundle)" || exit $?
 
-    stage_cli_payload "$output_binary" "$shader_bundle"
+    stage_cli_payload "$output_binary" "$shader_bundle" "$code_mode_worker_binary"
     create_cli_archive
     create_pkg_installer
     generate_checksum_and_notes
