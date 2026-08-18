@@ -35,7 +35,7 @@ public struct ExecuteCodeTool: Tool {
         properties: [
             "code": PropertySchema(
                 type: "string",
-                description: "A JavaScript program, run as the body of an async function (top-level `await` and `return` are available). Call your other tools via the global `tools` object described in this tool's description."
+                description: "A JAVASCRIPT program (not Python, not any other language), run as the body of an async function (top-level `await` and `return` are available). Call your other tools via the global `tools` object described in this tool's description — e.g. `await tools.read_file({path: \"x\"})`, `let x = 1; if (x) { ... }`."
             ),
         ],
         required: ["code"]
@@ -45,20 +45,17 @@ public struct ExecuteCodeTool: Tool {
     /// itself (defensive: a script cannot spawn a nested code-mode sandbox).
     private let exposedTools: [ExposedTool]
     private let permissions: PermissionEngine
-    private let useSandbox: Bool
     private let timeoutSeconds: Double
     private let dispatcher: @Sendable (String, [String: Any]) async -> ToolResult
 
     public init(
         exposedTools: [ExposedTool],
         permissions: PermissionEngine,
-        useSandbox: Bool,
         timeoutSeconds: Double = CodeModeSandboxProcess.defaultTimeoutSeconds,
         dispatcher: @escaping @Sendable (String, [String: Any]) async -> ToolResult
     ) {
         self.exposedTools = exposedTools.filter { $0.name != "execute_code" }
         self.permissions = permissions
-        self.useSandbox = useSandbox
         self.timeoutSeconds = timeoutSeconds
         self.dispatcher = dispatcher
         self.description = ExecuteCodeTool.buildDescription(exposedTools: self.exposedTools)
@@ -129,7 +126,6 @@ public struct ExecuteCodeTool: Tool {
             code: code,
             exposedTools: exposedTools.map { ($0.name, $0.description, $0.parameters) },
             workspaceRoot: permissions.effectiveWorkspaceRoot,
-            useSandbox: useSandbox,
             timeoutSeconds: timeoutSeconds,
             dispatch: trackingDispatcher
         )

@@ -1244,7 +1244,6 @@ public struct TaskTool: Tool {
             await subRegistry.register(ExecuteCodeTool(
                 exposedTools: exposedTools,
                 permissions: subPermissions,
-                useSandbox: useSandbox,
                 dispatcher: { toolName, toolArguments in
                     guard let loop = loopBox.loop else {
                         return .error("execute_code: sub-agent is not initialized yet")

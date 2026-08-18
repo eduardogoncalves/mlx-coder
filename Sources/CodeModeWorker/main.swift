@@ -187,6 +187,18 @@ let wrapped = """
 
 context.evaluateScript(wrapped)
 
+// Fail fast on a syntax/parse error in the wrapper (most commonly: the
+// model wrote code in the wrong language, e.g. Python instead of
+// JavaScript). When `wrapped` fails to parse, NONE of its `var __done = ...`
+// declarations ever ran, so polling for them below would only ever produce
+// a second, more confusing error ("Can't find variable: __done") on every
+// iteration until the poll budget is exhausted — report the real syntax
+// error immediately instead.
+if let uncaughtException {
+    writeLine(["type": "done", "valueJSON": "null", "logs": capturedLogs, "invalidOutput": false, "error": ["message": uncaughtException]], to: stdout)
+    exit(0)
+}
+
 // Poll for completion, pumping the run loop each iteration so JSC's
 // microtask queue (which on Apple platforms is dispatched via libdispatch,
 // not drained inline by `evaluateScript`) gets a chance to run the
@@ -203,6 +215,7 @@ for _ in 0..<20_000 {
         resultDict = dict
         break
     }
+    if uncaughtException != nil { break }
     RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.001))
 }
 

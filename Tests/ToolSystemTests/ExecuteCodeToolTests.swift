@@ -58,7 +58,6 @@ final class ExecuteCodeToolTests: XCTestCase {
         ExecuteCodeTool(
             exposedTools: exposedTools,
             permissions: PermissionEngine(workspaceRoot: workspace.path),
-            useSandbox: false,
             timeoutSeconds: timeoutSeconds,
             dispatcher: dispatcher
         )
@@ -204,6 +203,37 @@ final class ExecuteCodeToolTests: XCTestCase {
         let tool = makeTool(workspace: workspace) { _, _ in .success("") }
         let result = try await tool.execute(arguments: [:])
         XCTAssertTrue(result.isError)
+    }
+
+    // The worker's own launch is never Seatbelt-wrapped (see the doc
+    // comment on CodeModeSandboxProcess.run for why — a linker-signed
+    // worker binary launched under a Seatbelt profile that denies
+    // `file-read*` on its own containing path fails to exec at all). This
+    // test covers the sub-call side of sandboxing instead: a REAL,
+    // Seatbelt-wrapped BashTool invoked from inside a script.
+    func testRealSandboxedBashSubCallSucceeds() async throws {
+        guard ExecuteCodeToolTests.locateCodeModeWorkerBinary() != nil else {
+            throw XCTSkip("CodeModeWorker binary not built — run `swift build` first")
+        }
+        let workspace = try makeTempWorkspace()
+        defer { try? FileManager.default.removeItem(at: workspace) }
+        try FileManager.default.createDirectory(at: workspace.appendingPathComponent("fixtures"), withIntermediateDirectories: true)
+
+        let permissions = PermissionEngine(workspaceRoot: workspace.path)
+        let bashTool = BashTool(permissions: permissions, useSandbox: true)
+        let exposed = [ExecuteCodeTool.ExposedTool(name: "bash", description: "run a shell command", parameters: JSONSchema())]
+
+        let tool = ExecuteCodeTool(
+            exposedTools: exposed,
+            permissions: permissions,
+            timeoutSeconds: 20,
+            dispatcher: { name, args in
+                XCTAssertEqual(name, "bash")
+                return (try? await bashTool.execute(arguments: args)) ?? .error("bash threw")
+            }
+        )
+        let result = try await tool.execute(arguments: ["code": "const out = await tools.bash({command: \"ls fixtures\", timeout: 10}); return out;"])
+        XCTAssertFalse(result.isError, "real sandboxed bash sub-call failed: \(result.content)")
     }
 }
 

@@ -96,7 +96,6 @@ public enum CodeModeSandboxProcess {
         code: String,
         exposedTools: [(name: String, description: String, parameters: JSONSchema)],
         workspaceRoot: String,
-        useSandbox: Bool,
         timeoutSeconds: Double = defaultTimeoutSeconds,
         maxCalls: Int = 200,
         dispatch: @escaping @Sendable (String, [String: Any]) async -> ToolResult
@@ -109,16 +108,29 @@ public enum CodeModeSandboxProcess {
             )
         }
 
+        // Deliberately launched directly — NOT Seatbelt-wrapped like
+        // BashTool wraps a shell command. Two reasons:
+        //   1. The worker's JS sandbox has zero direct file/network
+        //      primitives bound into it; the only way a script affects
+        //      anything is via `tools.*` RPC calls, which are dispatched
+        //      back through the real, already-sandboxed pipeline (e.g. a
+        //      `tools.bash(...)` call still goes through BashTool's own
+        //      Seatbelt wrap). Wrapping the worker's own launch adds no
+        //      real security.
+        //   2. It's actively broken for the binary that actually ships:
+        //      `xcodebuild`-produced executables are `linker-signed` (a
+        //      newer ad-hoc signing mode), and executing one from under a
+        //      Seatbelt profile that denies `file-read*` on its own
+        //      containing path (as SandboxEngine's profile does for
+        //      everything under $HOME/`/Users` outside the workspace,
+        //      which is exactly where this binary lives) fails at exec
+        //      time with `EPERM` ("operation not permitted") — reproduced
+        //      directly: the same profile launches a plain `swift build`
+        //      binary (not linker-signed) fine, and launches this exact
+        //      binary fine once copied outside `/Users`, but fails on the
+        //      real installed binary every time.
         let process = Process()
-        if useSandbox, SandboxEngine.isWorkspaceRootSandboxSafe(workspaceRoot) {
-            let sandboxEngine = SandboxEngine(networkPolicy: .deny)
-            let escapedWorkerPath = workerURL.path.replacingOccurrences(of: "'", with: "'\\''")
-            let wrapped = sandboxEngine.wrap(command: "'\(escapedWorkerPath)'", workspaceRoot: workspaceRoot)
-            process.executableURL = URL(fileURLWithPath: "/bin/zsh")
-            process.arguments = ["-c", wrapped]
-        } else {
-            process.executableURL = workerURL
-        }
+        process.executableURL = workerURL
         process.currentDirectoryURL = URL(fileURLWithPath: workspaceRoot)
         process.environment = [:]
 
@@ -128,6 +140,23 @@ public enum CodeModeSandboxProcess {
         process.standardInput = stdinPipe
         process.standardOutput = stdoutPipe
         process.standardError = stderrPipe
+
+        // Must drain stderr concurrently, not just stdout — an undrained
+        // pipe fills its kernel buffer (~64KB on macOS) and blocks any
+        // further write(2) from the child forever (see ProcessIO.swift's
+        // docs on this exact class of bug, which every other subprocess
+        // call site in this codebase already guards against). Captured
+        // (not discarded) so a crash can be diagnosed instead of just
+        // reported as "crashed or was killed" with no further information.
+        let stderrCollector = PipeOutputCollector()
+        stderrPipe.fileHandleForReading.readabilityHandler = { handle in
+            let data = handle.availableData
+            if data.isEmpty {
+                handle.readabilityHandler = nil
+                return
+            }
+            stderrCollector.appendStderr(data)
+        }
 
         do {
             try process.run()
@@ -240,11 +269,18 @@ public enum CodeModeSandboxProcess {
 
         try? stdinPipe.fileHandleForWriting.close()
         ProcessTreeKiller.killTree(root: childPID, signal: SIGTERM)
+        stderrPipe.fileHandleForReading.readabilityHandler = nil
+        let tailStderr = ProcessIO.nonBlockingDrain(stderrPipe.fileHandleForReading)
+        if !tailStderr.isEmpty { stderrCollector.appendStderr(tailStderr) }
 
         guard let finalMessage = box.finalMessage else {
+            let stderrText = String(data: stderrCollector.stderrSnapshot(), encoding: .utf8) ?? ""
+            let suffix = stderrText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                ? ""
+                : " stderr: \(stderrText.prefix(2000))"
             return CodeModeExecutionResult(
                 valueJSON: nil, logs: [], invalidOutput: false,
-                errorMessage: "execute_code: worker exited without a result (crashed or was killed)",
+                errorMessage: "execute_code: worker exited without a result (crashed or was killed).\(suffix)",
                 timedOut: false
             )
         }

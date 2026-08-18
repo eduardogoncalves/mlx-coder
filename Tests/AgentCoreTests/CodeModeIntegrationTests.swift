@@ -96,7 +96,6 @@ final class CodeModeIntegrationTests: XCTestCase {
         let executeCodeTool = ExecuteCodeTool(
             exposedTools: [readFileSignature],
             permissions: PermissionEngine(workspaceRoot: workspace.path),
-            useSandbox: false,
             dispatcher: { name, arguments in
                 nonisolated(unsafe) let isolatedArguments = arguments
                 return await subAgent.executeSubToolCall(name: name, arguments: isolatedArguments)
@@ -133,7 +132,6 @@ final class CodeModeIntegrationTests: XCTestCase {
         let executeCodeTool = ExecuteCodeTool(
             exposedTools: [readFileSignature],
             permissions: PermissionEngine(workspaceRoot: workspace.path),
-            useSandbox: false,
             dispatcher: { name, arguments in
                 nonisolated(unsafe) let isolatedArguments = arguments
                 return await subAgent.executeSubToolCall(name: name, arguments: isolatedArguments)
@@ -154,5 +152,42 @@ final class CodeModeIntegrationTests: XCTestCase {
         let (subAgent, _) = await makeSubAgentWithExecuteCode(workspace: workspace, extraTools: [])
         let result = await subAgent.executeSubToolCall(name: "execute_code", arguments: ["code": "return 1;"])
         XCTAssertTrue(result.isError)
+    }
+
+    // The full real path with a REAL, Seatbelt-wrapped BashTool sub-call,
+    // dispatched through the actor-isolated AgentLoop.executeSubToolCall
+    // (reentrant on the same actor that's currently running execute_code's
+    // own outer call). The worker's own launch is never Seatbelt-wrapped —
+    // see the doc comment on CodeModeSandboxProcess.run for why.
+    func testFullPathWithRealSandboxedBashSucceeds() async throws {
+        guard CodeModeIntegrationTests.locateCodeModeWorkerBinary() != nil else {
+            throw XCTSkip("CodeModeWorker binary not built — run `swift build` first")
+        }
+        let workspace = try makeTempWorkspace()
+        defer { try? FileManager.default.removeItem(at: workspace) }
+        try FileManager.default.createDirectory(at: workspace.appendingPathComponent("fixtures"), withIntermediateDirectories: true)
+        try "{}".write(to: workspace.appendingPathComponent("fixtures/a.json"), atomically: true, encoding: .utf8)
+
+        let bashTool = BashTool(permissions: PermissionEngine(workspaceRoot: workspace.path), useSandbox: true)
+        let (subAgent, _) = await makeSubAgentWithExecuteCode(workspace: workspace, extraTools: [bashTool])
+
+        let bashSignature = ExecuteCodeTool.ExposedTool(
+            name: "bash",
+            description: "run a shell command",
+            parameters: JSONSchema(type: "object", properties: ["command": PropertySchema(type: "string")], required: ["command"])
+        )
+        let executeCodeTool = ExecuteCodeTool(
+            exposedTools: [bashSignature],
+            permissions: PermissionEngine(workspaceRoot: workspace.path),
+            timeoutSeconds: 20,
+            dispatcher: { name, arguments in
+                nonisolated(unsafe) let isolatedArguments = arguments
+                return await subAgent.executeSubToolCall(name: name, arguments: isolatedArguments)
+            }
+        )
+
+        let code = "const out = await tools.bash({command: \"ls fixtures\", timeout: 10}); return out;"
+        let result = try await executeCodeTool.execute(arguments: ["code": code])
+        XCTAssertFalse(result.isError, "full real path failed: \(result.content)")
     }
 }
